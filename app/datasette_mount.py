@@ -87,11 +87,17 @@ class _TokenMiddleware:
             await send({"type": "http.response.body", "body": b'{"detail":"unauthorized"}'})
             return
 
-        # Datasette internally does root_path + path for routing. Starlette already
-        # stripped /datasette from path before calling us, so root_path must be cleared
-        # to avoid Datasette seeing /datasette/-/versions.json and treating "datasette"
-        # as a database name. base_url="/datasette/" in settings handles link generation.
-        scope = {**scope, "root_path": ""}
+        # Starlette strips the mount prefix (/datasette) from scope["path"] but NOT from
+        # scope["raw_path"]. Datasette 0.65 prefers raw_path when present, which causes
+        # it to see the full /datasette/health/activities path and then prepend base_url
+        # again, doubling the prefix in generated links. Strip raw_path to match path.
+        raw_path = scope.get("raw_path")
+        if raw_path:
+            # raw_path includes the query string; preserve it after stripping the prefix
+            prefix = b"/datasette"
+            if raw_path.startswith(prefix):
+                raw_path = raw_path[len(prefix):] or b"/"
+        scope = {**scope, "root_path": "", "raw_path": raw_path}
 
         cookie_header = (
             f"{_COOKIE_NAME}={self._cookie_val}; "
