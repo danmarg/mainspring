@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+.env
+.env.*
+*.db
+*.db-wal
+*.db-shm
+analysis/*.db
+*.swp
+*.swo
+.claude/
