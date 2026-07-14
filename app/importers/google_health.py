@@ -207,20 +207,26 @@ def _daily_rollup(conn, data_type: str, d: date, tokens: dict) -> Any | None:
 
 def _list_datapoints(conn, data_type: str, d: date, tokens: dict) -> Any | None:
     # dataPoints.list is GET with AIP-160 filter.
-    # Filter field name = snake_case of data type (not kebab-case used in URL path).
-    # daily-* types support date equality; session types use interval.start_time range.
+    # Filter field name = snake_case of the data type (not the kebab-case URL segment).
+    # Each kind has different filterable fields:
+    #   daily-*   → {type}.date >= / <
+    #   sleep     → sleep.interval.civil_end_time (only end_time is filterable for sleep)
+    #   exercise  → exercise.interval.civil_start_time
     path = f"/users/me/dataTypes/{data_type}/dataPoints"
     field = data_type.replace("-", "_")
+    next_day = d + timedelta(days=1)
     if data_type.startswith("daily-"):
-        # daily-* types filter by date range (= not supported, must use >= AND <)
-        next_day = d + timedelta(days=1)
         f = f'{field}.date >= "{d.isoformat()}" AND {field}.date < "{next_day.isoformat()}"'
-    else:
-        # Session types (sleep, exercise): only civil_end_time is filterable, not start_time
-        next_day = d + timedelta(days=1)
+    elif data_type == "sleep":
         f = (
-            f'{field}.interval.civil_end_time >= "{d.isoformat()}T00:00:00" '
-            f'AND {field}.interval.civil_end_time < "{next_day.isoformat()}T00:00:00"'
+            f'sleep.interval.civil_end_time >= "{d.isoformat()}T00:00:00" '
+            f'AND sleep.interval.civil_end_time < "{next_day.isoformat()}T00:00:00"'
+        )
+    else:
+        # exercise and any future session types: filter by civil_start_time
+        f = (
+            f'{field}.interval.civil_start_time >= "{d.isoformat()}T00:00:00" '
+            f'AND {field}.interval.civil_start_time < "{next_day.isoformat()}T00:00:00"'
         )
     return _get(conn, path, {"filter": f}, tokens)
 
