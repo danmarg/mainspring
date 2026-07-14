@@ -145,10 +145,40 @@ def _post(conn, path: str, body: dict, tokens: dict) -> Any | None:
                 return None
             else:
                 body_text = e.read().decode(errors="replace")
-                log.warning("google_health: %s returned %s: %s", path, e.code, body_text[:200])
+                log.warning("google_health: %s returned %s: %s", path, e.code, body_text)
                 return None
         except Exception as exc:
             log.warning("google_health: %s failed: %s", path, exc)
+            return None
+    return None
+
+
+def _get(conn, path: str, params: dict, tokens: dict) -> Any | None:
+    """GET from Google Health API, auto-refreshing on 401."""
+    for attempt in range(2):
+        query = urllib.parse.urlencode(params)
+        req = urllib.request.Request(
+            f"{API_BASE}{path}?{query}",
+            headers={"Authorization": f"Bearer {tokens['access_token']}"},
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and attempt == 0:
+                tokens = _refresh(conn, tokens)
+            elif e.code == 429:
+                log.warning("google_health: rate limited on GET %s", path)
+                return None
+            elif e.code == 404:
+                log.debug("google_health: no data at GET %s", path)
+                return None
+            else:
+                body_text = e.read().decode(errors="replace")
+                log.warning("google_health: GET %s returned %s: %s", path, e.code, body_text)
+                return None
+        except Exception as exc:
+            log.warning("google_health: GET %s failed: %s", path, exc)
             return None
     return None
 
@@ -168,12 +198,20 @@ def _daily_rollup(conn, data_type: str, d: date, tokens: dict) -> Any | None:
 
 
 def _list_datapoints(conn, data_type: str, d: date, tokens: dict) -> Any | None:
-    path = f"/users/me/dataTypes/{data_type}/dataPoints:list"
-    next_day = d + timedelta(days=1)
-    return _post(conn, path, {
-        "startTime": f"{d.isoformat()}T00:00:00Z",
-        "endTime":   f"{next_day.isoformat()}T00:00:00Z",
-    }, tokens)
+    # dataPoints.list is GET with AIP-160 filter.
+    # Filter field name = snake_case of data type (not kebab-case used in URL path).
+    # daily-* types support date equality; session types use interval.start_time range.
+    path = f"/users/me/dataTypes/{data_type}/dataPoints"
+    field = data_type.replace("-", "_")
+    if data_type.startswith("daily-"):
+        f = f'{field}.date = "{d.isoformat()}"'
+    else:
+        next_day = d + timedelta(days=1)
+        f = (
+            f'{field}.interval.start_time >= "{d.isoformat()}T00:00:00Z" '
+            f'AND {field}.interval.start_time < "{next_day.isoformat()}T00:00:00Z"'
+        )
+    return _get(conn, path, {"filter": f}, tokens)
 
 
 # ── parsers ───────────────────────────────────────────────────────────────────
