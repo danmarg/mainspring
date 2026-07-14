@@ -463,5 +463,33 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
             if _upsert_activity(conn, activity):
                 rows_upserted += 1
 
+    # suggested/scheduled workouts — monthly endpoint, call once per unique month in window
+    year_months = sorted({(d.year, d.month) for d in dates})
+    for year, month in year_months:
+        ym_label = f"{year}-{month:02d}"
+        data = _safe(
+            lambda y=year, m=month: client.get_scheduled_workouts(y, m),
+            f"get_scheduled_workouts({ym_label})",
+        )
+        if not data:
+            continue
+        items = data if isinstance(data, list) else data.get("workouts", [data])
+        _store_raw(conn, "get_scheduled_workouts", data)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            # field name candidates vary by firmware/API version — try several
+            item_date = (
+                item.get("date")
+                or item.get("scheduledDate")
+                or item.get("calendarDate")
+            )
+            if not item_date:
+                continue
+            item_date = item_date[:10]  # trim to YYYY-MM-DD if datetime
+            _store_raw(conn, "scheduled_workout", item, item_date)
+            if _upsert_suggested_workout(conn, item_date, item):
+                rows_upserted += 1
+
     conn.commit()
     return {"skipped": False, "rows_upserted": rows_upserted, "dates": [d.isoformat() for d in dates]}
