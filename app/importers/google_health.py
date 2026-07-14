@@ -346,15 +346,25 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
                           float(duration_ms) / 60000, now)
         rows += 1
 
-    stages = sleep_data.get("stages", {})
+    # stages is a list of {type: str, durationMs: int}; type values like "DEEP", "REM", "LIGHT"
+    stages_raw = sleep_data.get("stages", [])
+    if isinstance(stages_raw, dict):
+        # defensive: handle old assumed shape
+        stage_totals = {k.upper(): v for k, v in stages_raw.items()}
+    else:
+        stage_totals: dict[str, float] = {}
+        for s in stages_raw:
+            t = str(s.get("type", "")).upper()
+            stage_totals[t] = stage_totals.get(t, 0) + (s.get("durationMs") or 0)
+
     stage_map = [
-        ("deepSleepDurationMs", "sleep_deep_min"),
-        ("remSleepDurationMs",  "sleep_rem_min"),
-        ("lightSleepDurationMs", "sleep_light_min"),
+        ("DEEP",  "sleep_deep_min"),
+        ("REM",   "sleep_rem_min"),
+        ("LIGHT", "sleep_light_min"),
     ]
-    for key, metric in stage_map:
-        val = stages.get(key)
-        if val is not None:
+    for stage_key, metric in stage_map:
+        val = stage_totals.get(stage_key)
+        if val:
             upsert_raw_metric(conn, date_str, SOURCE, metric, float(val) / 60000, now)
             rows += 1
 
