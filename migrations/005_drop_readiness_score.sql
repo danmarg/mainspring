@@ -1,0 +1,2 @@
+-- readiness_score column drop is handled in db.py:_drop_legacy_columns()
+-- because SQLite has no "DROP COLUMN IF EXISTS" syntax.
