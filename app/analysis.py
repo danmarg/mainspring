@@ -3,7 +3,7 @@
 import statistics
 from datetime import date, timedelta
 
-DEFAULT_INPUTS = ["alcohol_units", "caffeine_mg", "calories_estimated", "weight_kg"]
+DEFAULT_INPUTS = ["alcohol_units", "caffeine_mg", "calories_estimated", "weight_kg", "rpe"]
 DEFAULT_OUTPUTS = ["hrv", "sleep_score", "body_battery_high", "resting_hr", "stress_avg"]
 
 

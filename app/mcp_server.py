@@ -238,6 +238,7 @@ def get_daily_metrics(
                    acute_training_load, chronic_training_load, training_load_ratio,
                    caffeine_mg, alcohol_units, calories_estimated,
                    weight_kg, bp_systolic, bp_diastolic, bp_pulse,
+                   rpe,
                    source_flags_json
             FROM daily_metrics
             WHERE date BETWEEN ? AND ?
@@ -275,7 +276,8 @@ def get_daily_metrics(
             "bp_systolic": r[24],
             "bp_diastolic": r[25],
             "bp_pulse": r[26],
-            "sources": json.loads(r[27]) if r[27] else {},
+            "rpe": r[27],
+            "sources": json.loads(r[28]) if r[28] else {},
         }
         for r in rows
     ]
@@ -438,17 +440,137 @@ def get_correlations(
 
 
 @mcp.tool()
+def log_rpe(
+    rpe: int,
+    activity_type: Optional[str] = None,
+    notes: Optional[str] = None,
+    date: Optional[str] = None,
+) -> str:
+    """Log perceived exertion (RPE 1–10) for today's workout.
+    activity_type: e.g. 'running', 'cycling', 'strength'. date defaults to today (YYYY-MM-DD).
+    Use after a workout to capture subjective effort — feeds correlation analysis and
+    workout context (e.g. 'yesterday was RPE 8; HRV historically drops after hard efforts')."""
+    if not 1 <= rpe <= 10:
+        return "Error: rpe must be between 1 and 10"
+    event_date = date or _date_or_today(None)
+    event_ts = f"{event_date}T23:59:00+00:00"
+    desc = f"RPE {rpe}/10" + (f" — {activity_type}" if activity_type else "") + (f": {notes}" if notes else "")
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
+            (event_ts, "rpe", desc, float(rpe), "/10", utc_now()),
+        )
+    return f"Logged RPE {rpe}/10 for {event_date}" + (f" ({activity_type})" if activity_type else "")
+
+
+@mcp.tool()
+def set_training_goal(metric: str, value: float, unit: Optional[str] = None) -> str:
+    """Set a steady-state weekly training target.
+    Common metrics: weekly_runs, weekly_volume_km, weekly_strength_sessions.
+    Examples: set_training_goal('weekly_runs', 3), set_training_goal('weekly_volume_km', 50, 'km')."""
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO training_goals(metric, value, unit, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(metric) DO UPDATE SET value=excluded.value, unit=excluded.unit, updated_at=excluded.updated_at",
+            (metric, value, unit, utc_now()),
+        )
+    return f"Set training goal: {metric} = {value}" + (f" {unit}" if unit else "")
+
+
+@mcp.tool()
+def get_training_goals() -> dict:
+    """Return current weekly training targets and upcoming goal events."""
+    with db() as conn:
+        goal_rows = conn.execute(
+            "SELECT metric, value, unit FROM training_goals ORDER BY metric"
+        ).fetchall()
+        event_rows = conn.execute(
+            "SELECT id, date, type, description, goal_description FROM training_events "
+            "WHERE status='upcoming' ORDER BY date"
+        ).fetchall()
+    return {
+        "weekly_targets": {r[0]: {"value": r[1], "unit": r[2]} for r in goal_rows},
+        "upcoming_events": [
+            {"id": r[0], "date": r[1], "type": r[2], "description": r[3], "goal": r[4]}
+            for r in event_rows
+        ],
+    }
+
+
+@mcp.tool()
+def add_training_event(
+    date: str,
+    type: str,
+    description: str,
+    goal_description: Optional[str] = None,
+) -> str:
+    """Add a goal race or target event.
+    type: 'marathon' | 'half_marathon' | '10k' | '5k' | 'triathlon' | 'cycling_event' | 'other'.
+    goal_description: e.g. 'sub-4h', 'finish', 'PR'. date is YYYY-MM-DD."""
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO training_events(date, type, description, goal_description, status, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (date, type, description, goal_description, "upcoming", utc_now()),
+        )
+        event_id = cur.lastrowid
+    return f"Added event #{event_id}: {description} on {date}" + (f" (goal: {goal_description})" if goal_description else "")
+
+
+@mcp.tool()
+def list_training_events(status: Optional[str] = None) -> list:
+    """List training events. status: 'upcoming' | 'completed' | 'cancelled' | None for all."""
+    with db() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT id, date, type, description, goal_description, status, result "
+                "FROM training_events WHERE status=? ORDER BY date",
+                (status,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, date, type, description, goal_description, status, result "
+                "FROM training_events ORDER BY date"
+            ).fetchall()
+    return [
+        {"id": r[0], "date": r[1], "type": r[2], "description": r[3],
+         "goal": r[4], "status": r[5], "result": r[6]}
+        for r in rows
+    ]
+
+
+@mcp.tool()
+def complete_training_event(event_id: int, result: Optional[str] = None) -> str:
+    """Mark a training event as completed.
+    result: actual outcome, e.g. '3:52:14', 'DNS', 'finished top-10'."""
+    with db() as conn:
+        existing = conn.execute(
+            "SELECT description FROM training_events WHERE id=?", (event_id,)
+        ).fetchone()
+        if not existing:
+            return f"Error: no event with id {event_id}"
+        conn.execute(
+            "UPDATE training_events SET status='completed', result=? WHERE id=?",
+            (result, event_id),
+        )
+    return f"Marked event #{event_id} ({existing[0]}) as completed" + (f": {result}" if result else "")
+
+
+@mcp.tool()
 def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict:
-    """Rich context for workout planning: today's metrics, HRV trend, training load
-    status, Garmin's suggested workout, recent activities, and personalized insights
-    based on historical correlations (e.g. 'you had 2 drinks yesterday; historically
-    that reduces your HRV by ~8ms the next morning')."""
+    """Rich context for workout planning: today's metrics, HRV trend, TSB (form),
+    training load status, week progress vs targets, next goal event, yesterday's RPE,
+    aerobic efficiency trend, Garmin's suggested workout, recent activities, and
+    personalized insights from historical correlations."""
     from app.analysis import compute_correlations
+    from datetime import date as date_cls, timedelta
 
     d = _date_or_today(date)
+    today_obj = date_cls.fromisoformat(d)
+    yesterday = (today_obj - timedelta(days=1)).isoformat()
+    week_start = (today_obj - timedelta(days=today_obj.weekday())).isoformat()  # Monday
 
     with db() as conn:
-        # Today's metrics
         today_row = conn.execute(
             """
             SELECT hrv, sleep_score, sleep_duration_min, body_battery_high,
@@ -460,40 +582,66 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             (d,),
         ).fetchone()
 
-        # HRV window for trend
         hrv_rows = conn.execute(
             "SELECT date, hrv FROM daily_metrics WHERE date <= ? AND hrv IS NOT NULL "
             "ORDER BY date DESC LIMIT ?",
             (d, hrv_window),
         ).fetchall()
 
-        # Yesterday behavior
-        from datetime import date as date_cls, timedelta
-        yesterday = (date_cls.fromisoformat(d) - timedelta(days=1)).isoformat()
         yest_row = conn.execute(
             "SELECT alcohol_units, caffeine_mg, calories_estimated FROM daily_metrics WHERE date=?",
             (yesterday,),
         ).fetchone()
 
-        # Garmin suggestion
+        yest_rpe_row = conn.execute(
+            "SELECT quantity, description FROM manual_logs "
+            "WHERE type='rpe' AND DATE(ts)=? ORDER BY ts DESC LIMIT 1",
+            (yesterday,),
+        ).fetchone()
+
         sw_row = conn.execute(
             "SELECT workout_type, description, target_duration_min, target_intensity "
             "FROM suggested_workouts WHERE date=? ORDER BY source LIMIT 1",
             (d,),
         ).fetchone()
 
-        # Recent activities (last 7)
         act_rows = conn.execute(
-            "SELECT date, type, duration_s, avg_hr FROM activities "
+            "SELECT date, type, duration_s, avg_hr, distance_m FROM activities "
             "WHERE date <= ? ORDER BY date DESC, start_time DESC LIMIT 7",
             (d,),
         ).fetchall()
 
-        # Correlations for personalized insights
+        # Week progress
+        week_acts = conn.execute(
+            "SELECT type, duration_s, distance_m FROM activities WHERE date BETWEEN ? AND ?",
+            (week_start, d),
+        ).fetchall()
+
+        # Training goals
+        goal_rows = conn.execute(
+            "SELECT metric, value FROM training_goals"
+        ).fetchall()
+        goals = {r[0]: r[1] for r in goal_rows}
+
+        # Next upcoming event
+        next_event_row = conn.execute(
+            "SELECT id, date, type, description, goal_description FROM training_events "
+            "WHERE status='upcoming' AND date >= ? ORDER BY date LIMIT 1",
+            (d,),
+        ).fetchone()
+
+        # Aerobic efficiency: running acts last 56 days (8wk) with HR data
+        eff_rows = conn.execute(
+            "SELECT date, duration_s, distance_m, avg_hr FROM activities "
+            "WHERE type LIKE '%run%' AND distance_m > 1000 AND duration_s > 0 AND avg_hr > 0 "
+            "AND date > ? AND date <= ? ORDER BY date DESC",
+            ((today_obj - timedelta(days=56)).isoformat(), d),
+        ).fetchall()
+
         try:
             corr_result = compute_correlations(
                 conn,
-                inputs=["alcohol_units", "caffeine_mg"],
+                inputs=["alcohol_units", "caffeine_mg", "rpe"],
                 outputs=["hrv", "sleep_score", "stress_avg"],
                 lags=[1],
                 days=90,
@@ -503,61 +651,50 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
         except Exception:
             correlations = []
 
-    # Build today dict
+    # ── today ────────────────────────────────────────────────────────────────
     today: dict = {}
     if today_row:
-        hrv_val = today_row[0]
+        atl = today_row[6]
+        ctl = today_row[7]
+        ratio = today_row[8]
         today = {
-            "hrv": hrv_val,
+            "hrv": today_row[0],
             "sleep_score": today_row[1],
             "sleep_duration_min": today_row[2],
             "body_battery_high": today_row[3],
             "stress_avg": today_row[4],
             "training_readiness": today_row[5],
-            "acute_training_load": today_row[6],
-            "chronic_training_load": today_row[7],
-            "training_load_ratio": today_row[8],
+            "acute_training_load": atl,
+            "chronic_training_load": ctl,
+            "training_load_ratio": ratio,
             "weight_kg": today_row[9],
             "resting_hr": today_row[10],
         }
 
-        # HRV trend
+        if ctl is not None and atl is not None:
+            today["tsb"] = round(ctl - atl, 1)
+
         hrv_vals = [r[1] for r in hrv_rows if r[1] is not None]
         if len(hrv_vals) >= 4:
             recent_avg = sum(hrv_vals[:3]) / 3
             older_avg = sum(hrv_vals[3:]) / len(hrv_vals[3:])
-            if older_avg > 0:
-                pct_change = (recent_avg - older_avg) / older_avg
-                if pct_change > 0.03:
-                    trend = "improving"
-                elif pct_change < -0.03:
-                    trend = "declining"
-                else:
-                    trend = "stable"
-            else:
-                trend = "stable"
-            today["hrv_trend"] = trend
+            pct = (recent_avg - older_avg) / older_avg if older_avg else 0
+            today["hrv_trend"] = "improving" if pct > 0.03 else "declining" if pct < -0.03 else "stable"
             today["hrv_recent_avg"] = round(recent_avg, 1)
         elif hrv_vals:
             today["hrv_trend"] = "insufficient_data"
             today["hrv_recent_avg"] = round(sum(hrv_vals) / len(hrv_vals), 1)
 
-        # Load status
-        ratio = today_row[8]
         if ratio is not None:
-            if ratio < 0.8:
-                load_status = "detraining"
-            elif ratio < 1.0:
-                load_status = "maintenance"
-            elif ratio < 1.3:
-                load_status = "productive"
-            elif ratio < 1.5:
-                load_status = "slight_overreaching"
-            else:
-                load_status = "overreaching"
-            today["load_status"] = load_status
+            today["load_status"] = (
+                "detraining" if ratio < 0.8 else
+                "maintenance" if ratio < 1.0 else
+                "productive" if ratio < 1.3 else
+                "slight_overreaching" if ratio < 1.5 else
+                "overreaching"
+            )
 
-    # Yesterday behavior
+    # ── yesterday ────────────────────────────────────────────────────────────
     yesterday_behavior: dict = {}
     if yest_row:
         yesterday_behavior = {
@@ -566,13 +703,76 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             "calories_estimated": yest_row[2],
         }
 
-    # Personalized insights
+    yesterday_rpe = None
+    if yest_rpe_row:
+        yesterday_rpe = {"rpe": yest_rpe_row[0], "notes": yest_rpe_row[1]}
+        yesterday_behavior["rpe"] = yest_rpe_row[0]
+
+    # ── week progress ─────────────────────────────────────────────────────────
+    run_types = {"running", "run", "trail_running", "treadmill_running"}
+    strength_types = {"strength_training", "strength", "weight_training", "gym"}
+    runs = sum(1 for a in week_acts if (a[0] or "").lower().replace(" ", "_") in run_types
+               or "run" in (a[0] or "").lower())
+    volume_km = sum((a[2] or 0) / 1000 for a in week_acts
+                    if "run" in (a[0] or "").lower())
+    strength = sum(1 for a in week_acts if any(s in (a[0] or "").lower()
+                   for s in ("strength", "weight", "gym")))
+
+    week_progress: dict = {"runs": runs, "volume_km": round(volume_km, 1), "strength_sessions": strength}
+    if "weekly_runs" in goals:
+        week_progress["target_runs"] = goals["weekly_runs"]
+    if "weekly_volume_km" in goals:
+        week_progress["target_km"] = goals["weekly_volume_km"]
+    if "weekly_strength_sessions" in goals:
+        week_progress["target_strength"] = goals["weekly_strength_sessions"]
+
+    # ── next event ───────────────────────────────────────────────────────────
+    next_event = None
+    if next_event_row:
+        event_date = date_cls.fromisoformat(next_event_row[1])
+        days_away = (event_date - today_obj).days
+        next_event = {
+            "id": next_event_row[0],
+            "date": next_event_row[1],
+            "type": next_event_row[2],
+            "description": next_event_row[3],
+            "goal": next_event_row[4],
+            "weeks_away": days_away // 7,
+            "days_away": days_away,
+        }
+
+    # ── aerobic efficiency trend ──────────────────────────────────────────────
+    aerobic_efficiency = None
+    if eff_rows:
+        cutoff = (today_obj - timedelta(days=28)).isoformat()
+        def _eff(r):
+            speed_kmh = (r[2] / 1000) / (r[1] / 3600)
+            return speed_kmh / r[3] * 100  # km/h per bpm × 100; higher = more efficient
+
+        recent_effs = [_eff(r) for r in eff_rows if r[0] >= cutoff]
+        older_effs = [_eff(r) for r in eff_rows if r[0] < cutoff]
+        if recent_effs:
+            aerobic_efficiency = {
+                "recent_4wk_avg": round(sum(recent_effs) / len(recent_effs), 3),
+                "n_activities": len(eff_rows),
+            }
+            if older_effs:
+                prior = sum(older_effs) / len(older_effs)
+                aerobic_efficiency["prior_4wk_avg"] = round(prior, 3)
+                change = (aerobic_efficiency["recent_4wk_avg"] - prior) / prior if prior else 0
+                aerobic_efficiency["trend"] = (
+                    "improving" if change > 0.02 else
+                    "declining" if change < -0.02 else
+                    "stable"
+                )
+                aerobic_efficiency["change_pct"] = round(change * 100, 1)
+
+    # ── personalized insights ─────────────────────────────────────────────────
     insights = []
     for c in correlations:
         if abs(c["r"]) < 0.15:
             continue
-        inp = c["input"]
-        out = c["output"]
+        inp, out = c["input"], c["output"]
         yval = yesterday_behavior.get(inp)
         if not yval:
             continue
@@ -583,7 +783,6 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             f"{direction} {out} today (r={c['r']})."
         )
 
-    # Garmin suggestion
     garmin_suggestion = None
     if sw_row:
         garmin_suggestion = {
@@ -593,13 +792,13 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             "target_intensity": sw_row[3],
         }
 
-    # Recent activities
     recent_activities = [
         {
             "date": r[0],
             "type": r[1],
             "duration_min": round(r[2] / 60) if r[2] else None,
             "avg_hr": r[3],
+            "distance_km": round(r[4] / 1000, 2) if r[4] else None,
         }
         for r in act_rows
     ]
@@ -608,6 +807,10 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
         "date": d,
         "today": today,
         "yesterday_behavior": yesterday_behavior,
+        "yesterday_rpe": yesterday_rpe,
+        "week_progress": week_progress,
+        "next_event": next_event,
+        "aerobic_efficiency": aerobic_efficiency,
         "garmin_suggestion": garmin_suggestion,
         "personalized_insights": insights,
         "recent_activities": recent_activities,
@@ -615,7 +818,11 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
 
 
 def _unit_for(metric: str) -> str:
-    units = {"alcohol_units": "units of alcohol", "caffeine_mg": "mg of caffeine"}
+    units = {
+        "alcohol_units": "units of alcohol",
+        "caffeine_mg": "mg of caffeine",
+        "rpe": "RPE",
+    }
     return units.get(metric, metric)
 
 
