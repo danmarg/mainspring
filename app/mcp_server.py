@@ -3,6 +3,7 @@ MCP server — data layer only.
 
 Tools:
   log_meal       log_caffeine    log_alcohol
+  amend_log      delete_log
   get_logs       get_daily_metrics
   get_suggested_workout
   get_source_config   set_source_preference
@@ -114,6 +115,61 @@ def log_alcohol(
             (event_ts, "alcohol", description, units, "units", utc_now()),
         )
     return f"Logged alcohol at {event_ts}: {description}" + (f" ({units} units)" if units else "")
+
+
+# ── amend / delete tools ────────────────────────────────────────────────────
+
+@mcp.tool()
+def amend_log(
+    log_id: int,
+    ts: Optional[str] = None,
+    description: Optional[str] = None,
+    quantity: Optional[float] = None,
+    unit: Optional[str] = None,
+    estimated_calories: Optional[int] = None,
+    estimated_macros: Optional[dict] = None,
+    confidence: Optional[str] = None,
+) -> str:
+    """Amend an existing manual log entry (meal/caffeine/alcohol/note) by id.
+    Only the fields provided are updated; omitted fields are left unchanged.
+    Use get_logs to find the id."""
+    fields = {
+        "ts": ts,
+        "description": description,
+        "quantity": quantity,
+        "unit": unit,
+        "estimated_calories": estimated_calories,
+        "confidence": confidence,
+    }
+    if estimated_macros is not None:
+        fields["estimated_macros_json"] = json.dumps(estimated_macros)
+    fields = {k: v for k, v in fields.items() if v is not None}
+
+    if not fields:
+        return "No fields provided to amend."
+
+    with db() as conn:
+        existing = conn.execute("SELECT id FROM manual_logs WHERE id=?", (log_id,)).fetchone()
+        if not existing:
+            return f"Error: no log with id {log_id}"
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(
+            f"UPDATE manual_logs SET {set_clause} WHERE id=?",
+            (*fields.values(), log_id),
+        )
+    return f"Amended log {log_id}: " + ", ".join(f"{k}={v}" for k, v in fields.items())
+
+
+@mcp.tool()
+def delete_log(log_id: int) -> str:
+    """Delete a manual log entry (meal/caffeine/alcohol/note) by id.
+    Use get_logs to find the id."""
+    with db() as conn:
+        existing = conn.execute("SELECT id FROM manual_logs WHERE id=?", (log_id,)).fetchone()
+        if not existing:
+            return f"Error: no log with id {log_id}"
+        conn.execute("DELETE FROM manual_logs WHERE id=?", (log_id,))
+    return f"Deleted log {log_id}"
 
 
 # ── query tools ─────────────────────────────────────────────────────────────
