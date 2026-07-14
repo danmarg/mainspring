@@ -384,20 +384,28 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
     for d in dates:
         ds = d.isoformat()
 
-        # Daily aggregate data types (dailyRollUp)
+        # Raw sample types — aggregate via dailyRollUp
         rollup_endpoints = [
-            ("steps",                       "steps",          _parse_steps),
-            ("daily-resting-heart-rate",    "resting_hr",     _parse_resting_hr),
-            ("daily-heart-rate-variability","hrv",            _parse_hrv),
-            ("daily-oxygen-saturation",     "spo2",           _parse_spo2),
-            ("daily-respiratory-rate",      "breathing_rate", _parse_breathing_rate),
-            ("daily-vo2-max",               "vo2max",         _parse_vo2max),
-            ("active-minutes",              "active_minutes", _parse_active_minutes),
-            ("active-energy-burned",        "calories",       _parse_calories),
+            ("steps",              "steps",          _parse_steps),
+            ("active-minutes",     "active_minutes", _parse_active_minutes),
+            ("active-energy-burned","calories",      _parse_calories),
         ]
-
         for data_type, endpoint_name, parser in rollup_endpoints:
             data = _daily_rollup(conn, data_type, d, tokens)
+            if data:
+                upsert_raw_payload(conn, SOURCE, endpoint_name, json.dumps(data), ds)
+                rows_upserted += parser(conn, ds, data)
+
+        # daily-* types are already one record per day — use list, not dailyRollUp
+        list_daily_endpoints = [
+            ("daily-resting-heart-rate",     "resting_hr",     _parse_resting_hr),
+            ("daily-heart-rate-variability", "hrv",            _parse_hrv),
+            ("daily-oxygen-saturation",      "spo2",           _parse_spo2),
+            ("daily-respiratory-rate",       "breathing_rate", _parse_breathing_rate),
+            ("daily-vo2-max",                "vo2max",         _parse_vo2max),
+        ]
+        for data_type, endpoint_name, parser in list_daily_endpoints:
+            data = _list_datapoints(conn, data_type, d, tokens)
             if data:
                 upsert_raw_payload(conn, SOURCE, endpoint_name, json.dumps(data), ds)
                 rows_upserted += parser(conn, ds, data)
