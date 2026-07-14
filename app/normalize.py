@@ -194,6 +194,12 @@ def _rebuild_one_day(conn, date_str: str) -> None:
     ).fetchone()
     weight_kg = weight_row[0] if weight_row else None
 
+    rpe_row = conn.execute(
+        "SELECT quantity FROM manual_logs WHERE type='rpe' AND DATE(ts)=? ORDER BY ts DESC LIMIT 1",
+        (date_str,),
+    ).fetchone()
+    rpe = rpe_row[0] if rpe_row else None
+
     bp_row = conn.execute(
         "SELECT estimated_macros_json FROM manual_logs "
         "WHERE type='blood_pressure' AND DATE(ts)=? ORDER BY ts DESC LIMIT 1",
@@ -223,8 +229,9 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             acute_training_load, chronic_training_load, training_load_ratio,
             caffeine_mg, alcohol_units, calories_estimated,
             weight_kg, bp_systolic, bp_diastolic, bp_pulse,
+            rpe,
             source_flags_json
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(date) DO UPDATE SET
             resting_hr=excluded.resting_hr,
             hrv=excluded.hrv,
@@ -252,6 +259,7 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             bp_systolic=excluded.bp_systolic,
             bp_diastolic=excluded.bp_diastolic,
             bp_pulse=excluded.bp_pulse,
+            rpe=excluded.rpe,
             source_flags_json=excluded.source_flags_json
         """,
         (
@@ -282,6 +290,7 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             bp_systolic,
             bp_diastolic,
             bp_pulse,
+            rpe,
             json.dumps(source_flags),
         ),
     )
