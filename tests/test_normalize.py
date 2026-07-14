@@ -106,10 +106,10 @@ def test_daily_metrics_source_flags(tmp_db):
 def test_daily_metrics_source_config_override(tmp_db):
     now = utc_now()
     upsert_raw_metric(tmp_db, "2025-01-01", "garmin", "hrv", 55.0, now)
-    upsert_raw_metric(tmp_db, "2025-01-01", "fitbit", "hrv", 62.0, now)
-    # override: prefer fitbit for hrv
+    upsert_raw_metric(tmp_db, "2025-01-01", "google_health", "hrv", 62.0, now)
+    # override: prefer google_health for hrv
     tmp_db.execute(
-        "INSERT INTO source_config(metric, canonical_source) VALUES ('hrv', 'fitbit')"
+        "INSERT INTO source_config(metric, canonical_source) VALUES ('hrv', 'google_health')"
     )
     tmp_db.commit()
 
@@ -121,13 +121,13 @@ def test_daily_metrics_source_config_override(tmp_db):
     ).fetchone()
     assert row[0] == 62.0
     flags = json.loads(row[1])
-    assert flags["hrv"] == "fitbit"
+    assert flags["hrv"] == "google_health"
 
 
 def test_daily_metrics_fallback_when_preferred_absent(tmp_db):
     now = utc_now()
-    # only fitbit has hrv, but no source_config (garmin is default priority)
-    upsert_raw_metric(tmp_db, "2025-01-01", "fitbit", "hrv", 60.0, now)
+    # only google_health has hrv, but no source_config (garmin is default priority)
+    upsert_raw_metric(tmp_db, "2025-01-01", "google_health", "hrv", 60.0, now)
     tmp_db.commit()
 
     rebuild_daily_metrics(tmp_db)
@@ -193,9 +193,9 @@ def _insert_garmin_activity(conn, activity_id, date, start_time, act_type, avg_h
     )
 
 
-def _insert_fitbit_activity(conn, activity_id, date, start_time, act_type, avg_hr=138):
+def _insert_gh_activity(conn, activity_id, date, start_time, act_type, avg_hr=138):
     conn.execute(
-        "INSERT INTO fitbit_activities(activity_id, date, start_time, type, duration_s, avg_hr, fetched_at) "
+        "INSERT INTO google_health_activities(activity_id, date, start_time, type, duration_s, avg_hr, fetched_at) "
         "VALUES (?,?,?,?,?,?,?)",
         (activity_id, date, start_time, act_type, 3600, avg_hr, utc_now()),
     )
@@ -207,7 +207,7 @@ def test_activities_garmin_only(tmp_db):
     rebuild_activities(tmp_db)
     tmp_db.commit()
     row = tmp_db.execute(
-        "SELECT canonical_source, garmin_activity_id, fitbit_activity_id FROM activities"
+        "SELECT canonical_source, garmin_activity_id, google_health_activity_id FROM activities"
     ).fetchone()
     assert row[0] == "garmin"
     assert row[1] == "g1"
@@ -215,24 +215,24 @@ def test_activities_garmin_only(tmp_db):
 
 
 def test_activities_dedup_match(tmp_db):
-    # Garmin at 07:00, Fitbit at 07:08 — within ±15 min window, same date+type
+    # Garmin at 07:00, Google Health at 07:08 — within ±15 min window, same date+type
     _insert_garmin_activity(tmp_db, "g1", "2025-01-01", "2025-01-01T07:00:00", "running", avg_hr=145)
-    _insert_fitbit_activity(tmp_db, "f1", "2025-01-01", "2025-01-01T07:08:00", "running", avg_hr=143)
+    _insert_gh_activity(tmp_db, "gh1", "2025-01-01", "2025-01-01T07:08:00", "running", avg_hr=143)
     tmp_db.commit()
 
     rebuild_activities(tmp_db)
     tmp_db.commit()
 
-    rows = tmp_db.execute("SELECT canonical_source, garmin_activity_id, fitbit_activity_id FROM activities").fetchall()
+    rows = tmp_db.execute("SELECT canonical_source, garmin_activity_id, google_health_activity_id FROM activities").fetchall()
     assert len(rows) == 1  # deduped to one
     assert rows[0][1] == "g1"
-    assert rows[0][2] == "f1"
+    assert rows[0][2] == "gh1"
 
 
 def test_activities_no_dedup_outside_window(tmp_db):
     # 20 min apart — should be two separate rows
     _insert_garmin_activity(tmp_db, "g1", "2025-01-01", "2025-01-01T07:00:00", "running")
-    _insert_fitbit_activity(tmp_db, "f1", "2025-01-01", "2025-01-01T07:20:00", "running")
+    _insert_gh_activity(tmp_db, "gh1", "2025-01-01", "2025-01-01T07:20:00", "running")
     tmp_db.commit()
 
     rebuild_activities(tmp_db)
@@ -244,7 +244,7 @@ def test_activities_no_dedup_outside_window(tmp_db):
 
 def test_activities_no_dedup_different_type(tmp_db):
     _insert_garmin_activity(tmp_db, "g1", "2025-01-01", "2025-01-01T07:00:00", "running")
-    _insert_fitbit_activity(tmp_db, "f1", "2025-01-01", "2025-01-01T07:05:00", "cycling")
+    _insert_gh_activity(tmp_db, "gh1", "2025-01-01", "2025-01-01T07:05:00", "cycling")
     tmp_db.commit()
 
     rebuild_activities(tmp_db)
@@ -254,11 +254,11 @@ def test_activities_no_dedup_different_type(tmp_db):
     assert count == 2
 
 
-def test_activities_canonical_source_fitbit(tmp_db):
+def test_activities_canonical_source_google_health(tmp_db):
     _insert_garmin_activity(tmp_db, "g1", "2025-01-01", "2025-01-01T07:00:00", "running", avg_hr=145)
-    _insert_fitbit_activity(tmp_db, "f1", "2025-01-01", "2025-01-01T07:05:00", "running", avg_hr=143)
+    _insert_gh_activity(tmp_db, "gh1", "2025-01-01", "2025-01-01T07:05:00", "running", avg_hr=143)
     tmp_db.execute(
-        "INSERT INTO source_config(metric, canonical_source) VALUES ('activities', 'fitbit')"
+        "INSERT INTO source_config(metric, canonical_source) VALUES ('activities', 'google_health')"
     )
     tmp_db.commit()
 
@@ -266,19 +266,19 @@ def test_activities_canonical_source_fitbit(tmp_db):
     tmp_db.commit()
 
     row = tmp_db.execute("SELECT canonical_source, avg_hr FROM activities").fetchone()
-    assert row[0] == "fitbit"
+    assert row[0] == "google_health"
     assert row[1] == 143
 
 
-def test_activities_fitbit_only(tmp_db):
-    _insert_fitbit_activity(tmp_db, "f1", "2025-01-01", "2025-01-01T07:00:00", "yoga")
+def test_activities_google_health_only(tmp_db):
+    _insert_gh_activity(tmp_db, "gh1", "2025-01-01", "2025-01-01T07:00:00", "yoga")
     tmp_db.commit()
     rebuild_activities(tmp_db)
     tmp_db.commit()
     row = tmp_db.execute(
         "SELECT canonical_source, garmin_activity_id FROM activities"
     ).fetchone()
-    assert row[0] == "fitbit"
+    assert row[0] == "google_health"
     assert row[1] is None
 
 
