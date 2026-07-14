@@ -145,7 +145,11 @@ def _post(conn, path: str, body: dict, tokens: dict) -> Any | None:
                 return None
             else:
                 body_text = e.read().decode(errors="replace")
-                log.warning("google_health: %s returned %s: %s", path, e.code, body_text)
+                try:
+                    err_msg = json.loads(body_text)["error"]["message"]
+                except Exception:
+                    err_msg = body_text[:300]
+                log.warning("google_health: POST %s → %s: %s", path, e.code, err_msg)
                 return None
         except Exception as exc:
             log.warning("google_health: %s failed: %s", path, exc)
@@ -175,7 +179,11 @@ def _get(conn, path: str, params: dict, tokens: dict) -> Any | None:
                 return None
             else:
                 body_text = e.read().decode(errors="replace")
-                log.warning("google_health: GET %s returned %s: %s", path, e.code, body_text)
+                try:
+                    err_msg = json.loads(body_text)["error"]["message"]
+                except Exception:
+                    err_msg = body_text[:300]
+                log.warning("google_health: GET %s → %s: %s", path, e.code, err_msg)
                 return None
         except Exception as exc:
             log.warning("google_health: GET %s failed: %s", path, exc)
