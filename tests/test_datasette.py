@@ -14,18 +14,19 @@ import app.db as db_module
 from app.db import init_db, utc_now
 
 
-# ── bearer middleware (same logic as mcp, tested independently) ───────────────
+# ── token middleware (bearer / basic / cookie / ?token=) ─────────────────────
 
-from app.datasette_mount import _BearerTokenMiddleware
+from app.datasette_mount import _TokenMiddleware
 
 
-async def _call(mw, token=None):
+async def _call(mw, auth_header=None, query_string=b""):
     responses = []
     scope = {
         "type": "http",
         "method": "GET",
         "path": "/",
-        "headers": [(b"authorization", f"Bearer {token}".encode())] if token else [],
+        "query_string": query_string,
+        "headers": [(b"authorization", auth_header)] if auth_header else [],
     }
     async def receive(): pass
     async def send(msg): responses.append(msg)
@@ -36,32 +37,40 @@ async def _call(mw, token=None):
 def test_datasette_bearer_allows_valid():
     passed = []
     async def inner(s, r, send): passed.append(True)
-    mw = _BearerTokenMiddleware(inner, token="ds-secret")
-    asyncio.run(_call(mw, token="ds-secret"))
+    mw = _TokenMiddleware(inner, token="ds-secret")
+    asyncio.run(_call(mw, auth_header=b"Bearer ds-secret"))
     assert passed == [True]
 
 
 def test_datasette_bearer_rejects_wrong():
     async def inner(s, r, send): pass
-    mw = _BearerTokenMiddleware(inner, token="ds-secret")
-    resp = asyncio.run(_call(mw, token="wrong"))
+    mw = _TokenMiddleware(inner, token="ds-secret")
+    resp = asyncio.run(_call(mw, auth_header=b"Bearer wrong"))
     assert any(r.get("status") == 401 for r in resp)
 
 
 def test_datasette_bearer_rejects_missing():
     async def inner(s, r, send): pass
-    mw = _BearerTokenMiddleware(inner, token="ds-secret")
+    mw = _TokenMiddleware(inner, token="ds-secret")
     resp = asyncio.run(_call(mw))
     assert any(r.get("status") == 401 for r in resp)
 
 
 def test_datasette_bearer_www_authenticate_header():
     async def inner(s, r, send): pass
-    mw = _BearerTokenMiddleware(inner, token="ds-secret")
+    mw = _TokenMiddleware(inner, token="ds-secret")
     resp = asyncio.run(_call(mw))
     start = next(r for r in resp if r.get("type") == "http.response.start")
     header_names = [k.lower() for k, v in start.get("headers", [])]
     assert b"www-authenticate" in header_names
+
+
+def test_datasette_token_query_param():
+    passed = []
+    async def inner(s, r, send): passed.append(True)
+    mw = _TokenMiddleware(inner, token="ds-secret")
+    asyncio.run(_call(mw, query_string=b"token=ds-secret"))
+    assert passed == [True]
 
 
 # ── build_datasette_app returns None without token ────────────────────────────

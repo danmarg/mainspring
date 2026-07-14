@@ -216,6 +216,68 @@ def _parse_training_status(conn, date_str: str, data: dict) -> int:
     return rows
 
 
+def _parse_spo2(conn, date_str: str, data: dict | list) -> int:
+    now = utc_now()
+    rows = 0
+    # get_spo2_data returns either a dict with averages or a list of readings
+    if isinstance(data, list):
+        vals = [
+            item.get("averageSpO2") or item.get("spo2Reading")
+            for item in data
+            if isinstance(item, dict)
+        ]
+        vals = [v for v in vals if v is not None]
+        val = sum(vals) / len(vals) if vals else None
+    else:
+        val = (
+            data.get("averageSpO2")
+            or data.get("avgSpO2")
+            or data.get("averageSpO2Value")
+        )
+    if val is not None:
+        upsert_raw_metric(conn, date_str, SOURCE, "spo2_avg", float(val), now)
+        rows += 1
+    return rows
+
+
+def _parse_respiration(conn, date_str: str, data: dict | list) -> int:
+    now = utc_now()
+    rows = 0
+    if isinstance(data, list):
+        vals = [
+            item.get("avgBreathingRate") or item.get("breathingRate")
+            for item in data
+            if isinstance(item, dict)
+        ]
+        vals = [v for v in vals if v is not None]
+        val = sum(vals) / len(vals) if vals else None
+    else:
+        val = (
+            data.get("avgBreathingRate")
+            or data.get("averageBreathingRate")
+            or data.get("breathingRate")
+        )
+    if val is not None:
+        upsert_raw_metric(conn, date_str, SOURCE, "breathing_rate", float(val), now)
+        rows += 1
+    return rows
+
+
+def _parse_intensity_minutes(conn, date_str: str, data: dict | list) -> int:
+    now = utc_now()
+    rows = 0
+    if isinstance(data, list):
+        data = data[0] if data and isinstance(data[0], dict) else {}
+    moderate = data.get("moderateIntensityMinutes") or data.get("moderateMinutes") or 0
+    vigorous = data.get("vigorousIntensityMinutes") or data.get("vigorousMinutes") or 0
+    # WHO/Garmin formula: vigorous counts double
+    total = float(moderate) + 2 * float(vigorous)
+    if total > 0:
+        upsert_raw_metric(conn, date_str, SOURCE, "active_zone_minutes", total, now)
+        rows += 1
+    return rows
+
+
 def _upsert_activity(conn, activity: dict) -> bool:
     activity_id = str(activity.get("activityId", ""))
     if not activity_id:
@@ -352,6 +414,24 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
         if data:
             _store_raw(conn, "get_training_status", data, ds)
             rows_upserted += _parse_training_status(conn, ds, data)
+
+        # SpO2
+        data = _safe(lambda: client.get_spo2_data(ds), f"get_spo2_data({ds})")
+        if data:
+            _store_raw(conn, "get_spo2_data", data, ds)
+            rows_upserted += _parse_spo2(conn, ds, data)
+
+        # respiration / breathing rate
+        data = _safe(lambda: client.get_respiration_data(ds), f"get_respiration_data({ds})")
+        if data:
+            _store_raw(conn, "get_respiration_data", data, ds)
+            rows_upserted += _parse_respiration(conn, ds, data)
+
+        # intensity minutes (active zone minutes)
+        data = _safe(lambda: client.get_intensity_minutes_data(ds), f"get_intensity_minutes_data({ds})")
+        if data:
+            _store_raw(conn, "get_intensity_minutes_data", data, ds)
+            rows_upserted += _parse_intensity_minutes(conn, ds, data)
 
     # ── range endpoints ─────────────────────────────────────────────────────
 

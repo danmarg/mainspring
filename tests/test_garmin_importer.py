@@ -174,6 +174,9 @@ MOCK_STRESS = {"avgStressLevel": 28, "maxStressLevel": 65}
 MOCK_READINESS = [{"score": 72}]
 MOCK_TRAINING = {"latestVO2Max": 51.0}
 MOCK_BODY_BATTERY = [{"date": "2025-01-01", "charged": 90, "drained": 15}]
+MOCK_SPO2 = {"averageSpO2": 96.5}
+MOCK_RESPIRATION = {"avgBreathingRate": 14.2}
+MOCK_INTENSITY = {"moderateIntensityMinutes": 20, "vigorousIntensityMinutes": 15}
 MOCK_ACTIVITIES = [
     {
         "activityId": "999",
@@ -197,6 +200,9 @@ def _make_mock_client():
     client.get_training_status.return_value = MOCK_TRAINING
     client.get_body_battery.return_value = MOCK_BODY_BATTERY
     client.get_activities_by_date.return_value = MOCK_ACTIVITIES
+    client.get_spo2_data.return_value = MOCK_SPO2
+    client.get_respiration_data.return_value = MOCK_RESPIRATION
+    client.get_intensity_minutes_data.return_value = MOCK_INTENSITY
     return client
 
 

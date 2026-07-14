@@ -34,6 +34,9 @@ DAILY_METRIC_COLUMNS = [
     "breathing_rate",
     "vo2max",
     "steps",
+    "acute_training_load",
+    "chronic_training_load",
+    "training_load_ratio",
 ]
 
 # ── timezone resolution ─────────────────────────────────────────────────────
@@ -185,6 +188,27 @@ def _rebuild_one_day(conn, date_str: str) -> None:
         (date_str,),
     ).fetchone()[0]
 
+    weight_row = conn.execute(
+        "SELECT quantity FROM manual_logs WHERE type='weight' AND DATE(ts)=? ORDER BY ts DESC LIMIT 1",
+        (date_str,),
+    ).fetchone()
+    weight_kg = weight_row[0] if weight_row else None
+
+    bp_row = conn.execute(
+        "SELECT estimated_macros_json FROM manual_logs "
+        "WHERE type='blood_pressure' AND DATE(ts)=? ORDER BY ts DESC LIMIT 1",
+        (date_str,),
+    ).fetchone()
+    bp_systolic = bp_diastolic = bp_pulse = None
+    if bp_row and bp_row[0]:
+        try:
+            bp = json.loads(bp_row[0])
+            bp_systolic = bp.get("systolic")
+            bp_diastolic = bp.get("diastolic")
+            bp_pulse = bp.get("pulse")
+        except Exception:
+            pass
+
     conn.execute(
         """
         INSERT INTO daily_metrics (
@@ -196,9 +220,11 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             stress_avg, training_readiness,
             active_zone_minutes, spo2_avg, breathing_rate,
             vo2max, steps,
+            acute_training_load, chronic_training_load, training_load_ratio,
             caffeine_mg, alcohol_units, calories_estimated,
+            weight_kg, bp_systolic, bp_diastolic, bp_pulse,
             source_flags_json
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(date) DO UPDATE SET
             resting_hr=excluded.resting_hr,
             hrv=excluded.hrv,
@@ -216,9 +242,16 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             breathing_rate=excluded.breathing_rate,
             vo2max=excluded.vo2max,
             steps=excluded.steps,
+            acute_training_load=excluded.acute_training_load,
+            chronic_training_load=excluded.chronic_training_load,
+            training_load_ratio=excluded.training_load_ratio,
             caffeine_mg=excluded.caffeine_mg,
             alcohol_units=excluded.alcohol_units,
             calories_estimated=excluded.calories_estimated,
+            weight_kg=excluded.weight_kg,
+            bp_systolic=excluded.bp_systolic,
+            bp_diastolic=excluded.bp_diastolic,
+            bp_pulse=excluded.bp_pulse,
             source_flags_json=excluded.source_flags_json
         """,
         (
@@ -239,9 +272,16 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             values.get("breathing_rate"),
             values.get("vo2max"),
             values.get("steps"),
+            values.get("acute_training_load"),
+            values.get("chronic_training_load"),
+            values.get("training_load_ratio"),
             caffeine,
             alcohol,
             calories,
+            weight_kg,
+            bp_systolic,
+            bp_diastolic,
+            bp_pulse,
             json.dumps(source_flags),
         ),
     )

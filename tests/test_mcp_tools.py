@@ -262,19 +262,19 @@ def test_get_source_config_empty():
 
 def test_set_source_preference():
     from app.mcp_server import set_source_preference, get_source_config
-    result = set_source_preference("hrv", "fitbit")
-    assert "hrv" in result and "fitbit" in result
+    result = set_source_preference("hrv", "google_health")
+    assert "hrv" in result and "google_health" in result
 
     config = get_source_config()
-    assert config["overrides"]["hrv"] == "fitbit"
+    assert config["overrides"]["hrv"] == "google_health"
 
 
 def test_set_source_preference_idempotent():
     from app.mcp_server import set_source_preference, get_source_config
     set_source_preference("hrv", "garmin")
-    set_source_preference("hrv", "fitbit")
+    set_source_preference("hrv", "google_health")
     config = get_source_config()
-    assert config["overrides"]["hrv"] == "fitbit"
+    assert config["overrides"]["hrv"] == "google_health"
 
 
 def test_set_source_preference_invalid_source():
@@ -302,35 +302,35 @@ async def _call_middleware(middleware, path="/", token=None):
 
 
 def test_bearer_middleware_allows_valid_token():
-    from app.datasette_mount import _BearerTokenMiddleware
+    from app.datasette_mount import _TokenMiddleware
 
     allowed = []
     async def inner(scope, receive, send):
         allowed.append(True)
 
-    mw = _BearerTokenMiddleware(inner, token="secret123")
+    mw = _TokenMiddleware(inner, token="secret123")
     responses = asyncio.run(_call_middleware(mw, token="secret123"))
     assert allowed == [True]
     assert responses == []
 
 
 def test_bearer_middleware_rejects_wrong_token():
-    from app.datasette_mount import _BearerTokenMiddleware
+    from app.datasette_mount import _TokenMiddleware
 
     async def inner(scope, receive, send): pass
 
-    mw = _BearerTokenMiddleware(inner, token="secret123")
+    mw = _TokenMiddleware(inner, token="secret123")
     responses = asyncio.run(_call_middleware(mw, token="wrongtoken"))
     statuses = [r["status"] for r in responses if "status" in r]
     assert 401 in statuses
 
 
 def test_bearer_middleware_rejects_missing_token():
-    from app.datasette_mount import _BearerTokenMiddleware
+    from app.datasette_mount import _TokenMiddleware
 
     async def inner(scope, receive, send): pass
 
-    mw = _BearerTokenMiddleware(inner, token="secret123")
+    mw = _TokenMiddleware(inner, token="secret123")
     responses = asyncio.run(_call_middleware(mw, token=None))
     statuses = [r["status"] for r in responses if "status" in r]
     assert 401 in statuses

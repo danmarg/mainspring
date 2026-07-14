@@ -295,3 +295,65 @@ def test_run_normalization_returns_counts(tmp_db):
     assert result["daily_metric_dates"] == 2
     assert result["activity_rows"] == 1
     assert result["day_timezone_rows"] >= 2
+
+
+# ── weight and BP in daily_metrics ──────────────────────────────────────────
+
+def test_weight_in_daily_metrics(tmp_db):
+    now = utc_now()
+    tmp_db.execute(
+        "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        ("2025-06-01T09:00:00", "weight", "78.5kg", 78.5, "kg", now),
+    )
+    tmp_db.commit()
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+    row = tmp_db.execute(
+        "SELECT weight_kg FROM daily_metrics WHERE date='2025-06-01'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 78.5
+
+
+def test_training_load_in_daily_metrics(tmp_db):
+    now = utc_now()
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "acute_training_load", 320.0, now)
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "chronic_training_load", 290.0, now)
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "training_load_ratio", 1.10, now)
+    tmp_db.commit()
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+    row = tmp_db.execute(
+        "SELECT acute_training_load, chronic_training_load, training_load_ratio "
+        "FROM daily_metrics WHERE date='2025-06-01'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 320.0
+    assert row[1] == 290.0
+    assert abs(row[2] - 1.10) < 0.001
+
+
+def test_blood_pressure_in_daily_metrics(tmp_db):
+    import json as _json
+    now = utc_now()
+    tmp_db.execute(
+        "INSERT INTO manual_logs(ts, type, description, quantity, unit, estimated_macros_json, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (
+            "2025-06-01T08:00:00", "blood_pressure", "120/80 pulse 65",
+            120, "mmHg",
+            _json.dumps({"systolic": 120, "diastolic": 80, "pulse": 65}),
+            now,
+        ),
+    )
+    tmp_db.commit()
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+    row = tmp_db.execute(
+        "SELECT bp_systolic, bp_diastolic, bp_pulse FROM daily_metrics WHERE date='2025-06-01'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 120
+    assert row[1] == 80
+    assert row[2] == 65
