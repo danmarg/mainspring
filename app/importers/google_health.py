@@ -208,11 +208,11 @@ def _list_datapoints(conn, data_type: str, d: date, tokens: dict) -> Any | None:
         next_day = d + timedelta(days=1)
         f = f'{field}.date >= "{d.isoformat()}" AND {field}.date < "{next_day.isoformat()}"'
     else:
-        # Session types (sleep, exercise) filter by civil_start_time (local, not UTC)
+        # Session types (sleep, exercise): only civil_end_time is filterable, not start_time
         next_day = d + timedelta(days=1)
         f = (
-            f'{field}.interval.civil_start_time >= "{d.isoformat()}T00:00:00" '
-            f'AND {field}.interval.civil_start_time < "{next_day.isoformat()}T00:00:00"'
+            f'{field}.interval.civil_end_time >= "{d.isoformat()}T00:00:00" '
+            f'AND {field}.interval.civil_end_time < "{next_day.isoformat()}T00:00:00"'
         )
     return _get(conn, path, {"filter": f}, tokens)
 
