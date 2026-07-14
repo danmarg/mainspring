@@ -149,6 +149,53 @@ async def fitbit_init_tokens(body: dict):
     return {"stored": True}
 
 
+@router.post("/google_health/init_tokens", dependencies=[Depends(_import_auth)])
+async def google_health_init_tokens(body: dict):
+    """Store initial Google Health OAuth tokens from google_health_get_tokens.py output."""
+    access_token = body.get("access_token")
+    refresh_token = body.get("refresh_token")
+    expires_at = body.get("expires_at")
+    if not (access_token and refresh_token and expires_at):
+        raise HTTPException(status_code=422, detail="access_token, refresh_token, expires_at required")
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO google_health_oauth(id, access_token, refresh_token, expires_at, updated_at)
+            VALUES (1, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                access_token=excluded.access_token,
+                refresh_token=excluded.refresh_token,
+                expires_at=excluded.expires_at,
+                updated_at=excluded.updated_at
+            """,
+            (access_token, refresh_token, expires_at, utc_now()),
+        )
+    return {"stored": True}
+
+
+@router.post("/import/google_health", dependencies=[Depends(_import_auth)])
+async def import_google_health(
+    background_tasks: BackgroundTasks,
+    days: int = Query(default=7, ge=1, le=3650),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+):
+    from app.importers.google_health import run_import
+
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO import_runs(source, started_at, status) VALUES (?,?,?)",
+            ("google_health", utc_now(), "running"),
+        )
+        run_id = cur.lastrowid
+
+    background_tasks.add_task(
+        _run_import_bg, "google_health", run_id, run_import,
+        {"days": days, "start_date": start_date, "end_date": end_date},
+    )
+    return {"run_id": run_id, "status": "started"}
+
+
 @router.get("/export/db", dependencies=[Depends(_export_auth)])
 async def export_db():
     import sqlite3
