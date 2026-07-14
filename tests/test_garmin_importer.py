@@ -203,6 +203,15 @@ def _make_mock_client():
     client.get_spo2_data.return_value = MOCK_SPO2
     client.get_respiration_data.return_value = MOCK_RESPIRATION
     client.get_intensity_minutes_data.return_value = MOCK_INTENSITY
+    client.get_scheduled_workouts.return_value = [
+        {
+            "date": "2025-01-01",
+            "workoutType": "base",
+            "workoutDescription": "Easy run",
+            "durationInSeconds": 3600,
+            "intensityType": "easy",
+        }
+    ]
     return client
 
 
