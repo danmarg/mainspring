@@ -11,9 +11,9 @@ APP_BASE_URL = "https://your-app.fly.dev"
 [http_service]
 internal_port = 8080
 force_https = true
-auto_stop_machines = false
+auto_stop_machines = "stop"
 auto_start_machines = true
-min_machines_running = 1
+min_machines_running = 0
 
 [[http_service.checks]]
 grace_period = "10s"

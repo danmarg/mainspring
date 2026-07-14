@@ -1,0 +1,54 @@
+name: Health data import
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # every hour
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Which importer to run"
+        required: true
+        default: garmin
+        type: choice
+        options: [garmin, fitbit]
+      start_date:
+        description: "Backfill start (YYYY-MM-DD, leave blank for rolling window)"
+        required: false
+      end_date:
+        description: "Backfill end (YYYY-MM-DD, leave blank for rolling window)"
+        required: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Garmin import
+        if: github.event_name == 'schedule' || inputs.source == 'garmin'
+        env:
+          TOKEN: ${{ secrets.MAINSPRING_ADMIN_TOKEN }}
+          URL: ${{ secrets.MAINSPRING_URL }}
+        run: |
+          PARAMS=""
+          if [ -n "${{ inputs.start_date }}" ]; then
+            PARAMS="?start_date=${{ inputs.start_date }}&end_date=${{ inputs.end_date }}"
+          fi
+          RESPONSE=$(curl -sf -X POST "${URL}/admin/import/garmin${PARAMS}" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json")
+          echo "$RESPONSE"
+          RUN_ID=$(echo "$RESPONSE" | grep -o '"run_id":[0-9]*' | grep -o '[0-9]*')
+          echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT
+
+      - name: Trigger Fitbit import
+        if: inputs.source == 'fitbit'
+        env:
+          TOKEN: ${{ secrets.MAINSPRING_ADMIN_TOKEN }}
+          URL: ${{ secrets.MAINSPRING_URL }}
+        run: |
+          PARAMS=""
+          if [ -n "${{ inputs.start_date }}" ]; then
+            PARAMS="?start_date=${{ inputs.start_date }}&end_date=${{ inputs.end_date }}"
+          fi
+          curl -sf -X POST "${URL}/admin/import/fitbit${PARAMS}" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json"

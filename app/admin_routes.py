@@ -1,10 +1,8 @@
 import logging
 import os
-from datetime import datetime, timezone
-
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -30,33 +28,16 @@ _import_auth = _require_token("ADMIN_TOKEN")
 _export_auth = _require_token("EXPORT_TOKEN")
 
 
-@router.post("/import/garmin", dependencies=[Depends(_import_auth)])
-async def import_garmin(
-    days: int = Query(default=7, ge=1, le=3650),
-    start_date: date | None = Query(default=None),
-    end_date: date | None = Query(default=None),
-):
-    from app.importers.garmin import run_import
-
-    run_id: int | None = None
-    started_at = utc_now()
-
-    with db() as conn:
-        cur = conn.execute(
-            "INSERT INTO import_runs(source, started_at, status) VALUES (?,?,?)",
-            ("garmin", started_at, "running"),
-        )
-        run_id = cur.lastrowid
-
+def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
+    """Run an import synchronously in a background thread and update import_runs."""
     try:
         with db() as conn:
-            result = run_import(conn, days=days, start_date=start_date, end_date=end_date)
+            result = import_fn(conn, **import_kwargs)
 
         if not result.get("skipped"):
             from app.normalize import run_normalization
             with db() as conn:
-                norm = run_normalization(conn)
-            result["normalization"] = norm
+                run_normalization(conn)
 
         status = "skipped" if result.get("skipped") else "ok"
         rows = result.get("rows_upserted", 0)
@@ -66,17 +47,82 @@ async def import_garmin(
                 "UPDATE import_runs SET finished_at=?, status=?, rows_upserted=? WHERE id=?",
                 (utc_now(), status, rows, run_id),
             )
-
-        return {"run_id": run_id, **result}
+        log.info("%s import run_id=%d finished: %s (%d rows)", source, run_id, status, rows)
 
     except Exception as exc:
-        log.exception("garmin import failed")
+        log.exception("%s import run_id=%d failed", source, run_id)
         with db() as conn:
             conn.execute(
                 "UPDATE import_runs SET finished_at=?, status=?, error=? WHERE id=?",
                 (utc_now(), "error", str(exc), run_id),
             )
-        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/import/garmin", dependencies=[Depends(_import_auth)])
+async def import_garmin(
+    background_tasks: BackgroundTasks,
+    days: int = Query(default=7, ge=1, le=3650),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+):
+    from app.importers.garmin import run_import
+
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO import_runs(source, started_at, status) VALUES (?,?,?)",
+            ("garmin", utc_now(), "running"),
+        )
+        run_id = cur.lastrowid
+
+    background_tasks.add_task(
+        _run_import_bg, "garmin", run_id, run_import,
+        {"days": days, "start_date": start_date, "end_date": end_date},
+    )
+    return {"run_id": run_id, "status": "started"}
+
+
+@router.post("/import/fitbit", dependencies=[Depends(_import_auth)])
+async def import_fitbit(
+    background_tasks: BackgroundTasks,
+    days: int = Query(default=7, ge=1, le=3650),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+):
+    from app.importers.fitbit import run_import
+
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO import_runs(source, started_at, status) VALUES (?,?,?)",
+            ("fitbit", utc_now(), "running"),
+        )
+        run_id = cur.lastrowid
+
+    background_tasks.add_task(
+        _run_import_bg, "fitbit", run_id, run_import,
+        {"days": days, "start_date": start_date, "end_date": end_date},
+    )
+    return {"run_id": run_id, "status": "started"}
+
+
+@router.get("/import/status/{run_id}", dependencies=[Depends(_import_auth)])
+async def import_status(run_id: int):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT source, started_at, finished_at, status, rows_upserted, error "
+            "FROM import_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="run not found")
+    return {
+        "run_id": run_id,
+        "source": row[0],
+        "started_at": row[1],
+        "finished_at": row[2],
+        "status": row[3],
+        "rows_upserted": row[4],
+        "error": row[5],
+    }
 
 
 @router.post("/fitbit/init_tokens", dependencies=[Depends(_import_auth)])
@@ -101,55 +147,6 @@ async def fitbit_init_tokens(body: dict):
             (access_token, refresh_token, expires_at, utc_now()),
         )
     return {"stored": True}
-
-
-@router.post("/import/fitbit", dependencies=[Depends(_import_auth)])
-async def import_fitbit(
-    days: int = Query(default=7, ge=1, le=3650),
-    start_date: date | None = Query(default=None),
-    end_date: date | None = Query(default=None),
-):
-    from app.importers.fitbit import run_import
-
-    run_id: int | None = None
-    started_at = utc_now()
-
-    with db() as conn:
-        cur = conn.execute(
-            "INSERT INTO import_runs(source, started_at, status) VALUES (?,?,?)",
-            ("fitbit", started_at, "running"),
-        )
-        run_id = cur.lastrowid
-
-    try:
-        with db() as conn:
-            result = run_import(conn, days=days, start_date=start_date, end_date=end_date)
-
-        if not result.get("skipped"):
-            from app.normalize import run_normalization
-            with db() as conn:
-                norm = run_normalization(conn)
-            result["normalization"] = norm
-
-        status = "skipped" if result.get("skipped") else "ok"
-        rows = result.get("rows_upserted", 0)
-
-        with db() as conn:
-            conn.execute(
-                "UPDATE import_runs SET finished_at=?, status=?, rows_upserted=? WHERE id=?",
-                (utc_now(), status, rows, run_id),
-            )
-
-        return {"run_id": run_id, **result}
-
-    except Exception as exc:
-        log.exception("fitbit import failed")
-        with db() as conn:
-            conn.execute(
-                "UPDATE import_runs SET finished_at=?, status=?, error=? WHERE id=?",
-                (utc_now(), "error", str(exc), run_id),
-            )
-        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.get("/export/db", dependencies=[Depends(_export_auth)])
