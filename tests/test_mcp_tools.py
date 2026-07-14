@@ -90,6 +90,65 @@ def test_log_alcohol():
     assert row[1] == 1.5
 
 
+# ── amend_log / delete_log ──────────────────────────────────────────────────
+
+def test_amend_log_updates_fields():
+    from app.mcp_server import log_caffeine, amend_log, get_logs
+    log_caffeine(description="espresso", amount_mg=65.0, ts="2025-01-01T07:30:00+00:00")
+    log_id = get_logs(start_date="2025-01-01", end_date="2025-01-01")[0]["id"]
+
+    result = amend_log(log_id=log_id, description="double espresso", quantity=130.0)
+    assert f"Amended log {log_id}" in result
+
+    logs = get_logs(start_date="2025-01-01", end_date="2025-01-01")
+    assert logs[0]["description"] == "double espresso"
+    assert logs[0]["quantity"] == 130.0
+    assert logs[0]["unit"] == "mg"  # untouched field preserved
+
+
+def test_amend_log_estimated_macros():
+    from app.mcp_server import log_meal, amend_log, get_logs
+    log_meal(description="steak")
+    log_id = get_logs(start_date=str(date.today()), end_date=str(date.today()))[0]["id"]
+
+    macros = {"protein_g": 40, "carbs_g": 0, "fat_g": 20}
+    amend_log(log_id=log_id, estimated_macros=macros)
+
+    logs = get_logs(start_date=str(date.today()), end_date=str(date.today()))
+    assert logs[0]["estimated_macros"] == macros
+
+
+def test_amend_log_no_fields():
+    from app.mcp_server import log_meal, amend_log, get_logs
+    log_meal(description="oats")
+    log_id = get_logs(start_date=str(date.today()), end_date=str(date.today()))[0]["id"]
+
+    result = amend_log(log_id=log_id)
+    assert "No fields" in result
+
+
+def test_amend_log_missing_id():
+    from app.mcp_server import amend_log
+    result = amend_log(log_id=9999, description="x")
+    assert "Error" in result
+
+
+def test_delete_log_removes_entry():
+    from app.mcp_server import log_alcohol, delete_log, get_logs
+    log_alcohol(description="glass of wine", units=1.5, ts="2025-01-01T20:00:00+00:00")
+    log_id = get_logs(start_date="2025-01-01", end_date="2025-01-01")[0]["id"]
+
+    result = delete_log(log_id=log_id)
+    assert f"Deleted log {log_id}" in result
+    assert get_logs(start_date="2025-01-01", end_date="2025-01-01") == []
+
+
+def test_delete_log_missing_id():
+    from app.mcp_server import delete_log
+    result = delete_log(log_id=9999)
+    assert "Error" in result
+
+
 # ── get_logs ──────────────────────────────────────────────────────────────────
 
 def test_get_logs_returns_entries():

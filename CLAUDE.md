@@ -81,6 +81,8 @@ Import endpoints gracefully no-op if the corresponding source's credentials are 
 log_meal(ts?, description, estimated_calories?, estimated_macros?, confidence)
 log_caffeine(ts?, description, amount_mg?)
 log_alcohol(ts?, description, units?)
+amend_log(log_id, ts?, description?, quantity?, unit?, estimated_calories?, estimated_macros?, confidence?)
+delete_log(log_id)
 get_logs(start_date, end_date, type?)
 get_daily_metrics(start_date, end_date)
 get_suggested_workout(date?)
