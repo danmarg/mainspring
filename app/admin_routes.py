@@ -16,7 +16,7 @@ _bearer = HTTPBearer()
 
 def _require_token(env_var: str):
     def dependency(creds: HTTPAuthorizationCredentials = Depends(_bearer)):
-        expected = os.getenv(env_var)
+        expected = (os.getenv(env_var) or "").strip()
         if not expected:
             raise HTTPException(status_code=503, detail=f"{env_var} not configured")
         if creds.credentials != expected:

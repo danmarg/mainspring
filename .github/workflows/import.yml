@@ -10,7 +10,7 @@ on:
         required: true
         default: garmin
         type: choice
-        options: [garmin, fitbit]
+        options: [garmin, google_health, all]
       start_date:
         description: "Backfill start (YYYY-MM-DD, leave blank for rolling window)"
         required: false
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Garmin import
-        if: github.event_name == 'schedule' || inputs.source == 'garmin'
+        if: github.event_name == 'schedule' || inputs.source == 'garmin' || inputs.source == 'all'
         env:
           TOKEN: ${{ secrets.MAINSPRING_ADMIN_TOKEN }}
           URL: ${{ secrets.MAINSPRING_URL }}
@@ -39,8 +39,8 @@ jobs:
           RUN_ID=$(echo "$RESPONSE" | grep -o '"run_id":[0-9]*' | grep -o '[0-9]*')
           echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT
 
-      - name: Trigger Fitbit import
-        if: inputs.source == 'fitbit'
+      - name: Trigger Google Health import
+        if: github.event_name == 'schedule' || inputs.source == 'google_health' || inputs.source == 'all'
         env:
           TOKEN: ${{ secrets.MAINSPRING_ADMIN_TOKEN }}
           URL: ${{ secrets.MAINSPRING_URL }}
@@ -49,6 +49,9 @@ jobs:
           if [ -n "${{ inputs.start_date }}" ]; then
             PARAMS="?start_date=${{ inputs.start_date }}&end_date=${{ inputs.end_date }}"
           fi
-          curl -sf -X POST "${URL}/admin/import/fitbit${PARAMS}" \
+          RESPONSE=$(curl -sf -X POST "${URL}/admin/import/google_health${PARAMS}" \
             -H "Authorization: Bearer ${TOKEN}" \
-            -H "Content-Type: application/json"
+            -H "Content-Type: application/json")
+          echo "$RESPONSE"
+          RUN_ID=$(echo "$RESPONSE" | grep -o '"run_id":[0-9]*' | grep -o '[0-9]*')
+          echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT

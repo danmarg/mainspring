@@ -39,12 +39,22 @@ def db(path: Path | None = None):
         conn.close()
 
 
+def _drop_legacy_columns(conn: sqlite3.Connection) -> None:
+    """Drop columns removed from schema.sql that may exist in older DBs."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(daily_metrics)")}
+    for col in ("readiness_score",):
+        if col in existing:
+            conn.execute(f"ALTER TABLE daily_metrics DROP COLUMN {col}")
+    conn.commit()
+
+
 def init_db(path: Path | None = None) -> None:
     """Apply schema.sql then any pending migrations, idempotently."""
     with get_connection(path or DB_PATH) as conn:
         conn.executescript(SCHEMA_PATH.read_text())
         conn.commit()
         _apply_migrations(conn)
+        _drop_legacy_columns(conn)
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
