@@ -13,3 +13,4 @@ analysis/*.db
 *.swp
 *.swo
 .claude/
+google_health_tokens.json
