@@ -204,12 +204,15 @@ def _list_datapoints(conn, data_type: str, d: date, tokens: dict) -> Any | None:
     path = f"/users/me/dataTypes/{data_type}/dataPoints"
     field = data_type.replace("-", "_")
     if data_type.startswith("daily-"):
-        f = f'{field}.date = "{d.isoformat()}"'
+        # daily-* types filter by date range (= not supported, must use >= AND <)
+        next_day = d + timedelta(days=1)
+        f = f'{field}.date >= "{d.isoformat()}" AND {field}.date < "{next_day.isoformat()}"'
     else:
+        # Session types (sleep, exercise) filter by civil_start_time (local, not UTC)
         next_day = d + timedelta(days=1)
         f = (
-            f'{field}.interval.start_time >= "{d.isoformat()}T00:00:00Z" '
-            f'AND {field}.interval.start_time < "{next_day.isoformat()}T00:00:00Z"'
+            f'{field}.interval.civil_start_time >= "{d.isoformat()}T00:00:00" '
+            f'AND {field}.interval.civil_start_time < "{next_day.isoformat()}T00:00:00"'
         )
     return _get(conn, path, {"filter": f}, tokens)
 
