@@ -826,6 +826,136 @@ def _unit_for(metric: str) -> str:
     return units.get(metric, metric)
 
 
+# ── guide resource ────────────────────────────────────────────────────────────
+
+@mcp.resource("mainspring://guide")
+def guide() -> str:
+    """Mainspring usage guide — call this at the start of any health or workout conversation."""
+    return """# Mainspring — personal health data server
+
+Mainspring stores your Garmin and Google Health data locally, plus manual logs you
+add via these tools. It is a **data layer only** — you (Claude) do the reasoning,
+planning, and recommendations. The server never fetches weather or sends messages.
+
+---
+
+## Morning planning workflow
+
+1. Call `get_workout_context()` — one call returns everything needed:
+   - today's HRV, sleep, stress, body battery, training readiness
+   - HRV trend (improving/stable/declining over 7 days)
+   - TSB (Training Stress Balance = CTL − ATL; positive = fresh, negative = fatigued/building)
+   - load_status derived from ATL/CTL ratio
+   - yesterday's alcohol, caffeine, calories, and RPE
+   - week progress vs weekly targets (runs, km, strength sessions)
+   - next goal event with weeks_away
+   - aerobic efficiency trend (pace/HR ratio for running, 4-week vs prior 4-week)
+   - Garmin's suggested workout for today
+   - personalized insights from historical correlations
+   - last 7 activities
+
+2. Use `get_correlations()` periodically (weekly / when patterns are unclear) to surface
+   which behaviours most affect recovery. Results feed the insights in `get_workout_context`.
+
+3. Recommend a workout. Consider in order:
+   a. TSB: positive → fine to go hard; deeply negative → favour recovery
+   b. HRV trend: declining → back off intensity; improving → good to build
+   c. load_status: overreaching → rest or easy; detraining → safe to add load
+   d. next_event weeks_away: taper starts ~2–3 weeks out; peak week ~4–6 weeks out
+   e. aerobic_efficiency trend: improving = adaptation working; declining = too much stress
+   f. yesterday_rpe: 8–10 → likely need easy day regardless of other signals
+   g. Garmin suggestion as a secondary input, not the primary driver
+
+---
+
+## Key metrics — how to interpret them
+
+| Metric | Good | Caution | Act |
+|---|---|---|---|
+| hrv | above personal avg | 5–10% below avg | >10% below → easy/rest |
+| tsb | 0 to +20 | -10 to 0 | < -20 → high fatigue, rest |
+| training_load_ratio | 0.8–1.3 | 1.3–1.5 | >1.5 overreaching |
+| sleep_score | >75 | 60–75 | <60 compounds other signals |
+| training_readiness | >70 | 50–70 | <50 favour recovery |
+| body_battery_high | >70 | 40–70 | <40 suggests poor recovery |
+
+TSB interpretation: think of it as "form". Positive = rested/sharp (good for racing or
+hard efforts). Negative = accumulated fatigue (fine during a build block, bad near a race).
+A TSB of -30 with a marathon in 2 weeks = needs to taper urgently.
+
+---
+
+## Logging tools
+
+| Tool | When to use |
+|---|---|
+| `log_meal` | any food; include photo estimates with confidence='photo_estimate' |
+| `log_caffeine` | coffee, tea, pre-workout; amount_mg optional |
+| `log_alcohol` | UK units (1 unit = 8g ethanol; pint ~2.3 units, glass wine ~2 units) |
+| `log_weight` | kg; normalizer surfaces into daily_metrics and correlations |
+| `log_blood_pressure` | systolic/diastolic/pulse in mmHg |
+| `log_rpe` | 1–10 after a workout; feeds next-day correlation insights |
+| `log_note` | anything else — sleep quality, illness, stress events |
+| `amend_log` / `delete_log` | corrections; use get_logs to find the id |
+
+Log things at the time they happen. Past entries can use the `ts` parameter (UTC ISO-8601)
+or `date` parameter (for log_rpe). RPE should be logged same day as the workout.
+
+---
+
+## Training goals and events
+
+Set once, update when training focus changes:
+```
+set_training_goal('weekly_runs', 3)
+set_training_goal('weekly_volume_km', 50)
+set_training_goal('weekly_strength_sessions', 1)
+add_training_event('2026-11-15', 'marathon', 'Berlin Marathon', 'sub-4h')
+```
+
+`get_workout_context` automatically picks up the next upcoming event and shows
+weeks_away so you can reason about periodization without hard-coded phase rules.
+
+When an event is done: `complete_training_event(id, result='3:52:14')`.
+
+---
+
+## Correlation analysis
+
+`get_correlations()` computes Pearson/Spearman correlations between behaviour inputs
+(alcohol, caffeine, calories, weight, RPE) and recovery outputs (HRV, sleep score,
+resting HR, stress, body battery) at lag 0, 1, and 2 days.
+
+- **lag=1** is the most clinically relevant: last night's behaviour → this morning's recovery
+- Requires `min_pairs=14` (default) — results with fewer data points are suppressed
+- `r` ranges −1 to +1; |r| > 0.3 is worth acting on, |r| > 0.5 is strong
+- Use `method='spearman'` if you suspect non-linear relationships
+
+Run this when: onboarding to a new conversation, weekly reviews, or when the user asks
+"why is my HRV low?" and you want data rather than guesses.
+
+---
+
+## Data sources
+
+- **Garmin** (primary): HRV, sleep, stress, body battery, training readiness, training load,
+  VO2max, SpO2, breathing rate, activities, suggested workouts — imported hourly
+- **Google Health** (secondary): activities, step counts — imported hourly
+- **Manual logs**: meals, caffeine, alcohol, weight, BP, RPE, notes — via these tools
+- Normalization runs after each import; `daily_metrics` is rebuilt from raw sources
+
+If a metric shows None, the device hasn't synced yet for that day or the API returned
+no data. Garmin data often arrives 1–2 hours after waking/syncing.
+
+---
+
+## Source preferences
+
+`get_source_config()` shows which source wins per metric. Override with
+`set_source_preference('hrv', 'garmin')`. Default priority: garmin → google_health.
+"""
+
+
 # ── ASGI app ─────────────────────────────────────────────────────────────────
 
 def build_mcp_app():
