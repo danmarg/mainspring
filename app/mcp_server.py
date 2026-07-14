@@ -223,15 +223,21 @@ def get_daily_metrics(
     end_date: str,
 ) -> list[dict]:
     """Return normalized daily health metrics between start_date and end_date (YYYY-MM-DD).
-    Includes HRV, sleep, stress, body battery, training readiness, caffeine, alcohol."""
+    Includes HRV, sleep, stress, body battery, training readiness, training load,
+    weight, blood pressure, caffeine, and alcohol."""
     with db() as conn:
         rows = conn.execute(
             """
             SELECT date, resting_hr, hrv,
                    sleep_score, sleep_duration_min,
+                   sleep_deep_min, sleep_rem_min, sleep_light_min,
                    body_battery_high, body_battery_low,
-                   stress_avg, training_readiness, vo2max, steps,
+                   stress_avg, training_readiness,
+                   active_zone_minutes, spo2_avg, breathing_rate,
+                   vo2max, steps,
+                   acute_training_load, chronic_training_load, training_load_ratio,
                    caffeine_mg, alcohol_units, calories_estimated,
+                   weight_kg, bp_systolic, bp_diastolic, bp_pulse,
                    source_flags_json
             FROM daily_metrics
             WHERE date BETWEEN ? AND ?
@@ -247,16 +253,29 @@ def get_daily_metrics(
             "hrv": r[2],
             "sleep_score": r[3],
             "sleep_duration_min": r[4],
-            "body_battery_high": r[5],
-            "body_battery_low": r[6],
-            "stress_avg": r[7],
-            "training_readiness": r[8],
-            "vo2max": r[9],
-            "steps": r[10],
-            "caffeine_mg": r[11],
-            "alcohol_units": r[12],
-            "calories_estimated": r[13],
-            "sources": json.loads(r[14]) if r[14] else {},
+            "sleep_deep_min": r[5],
+            "sleep_rem_min": r[6],
+            "sleep_light_min": r[7],
+            "body_battery_high": r[8],
+            "body_battery_low": r[9],
+            "stress_avg": r[10],
+            "training_readiness": r[11],
+            "active_zone_minutes": r[12],
+            "spo2_avg": r[13],
+            "breathing_rate": r[14],
+            "vo2max": r[15],
+            "steps": r[16],
+            "acute_training_load": r[17],
+            "chronic_training_load": r[18],
+            "training_load_ratio": r[19],
+            "caffeine_mg": r[20],
+            "alcohol_units": r[21],
+            "calories_estimated": r[22],
+            "weight_kg": r[23],
+            "bp_systolic": r[24],
+            "bp_diastolic": r[25],
+            "bp_pulse": r[26],
+            "sources": json.loads(r[27]) if r[27] else {},
         }
         for r in rows
     ]
@@ -329,9 +348,9 @@ def get_source_config() -> dict:
 
 @mcp.tool()
 def set_source_preference(metric: str, source: str) -> str:
-    """Set the canonical source for a metric. source must be 'garmin' or 'fitbit'.
+    """Set the canonical source for a metric. source must be 'garmin' or 'google_health'.
     Use 'activities' as the metric to set the preference for activity dedup."""
-    valid_sources = ("garmin", "fitbit")
+    valid_sources = ("garmin", "google_health")
     if source not in valid_sources:
         return f"Error: source must be one of {valid_sources}"
     with db() as conn:
@@ -341,6 +360,263 @@ def set_source_preference(metric: str, source: str) -> str:
             (metric, source),
         )
     return f"Set {metric} → {source}"
+
+
+@mcp.tool()
+def log_note(description: str, ts: Optional[str] = None) -> str:
+    """Log a free-text note. ts is UTC ISO-8601 (defaults to now)."""
+    event_ts = _ts_or_now(ts)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO manual_logs(ts, type, description, created_at) VALUES (?,?,?,?)",
+            (event_ts, "note", description, utc_now()),
+        )
+    return f"Logged note at {event_ts}: {description}"
+
+
+@mcp.tool()
+def log_weight(kg: float, ts: Optional[str] = None) -> str:
+    """Log a weight measurement in kilograms. ts is UTC ISO-8601 (defaults to now)."""
+    event_ts = _ts_or_now(ts)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
+            (event_ts, "weight", f"{kg}kg", kg, "kg", utc_now()),
+        )
+    return f"Logged weight at {event_ts}: {kg}kg"
+
+
+@mcp.tool()
+def log_blood_pressure(
+    systolic: int,
+    diastolic: int,
+    pulse: Optional[int] = None,
+    ts: Optional[str] = None,
+) -> str:
+    """Log a blood pressure reading in mmHg. pulse is beats per minute (optional).
+    ts is UTC ISO-8601 (defaults to now)."""
+    event_ts = _ts_or_now(ts)
+    desc = f"{systolic}/{diastolic}" + (f" pulse {pulse}" if pulse else "")
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO manual_logs(ts, type, description, quantity, unit, estimated_macros_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                event_ts, "blood_pressure", desc,
+                systolic, "mmHg",
+                json.dumps({"systolic": systolic, "diastolic": diastolic, "pulse": pulse}),
+                utc_now(),
+            ),
+        )
+    return f"Logged BP at {event_ts}: {desc}"
+
+
+@mcp.tool()
+def get_correlations(
+    days: int = 90,
+    lags: Optional[list] = None,
+    inputs: Optional[list] = None,
+    outputs: Optional[list] = None,
+    min_pairs: int = 14,
+    method: str = "pearson",
+) -> dict:
+    """Compute lag-shifted correlations between behavior inputs and recovery outputs.
+    lag=1 means output measured 1 day after input (e.g. last night's alcohol → this morning's HRV).
+    method: 'pearson' or 'spearman'.
+    Returns correlations sorted by absolute strength plus a plain-text top_findings summary."""
+    from app.analysis import compute_correlations
+    with db() as conn:
+        return compute_correlations(
+            conn,
+            inputs=inputs,
+            outputs=outputs,
+            lags=lags or [0, 1, 2],
+            days=days,
+            min_pairs=min_pairs,
+            method=method,
+        )
+
+
+@mcp.tool()
+def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict:
+    """Rich context for workout planning: today's metrics, HRV trend, training load
+    status, Garmin's suggested workout, recent activities, and personalized insights
+    based on historical correlations (e.g. 'you had 2 drinks yesterday; historically
+    that reduces your HRV by ~8ms the next morning')."""
+    from app.analysis import compute_correlations
+
+    d = _date_or_today(date)
+
+    with db() as conn:
+        # Today's metrics
+        today_row = conn.execute(
+            """
+            SELECT hrv, sleep_score, sleep_duration_min, body_battery_high,
+                   stress_avg, training_readiness,
+                   acute_training_load, chronic_training_load, training_load_ratio,
+                   weight_kg, resting_hr
+            FROM daily_metrics WHERE date=?
+            """,
+            (d,),
+        ).fetchone()
+
+        # HRV window for trend
+        hrv_rows = conn.execute(
+            "SELECT date, hrv FROM daily_metrics WHERE date <= ? AND hrv IS NOT NULL "
+            "ORDER BY date DESC LIMIT ?",
+            (d, hrv_window),
+        ).fetchall()
+
+        # Yesterday behavior
+        from datetime import date as date_cls, timedelta
+        yesterday = (date_cls.fromisoformat(d) - timedelta(days=1)).isoformat()
+        yest_row = conn.execute(
+            "SELECT alcohol_units, caffeine_mg, calories_estimated FROM daily_metrics WHERE date=?",
+            (yesterday,),
+        ).fetchone()
+
+        # Garmin suggestion
+        sw_row = conn.execute(
+            "SELECT workout_type, description, target_duration_min, target_intensity "
+            "FROM suggested_workouts WHERE date=? ORDER BY source LIMIT 1",
+            (d,),
+        ).fetchone()
+
+        # Recent activities (last 7)
+        act_rows = conn.execute(
+            "SELECT date, type, duration_s, avg_hr FROM activities "
+            "WHERE date <= ? ORDER BY date DESC, start_time DESC LIMIT 7",
+            (d,),
+        ).fetchall()
+
+        # Correlations for personalized insights
+        try:
+            corr_result = compute_correlations(
+                conn,
+                inputs=["alcohol_units", "caffeine_mg"],
+                outputs=["hrv", "sleep_score", "stress_avg"],
+                lags=[1],
+                days=90,
+                min_pairs=10,
+            )
+            correlations = corr_result.get("correlations", [])
+        except Exception:
+            correlations = []
+
+    # Build today dict
+    today: dict = {}
+    if today_row:
+        hrv_val = today_row[0]
+        today = {
+            "hrv": hrv_val,
+            "sleep_score": today_row[1],
+            "sleep_duration_min": today_row[2],
+            "body_battery_high": today_row[3],
+            "stress_avg": today_row[4],
+            "training_readiness": today_row[5],
+            "acute_training_load": today_row[6],
+            "chronic_training_load": today_row[7],
+            "training_load_ratio": today_row[8],
+            "weight_kg": today_row[9],
+            "resting_hr": today_row[10],
+        }
+
+        # HRV trend
+        hrv_vals = [r[1] for r in hrv_rows if r[1] is not None]
+        if len(hrv_vals) >= 4:
+            recent_avg = sum(hrv_vals[:3]) / 3
+            older_avg = sum(hrv_vals[3:]) / len(hrv_vals[3:])
+            if older_avg > 0:
+                pct_change = (recent_avg - older_avg) / older_avg
+                if pct_change > 0.03:
+                    trend = "improving"
+                elif pct_change < -0.03:
+                    trend = "declining"
+                else:
+                    trend = "stable"
+            else:
+                trend = "stable"
+            today["hrv_trend"] = trend
+            today["hrv_recent_avg"] = round(recent_avg, 1)
+        elif hrv_vals:
+            today["hrv_trend"] = "insufficient_data"
+            today["hrv_recent_avg"] = round(sum(hrv_vals) / len(hrv_vals), 1)
+
+        # Load status
+        ratio = today_row[8]
+        if ratio is not None:
+            if ratio < 0.8:
+                load_status = "detraining"
+            elif ratio < 1.0:
+                load_status = "maintenance"
+            elif ratio < 1.3:
+                load_status = "productive"
+            elif ratio < 1.5:
+                load_status = "slight_overreaching"
+            else:
+                load_status = "overreaching"
+            today["load_status"] = load_status
+
+    # Yesterday behavior
+    yesterday_behavior: dict = {}
+    if yest_row:
+        yesterday_behavior = {
+            "alcohol_units": yest_row[0],
+            "caffeine_mg": yest_row[1],
+            "calories_estimated": yest_row[2],
+        }
+
+    # Personalized insights
+    insights = []
+    for c in correlations:
+        if abs(c["r"]) < 0.15:
+            continue
+        inp = c["input"]
+        out = c["output"]
+        yval = yesterday_behavior.get(inp)
+        if not yval:
+            continue
+        direction = "lower" if c["r"] < 0 else "higher"
+        insights.append(
+            f"You had {yval} {_unit_for(inp)} yesterday. "
+            f"Based on {c['n_pairs']} days of history, this is associated with "
+            f"{direction} {out} today (r={c['r']})."
+        )
+
+    # Garmin suggestion
+    garmin_suggestion = None
+    if sw_row:
+        garmin_suggestion = {
+            "workout_type": sw_row[0],
+            "description": sw_row[1],
+            "target_duration_min": sw_row[2],
+            "target_intensity": sw_row[3],
+        }
+
+    # Recent activities
+    recent_activities = [
+        {
+            "date": r[0],
+            "type": r[1],
+            "duration_min": round(r[2] / 60) if r[2] else None,
+            "avg_hr": r[3],
+        }
+        for r in act_rows
+    ]
+
+    return {
+        "date": d,
+        "today": today,
+        "yesterday_behavior": yesterday_behavior,
+        "garmin_suggestion": garmin_suggestion,
+        "personalized_insights": insights,
+        "recent_activities": recent_activities,
+    }
+
+
+def _unit_for(metric: str) -> str:
+    units = {"alcohol_units": "units of alcohol", "caffeine_mg": "mg of caffeine"}
+    return units.get(metric, metric)
 
 
 # ── ASGI app ─────────────────────────────────────────────────────────────────
