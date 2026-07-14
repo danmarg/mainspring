@@ -50,7 +50,7 @@ run_chunk() {
         rows=$(echo "$status_resp"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('rows_upserted') or '')")
         err=$(echo "$status_resp"    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error') or '')")
 
-        if [ "$status" = "completed" ]; then
+        if [ "$status" = "ok" ] || [ "$status" = "skipped" ]; then
             echo "  ✓ $rows rows"
             break
         elif [ "$status" = "error" ]; then
