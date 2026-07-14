@@ -12,6 +12,7 @@ dependencies = [
     "garminconnect>=0.2",
     "mcp[cli]>=1.0",
     "datasette>=0.65",
+    "datasette-vega>=0.6",
 ]
 
 [project.optional-dependencies]
