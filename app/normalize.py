@@ -95,19 +95,20 @@ def _tz_from_garmin_payload(payload_json: str, endpoint: str) -> str | None:
     return f"UTC{sign}{h:02d}:{m:02d}"
 
 
-def rebuild_day_timezone(conn) -> int:
-    dates = {
-        row[0]
-        for row in conn.execute(
-            "SELECT DISTINCT date FROM raw_import_payloads WHERE date IS NOT NULL"
-        ).fetchall()
-    }
-    dates |= {
-        row[0]
-        for row in conn.execute(
-            "SELECT DISTINCT date FROM raw_daily_metrics"
-        ).fetchall()
-    }
+def rebuild_day_timezone(conn, dates: set[str] | None = None) -> int:
+    if dates is None:
+        dates = {
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT date FROM raw_import_payloads WHERE date IS NOT NULL"
+            ).fetchall()
+        }
+        dates |= {
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT date FROM raw_daily_metrics"
+            ).fetchall()
+        }
 
     written = 0
     for date_str in sorted(dates):
@@ -142,18 +143,19 @@ def _resolve_tz_for_date(conn, date_str: str) -> tuple[str, str]:
 
 # ── daily_metrics rebuild ────────────────────────────────────────────────────
 
-def rebuild_daily_metrics(conn) -> int:
-    dates = {
-        row[0]
-        for row in conn.execute("SELECT DISTINCT date FROM raw_daily_metrics").fetchall()
-    }
-    dates |= {
-        row[0]
-        for row in conn.execute(
-            "SELECT DISTINCT DATE(ts) FROM manual_logs"
-        ).fetchall()
-        if row[0]
-    }
+def rebuild_daily_metrics(conn, dates: set[str] | None = None) -> int:
+    if dates is None:
+        dates = {
+            row[0]
+            for row in conn.execute("SELECT DISTINCT date FROM raw_daily_metrics").fetchall()
+        }
+        dates |= {
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT DATE(ts) FROM manual_logs"
+            ).fetchall()
+            if row[0]
+        }
 
     written = 0
     for date_str in sorted(dates):
@@ -401,9 +403,9 @@ def _insert_activity(conn, row: tuple, source: str, garmin_id: str | None, gh_id
 
 # ── entry point ──────────────────────────────────────────────────────────────
 
-def run_normalization(conn) -> dict:
-    tz_rows = rebuild_day_timezone(conn)
-    metric_rows = rebuild_daily_metrics(conn)
+def run_normalization(conn, dates: set[str] | None = None) -> dict:
+    tz_rows = rebuild_day_timezone(conn, dates)
+    metric_rows = rebuild_daily_metrics(conn, dates)
     activity_rows = rebuild_activities(conn)
     conn.commit()
     return {

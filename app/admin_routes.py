@@ -36,8 +36,9 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
 
         if not result.get("skipped"):
             from app.normalize import run_normalization
+            imported_dates = set(result.get("dates") or [])
             with db() as conn:
-                run_normalization(conn)
+                run_normalization(conn, imported_dates or None)
 
         status = "skipped" if result.get("skipped") else "ok"
         rows = result.get("rows_upserted", 0)
