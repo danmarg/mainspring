@@ -11,7 +11,7 @@ MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 
 HOME_TZ = os.getenv("HOME_TZ", "Europe/Berlin")
 
-DEFAULT_SOURCE_PRIORITY = ["garmin", "google_health", "fitbit"]
+DEFAULT_SOURCE_PRIORITY = ["garmin", "google_health"]
 
 
 def _configure(conn: sqlite3.Connection) -> None:

@@ -154,12 +154,11 @@ def _post(conn, path: str, body: dict, tokens: dict) -> Any | None:
 
 
 def _civil_time_range(d: date) -> dict:
-    """Build a CivilTimeInterval for a single calendar day."""
+    """Build an Interval covering a single calendar day (UTC)."""
+    next_day = d + timedelta(days=1)
     return {
-        "start": {"year": d.year, "month": d.month, "day": d.day,
-                  "hours": 0, "minutes": 0, "seconds": 0},
-        "end":   {"year": d.year, "month": d.month, "day": d.day,
-                  "hours": 23, "minutes": 59, "seconds": 59},
+        "startTime": f"{d.isoformat()}T00:00:00Z",
+        "endTime":   f"{next_day.isoformat()}T00:00:00Z",
     }
 
 
@@ -170,11 +169,11 @@ def _daily_rollup(conn, data_type: str, d: date, tokens: dict) -> Any | None:
 
 def _list_datapoints(conn, data_type: str, d: date, tokens: dict) -> Any | None:
     path = f"/users/me/dataTypes/{data_type}/dataPoints:list"
-    # list uses a time range as well; for sessions (sleep, exercise) this returns
-    # all sessions that overlap the civil day
-    iso_start = f"{d.isoformat()}T00:00:00Z"
-    iso_end   = f"{d.isoformat()}T23:59:59Z"
-    return _post(conn, path, {"startTime": iso_start, "endTime": iso_end}, tokens)
+    next_day = d + timedelta(days=1)
+    return _post(conn, path, {
+        "startTime": f"{d.isoformat()}T00:00:00Z",
+        "endTime":   f"{next_day.isoformat()}T00:00:00Z",
+    }, tokens)
 
 
 # ── parsers ───────────────────────────────────────────────────────────────────

@@ -26,8 +26,8 @@ from threading import Event
 REDIRECT_URI = "http://localhost:8080/callback"
 SCOPES = " ".join([
     "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+    "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
     "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
-    "https://www.googleapis.com/auth/googlehealth.health_signals.readonly",
 ])
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
