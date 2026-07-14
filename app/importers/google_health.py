@@ -154,11 +154,11 @@ def _post(conn, path: str, body: dict, tokens: dict) -> Any | None:
 
 
 def _civil_time_range(d: date) -> dict:
-    """Build an Interval covering a single calendar day (UTC)."""
+    """Build a CivilTimeInterval covering a single calendar day."""
     next_day = d + timedelta(days=1)
     return {
-        "startTime": f"{d.isoformat()}T00:00:00Z",
-        "endTime":   f"{next_day.isoformat()}T00:00:00Z",
+        "start": {"date": {"year": d.year,        "month": d.month,        "day": d.day}},
+        "end":   {"date": {"year": next_day.year, "month": next_day.month, "day": next_day.day}},
     }
 
 
