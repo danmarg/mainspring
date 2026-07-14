@@ -159,6 +159,8 @@ def rebuild_daily_metrics(conn) -> int:
     for date_str in sorted(dates):
         _rebuild_one_day(conn, date_str)
         written += 1
+        if written % 50 == 0:
+            conn.commit()
 
     return written
 
