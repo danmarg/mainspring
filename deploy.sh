@@ -27,3 +27,7 @@ echo "==> Updating scheduler machine $SCHEDULER_MACHINE..."
 fly machine update "$SCHEDULER_MACHINE" --image "$IMAGE" --app "$APP" --yes
 
 echo "==> Done."
+
+# To update the scheduler command (e.g. to add google_health import), run:
+# fly machine update $SCHEDULER_MACHINE --app $APP \
+#   --command '/bin/sh -c "curl -sf -X POST http://mainspring.internal:8080/admin/import/garmin -H \"Authorization: Bearer $ADMIN_TOKEN\"; curl -sf -X POST http://mainspring.internal:8080/admin/import/google_health -H \"Authorization: Bearer $ADMIN_TOKEN\""'
