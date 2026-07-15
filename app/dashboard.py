@@ -687,12 +687,6 @@ async def trends(request: Request, days: str = "90",
             ORDER BY date
         """, (clause,))
 
-        vo2max_rows = _rows(conn, """
-            SELECT date, vo2max FROM daily_metrics
-            WHERE date >= date('now', ?) AND vo2max IS NOT NULL
-            ORDER BY date
-        """, (clause,))
-
     # Merge rhr + max_hr by date for combined HR chart
     max_hr_by_date = {r["date"]: r["max_hr"] for r in max_hr_rows}
     hr_rows = []
@@ -714,7 +708,6 @@ async def trends(request: Request, days: str = "90",
         "load_spec": _zone_load_chart(load_rows),
         "battery_spec": _body_battery_chart(battery_rows),
         "hr_spec": _hr_chart(hr_rows),
-        "vo2max_spec": _sparse_line_chart(vo2max_rows, "vo2max", "VO2 Max (mL/kg/min)", color="#5cb85c"),
     })
 
 
