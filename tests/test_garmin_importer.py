@@ -105,7 +105,12 @@ def test_parse_training_readiness(tmp_db):
 
 def test_parse_training_status_vo2max(tmp_db):
     data = {
-        "mostRecentVO2Max": 52.3,
+        "mostRecentVO2Max": {
+            "generic": {
+                "vo2MaxPreciseValue": 52.3,
+                "vo2MaxValue": 52.0,
+            }
+        },
         "mostRecentTrainingLoadBalance": {
             "metricsTrainingLoadBalanceDTOMap": {
                 "123": {

@@ -190,16 +190,21 @@ def _parse_training_readiness(conn, date_str: str, data: list | dict) -> int:
 def _parse_training_status(conn, date_str: str, data: dict) -> int:
     now = utc_now()
     rows = 0
-    # VO2max — field name varies by firmware version
-    vo2 = (
-        data.get("mostRecentVO2Max")
-        or data.get("latestVO2Max")
-        or data.get("mostRecentVO2MaxRunning")
-        or data.get("vo2MaxPreciseValue")
-    )
+    # VO2max — API returns mostRecentVO2Max as a nested object, not a scalar:
+    #   {"generic": {"vo2MaxPreciseValue": 55.8, "vo2MaxValue": 56, ...}, ...}
+    vo2_raw = data.get("mostRecentVO2Max")
+    if isinstance(vo2_raw, dict):
+        generic = vo2_raw.get("generic") or {}
+        vo2 = generic.get("vo2MaxPreciseValue") or generic.get("vo2MaxValue")
+    else:
+        # flat response format (some firmware versions)
+        vo2 = vo2_raw or data.get("latestVO2Max") or data.get("vo2MaxPreciseValue")
     if vo2 is not None:
-        upsert_raw_metric(conn, date_str, SOURCE, "vo2max", float(vo2), now)
-        rows += 1
+        try:
+            upsert_raw_metric(conn, date_str, SOURCE, "vo2max", float(vo2), now)
+            rows += 1
+        except (TypeError, ValueError):
+            pass
 
     # Monthly zone load from mostRecentTrainingLoadBalance
     mlb = data.get("mostRecentTrainingLoadBalance") or {}

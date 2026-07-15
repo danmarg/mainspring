@@ -11,15 +11,14 @@
   {% endfor %}
 </div>
 
-<div class="two-col">
-  <div class="chart-block">
-    <h3>HRV <span style="color:#f4a261;font-size:0.72rem">— dashed = 7-day avg</span></h3>
-    <div class="vega-wrap" id="hrv-chart"></div>
-  </div>
-  <div class="chart-block">
-    <h3>Heart rate <span style="color:#888;font-size:0.72rem">— <span style="color:#4e9af1">blue = resting (dashed = 7d avg)</span> · <span style="color:#e05c5c">red = daily max (activity)</span></span></h3>
-    <div class="vega-wrap" id="hr-chart"></div>
-  </div>
+<div class="chart-block">
+  <h3>HRV <span style="color:#f4a261;font-size:0.72rem">— dashed = 7-day avg</span></h3>
+  <div class="vega-wrap" id="hrv-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Heart rate <span style="color:#888;font-size:0.72rem">— <span style="color:#4e9af1">blue = resting (dashed = 7d avg)</span> · <span style="color:#e05c5c">red = daily max (activity)</span></span></h3>
+  <div class="vega-wrap" id="hr-chart"></div>
 </div>
 
 <div class="chart-block">
@@ -36,11 +35,6 @@
   <h3>Body battery (high/low range)</h3>
   <div class="vega-wrap" id="battery-chart"></div>
 </div>
-
-<div class="chart-block">
-  <h3>VO2 Max</h3>
-  <div class="vega-wrap" id="vo2max-chart"></div>
-</div>
 {% endblock %}
 
 {% block scripts %}
@@ -50,6 +44,5 @@ embed('hr-chart',      {{ hr_spec|safe }});
 embed('sleep-chart',   {{ sleep_spec|safe }});
 embed('load-chart',    {{ load_spec|safe }});
 embed('battery-chart', {{ battery_spec|safe }});
-embed('vo2max-chart',  {{ vo2max_spec|safe }});
 </script>
 {% endblock %}
