@@ -1,5 +1,6 @@
 import logging
 import os
+import urllib.request
 from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -28,15 +29,42 @@ _import_auth = _require_token("ADMIN_TOKEN")
 _export_auth = _require_token("EXPORT_TOKEN")
 
 
+def _fire_morning_webhook() -> None:
+    url = os.getenv("MORNING_WEBHOOK_URL", "").strip()
+    if not url:
+        return
+    try:
+        req = urllib.request.Request(
+            url, data=b"{}", method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            log.info("morning webhook fired → %s", resp.status)
+    except Exception as exc:
+        log.warning("morning webhook failed: %s", exc)
+
+
 def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
     """Run an import synchronously in a background thread and update import_runs."""
     try:
+        today = date.today().isoformat()
+
+        # Snapshot sleep state before import so we can detect it newly arriving
+        sleep_before = None
+        if source == "garmin":
+            with db() as conn:
+                row = conn.execute(
+                    "SELECT sleep_score FROM daily_metrics WHERE date=?", (today,)
+                ).fetchone()
+                sleep_before = row[0] if row else None
+
         with db() as conn:
             result = import_fn(conn, **import_kwargs)
 
+        imported_dates = set(result.get("dates") or [])
+
         if not result.get("skipped"):
             from app.normalize import run_normalization
-            imported_dates = set(result.get("dates") or [])
             with db() as conn:
                 run_normalization(conn, imported_dates or None)
 
@@ -49,6 +77,15 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
                 (utc_now(), status, rows, run_id),
             )
         log.info("%s import run_id=%d finished: %s (%d rows)", source, run_id, status, rows)
+
+        # Fire morning webhook when sleep_score lands for today for the first time
+        if source == "garmin" and sleep_before is None and today in imported_dates:
+            with db() as conn:
+                row = conn.execute(
+                    "SELECT sleep_score FROM daily_metrics WHERE date=?", (today,)
+                ).fetchone()
+                if row and row[0] is not None:
+                    _fire_morning_webhook()
 
     except Exception as exc:
         log.exception("%s import run_id=%d failed", source, run_id)
