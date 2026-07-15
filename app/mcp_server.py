@@ -478,6 +478,16 @@ def set_training_goal(metric: str, value: float, unit: Optional[str] = None) -> 
 
 
 @mcp.tool()
+def delete_training_goal(metric: str) -> str:
+    """Delete a training goal by metric name (e.g. 'weekly_runs', 'weekly_volume_km')."""
+    with db() as conn:
+        cur = conn.execute("DELETE FROM training_goals WHERE metric=?", (metric,))
+    if cur.rowcount == 0:
+        return f"No training goal found for '{metric}'"
+    return f"Deleted training goal: {metric}"
+
+
+@mcp.tool()
 def get_training_goals() -> dict:
     """Return current weekly training targets and upcoming goal events."""
     with db() as conn:
