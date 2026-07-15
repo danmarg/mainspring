@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Overview{% endblock %}
+{% set active_page = 'overview' %}
+
+{% block content %}
+<h1>Overview — {{ today }}</h1>
+
+{% if yesterday_behavior %}
+<div class="behavior-summary">
+  Yesterday:
+  {% if yesterday_behavior.alcohol_units is not none %}
+    <span>{{ "%.1f"|format(yesterday_behavior.alcohol_units) }}</span> units alcohol &nbsp;·&nbsp;
+  {% endif %}
+  {% if yesterday_behavior.caffeine_mg is not none %}
+    <span>{{ "%.0f"|format(yesterday_behavior.caffeine_mg) }}</span> mg caffeine &nbsp;·&nbsp;
+  {% endif %}
+  {% if yesterday_behavior.calories_estimated is not none %}
+    <span>{{ "%.0f"|format(yesterday_behavior.calories_estimated) }}</span> kcal
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card-grid">
+{% for card in cards %}
+<div class="card">
+  <div class="label">{{ card.label }}</div>
+  <div class="value">{{ card.value }}<span class="unit">{{ card.unit }}</span></div>
+  {% if card.delta %}
+  <div class="delta {% if card.delta.pos %}pos{% else %}neg{% endif %}">{{ card.delta.text }} vs 7d avg</div>
+  {% endif %}
+</div>
+{% endfor %}
+</div>
+
+<div class="two-col">
+  <div class="chart-block">
+    <h3>HRV — 14 days</h3>
+    <div class="vega-wrap" id="hrv-spark"></div>
+  </div>
+  <div class="chart-block">
+    <h3>Sleep score — 14 days</h3>
+    <div class="vega-wrap" id="sleep-spark"></div>
+  </div>
+  <div class="chart-block">
+    <h3>Resting HR — 14 days</h3>
+    <div class="vega-wrap" id="hr-spark"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+embed('hrv-spark',   {{ hrv_spark|safe }});
+embed('sleep-spark', {{ sleep_spark|safe }});
+embed('hr-spark',    {{ hr_spark|safe }});
+</script>
+{% endblock %}

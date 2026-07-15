@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.db import init_db
 from app.admin_routes import router as admin_router
 from app.mcp_oauth import router as mcp_auth_router
+from app.dashboard import router as dashboard_router
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ async def normalize_mcp_path(request: Request, call_next: Callable):
 
 app.include_router(admin_router)
 app.include_router(mcp_auth_router)
+app.include_router(dashboard_router)
 
 
 # Mount MCP server if MCP_TOKEN is configured (_mcp_app built at top of file)

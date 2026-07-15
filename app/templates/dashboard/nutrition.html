@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Nutrition{% endblock %}
+{% set active_page = 'nutrition' %}
+
+{% block content %}
+<h1>Nutrition</h1>
+
+<div class="day-tabs">
+  {% for d in [('30','30d'), ('90','90d'), ('180','180d'), ('all','All')] %}
+  <a href="/dashboard/nutrition?days={{ d[0] }}" class="{% if days == d[0] %}active{% endif %}">{{ d[1] }}</a>
+  {% endfor %}
+</div>
+
+<div style="color: var(--text-muted); font-size:0.82rem; margin-bottom:1rem">
+  Protein target: <strong style="color:var(--text)">{{ "%.0f"|format(protein_target) }}g/day</strong>
+  — set via MCP: <code style="color:#7ec8e3">set_training_goal(metric="protein_g_daily", value=150, unit="g")</code>
+</div>
+
+<div class="chart-block">
+  <h3>Calories logged — per day</h3>
+  <div class="vega-wrap" id="calories-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Protein — % of {{ "%.0f"|format(protein_target) }}g target (only days with macro estimates logged)</h3>
+  <div class="vega-wrap" id="protein-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Average macros by day of week (days with macro estimates)</h3>
+  <div class="vega-wrap" id="macro-dow-chart"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+embed('calories-chart',  {{ calories_spec|safe }});
+embed('protein-chart',   {{ protein_spec|safe }});
+embed('macro-dow-chart', {{ macro_dow_spec|safe }});
+</script>
+{% endblock %}

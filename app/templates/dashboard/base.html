@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Mainspring{% endblock %} — Health Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #111;
+    --surface: #1a1a1a;
+    --surface2: #242424;
+    --border: #2e2e2e;
+    --text: #e0e0e0;
+    --text-muted: #888;
+    --accent: #4e9af1;
+    --green: #5cb85c;
+    --red: #e05c5c;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 15px; }
+
+  nav {
+    display: flex; align-items: center; gap: 0;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 0 1.5rem; height: 48px; position: sticky; top: 0; z-index: 10;
+  }
+  nav .brand { font-weight: 700; color: var(--accent); margin-right: 2rem; letter-spacing: 0.03em; font-size: 1.05rem; }
+  nav a { color: var(--text-muted); text-decoration: none; padding: 0 0.9rem; height: 48px; display: flex; align-items: center; font-size: 0.88rem; border-bottom: 2px solid transparent; transition: color 0.15s; }
+  nav a:hover { color: var(--text); }
+  nav a.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  main { max-width: 1280px; margin: 0 auto; padding: 1.5rem 1.5rem 3rem; }
+
+  h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 1.2rem; color: var(--text); }
+  h2 { font-size: 1rem; font-weight: 600; margin: 1.8rem 0 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.78rem; }
+
+  .day-tabs { display: flex; gap: 0.4rem; margin-bottom: 1.5rem; }
+  .day-tabs a {
+    padding: 0.28rem 0.8rem; border-radius: 4px; font-size: 0.83rem;
+    text-decoration: none; color: var(--text-muted); background: var(--surface2); border: 1px solid var(--border);
+    transition: background 0.15s;
+  }
+  .day-tabs a.active, .day-tabs a:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.1rem; }
+  .card .label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem; }
+  .card .value { font-size: 1.8rem; font-weight: 700; line-height: 1; }
+  .card .unit { font-size: 0.78rem; color: var(--text-muted); margin-left: 0.2rem; }
+  .card .delta { font-size: 0.8rem; margin-top: 0.3rem; }
+  .card .delta.pos { color: var(--green); }
+  .card .delta.neg { color: var(--red); }
+  .card .spark { margin-top: 0.6rem; height: 60px; }
+
+  .chart-block { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem 0.8rem; margin-bottom: 1.2rem; }
+  .chart-block h3 { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.8rem; }
+  .vega-wrap { width: 100%; }
+
+  .behavior-summary { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1.5rem; font-size: 0.88rem; color: var(--text-muted); }
+  .behavior-summary span { color: var(--text); font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+  th { text-align: left; padding: 0.45rem 0.7rem; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+  td { padding: 0.45rem 0.7rem; border-bottom: 1px solid var(--border); color: var(--text); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--surface2); }
+  .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: auto; margin-bottom: 1.2rem; }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } nav a .label { display: none; } }
+</style>
+</head>
+<body>
+<nav>
+  <span class="brand">Mainspring</span>
+  <a href="/dashboard" class="{% if active_page == 'overview' %}active{% endif %}">Overview</a>
+  <a href="/dashboard/trends" class="{% if active_page == 'trends' %}active{% endif %}">Trends</a>
+  <a href="/dashboard/behavior" class="{% if active_page == 'behavior' %}active{% endif %}">Behavior</a>
+  <a href="/dashboard/nutrition" class="{% if active_page == 'nutrition' %}active{% endif %}">Nutrition</a>
+  <a href="/dashboard/activities" class="{% if active_page == 'activities' %}active{% endif %}">Activities</a>
+  <a href="/datasette" style="margin-left:auto">Datasette ↗</a>
+</nav>
+<main>
+{% block content %}{% endblock %}
+</main>
+<script>
+function embed(id, spec) {
+  if (!spec || spec === '{}') return;
+  vegaEmbed('#' + id, JSON.parse(spec), {
+    theme: 'dark',
+    actions: false,
+    renderer: 'svg',
+    config: { background: '#1a1a1a' }
+  }).catch(console.error);
+}
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

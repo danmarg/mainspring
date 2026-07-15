@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Activities{% endblock %}
+{% set active_page = 'activities' %}
+
+{% block content %}
+<h1>Activities</h1>
+
+<div class="day-tabs">
+  {% for d in [('30','30d'), ('60','60d'), ('90','90d'), ('180','180d'), ('all','All')] %}
+  <a href="/dashboard/activities?days={{ d[0] }}" class="{% if days == d[0] %}active{% endif %}">{{ d[1] }}</a>
+  {% endfor %}
+</div>
+
+<div class="two-col">
+  <div class="chart-block">
+    <h3>Count by type</h3>
+    <div class="vega-wrap" id="count-chart"></div>
+  </div>
+  <div class="chart-block">
+    <h3>Weekly volume (min) by type</h3>
+    <div class="vega-wrap" id="volume-chart"></div>
+  </div>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Type</th>
+        <th>Duration</th>
+        <th>Distance</th>
+        <th>Avg HR</th>
+        <th>Calories</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in table_rows %}
+    <tr>
+      <td>{{ r.date }}</td>
+      <td>{{ r.type or '—' }}</td>
+      <td>{% if r.duration_min %}{{ "%.0f"|format(r.duration_min) }} min{% else %}—{% endif %}</td>
+      <td>{% if r.distance_km %}{{ "%.2f"|format(r.distance_km) }} km{% else %}—{% endif %}</td>
+      <td>{% if r.avg_hr %}{{ "%.0f"|format(r.avg_hr) }} bpm{% else %}—{% endif %}</td>
+      <td>{% if r.calories %}{{ "%.0f"|format(r.calories) }}{% else %}—{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" style="color:var(--text-muted);text-align:center;padding:1.5rem">No activities in this window</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+embed('count-chart',  {{ count_spec|safe }});
+embed('volume-chart', {{ volume_spec|safe }});
+</script>
+{% endblock %}

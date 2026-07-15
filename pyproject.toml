@@ -13,6 +13,8 @@ dependencies = [
     "mcp[cli]>=1.0",
     "datasette>=0.65",
     "datasette-vega>=0.6",
+    "altair>=5",
+    "jinja2>=3",
 ]
 
 [project.optional-dependencies]

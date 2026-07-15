@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Behavior{% endblock %}
+{% set active_page = 'behavior' %}
+
+{% block content %}
+<h1>Behavior heatmaps</h1>
+
+<div class="day-tabs">
+  {% for d in [('30','30d'), ('90','90d'), ('180','180d'), ('all','All')] %}
+  <a href="/dashboard/behavior?days={{ d[0] }}" class="{% if days == d[0] %}active{% endif %}">{{ d[1] }}</a>
+  {% endfor %}
+</div>
+
+<div class="chart-block">
+  <h3>Alcohol — units per day</h3>
+  <div class="vega-wrap" id="alcohol-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Caffeine — mg per day</h3>
+  <div class="vega-wrap" id="caffeine-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>HRV deviation from 7-day rolling average <span style="color:#888;font-size:0.72rem">blue = above avg · red = below avg</span></h3>
+  <div class="vega-wrap" id="hrv-delta-chart"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+embed('alcohol-chart',   {{ alcohol_spec|safe }});
+embed('caffeine-chart',  {{ caffeine_spec|safe }});
+embed('hrv-delta-chart', {{ hrv_delta_spec|safe }});
+</script>
+{% endblock %}
