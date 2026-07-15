@@ -89,8 +89,8 @@
 </main>
 <script>
 function embed(id, spec) {
-  if (!spec || spec === '{}') return;
-  vegaEmbed('#' + id, JSON.parse(spec), {
+  if (!spec || !spec['$schema']) return;
+  vegaEmbed('#' + id, spec, {
     theme: 'dark',
     actions: false,
     renderer: 'svg',
