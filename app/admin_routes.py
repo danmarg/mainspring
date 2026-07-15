@@ -33,11 +33,12 @@ def _fire_morning_webhook() -> None:
     url = os.getenv("MORNING_WEBHOOK_URL", "").strip()
     if not url:
         return
+    headers = {"Content-Type": "application/json"}
+    secret = os.getenv("MORNING_WEBHOOK_SECRET", "").strip()
+    if secret:
+        headers["Authorization"] = f"Bearer {secret}"
     try:
-        req = urllib.request.Request(
-            url, data=b"{}", method="POST",
-            headers={"Content-Type": "application/json"},
-        )
+        req = urllib.request.Request(url, data=b"{}", method="POST", headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
             log.info("morning webhook fired → %s", resp.status)
     except Exception as exc:
