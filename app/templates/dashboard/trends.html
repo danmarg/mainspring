@@ -11,9 +11,15 @@
   {% endfor %}
 </div>
 
-<div class="chart-block">
-  <h3>HRV <span style="color:#f4a261;font-size:0.72rem">— dashed = 7-day avg</span></h3>
-  <div class="vega-wrap" id="hrv-chart"></div>
+<div class="two-col">
+  <div class="chart-block">
+    <h3>HRV <span style="color:#f4a261;font-size:0.72rem">— dashed = 7-day avg</span></h3>
+    <div class="vega-wrap" id="hrv-chart"></div>
+  </div>
+  <div class="chart-block">
+    <h3>Heart rate <span style="color:#888;font-size:0.72rem">— <span style="color:#4e9af1">blue = resting (dashed = 7d avg)</span> · <span style="color:#e05c5c">red = daily max (activity)</span></span></h3>
+    <div class="vega-wrap" id="hr-chart"></div>
+  </div>
 </div>
 
 <div class="chart-block">
@@ -22,7 +28,7 @@
 </div>
 
 <div class="chart-block">
-  <h3>Training load <span style="color:#888;font-size:0.72rem">red = acute · blue dashed = chronic · bottom = ATL/CTL ratio</span></h3>
+  <h3>Training zone load <span style="color:#888;font-size:0.72rem">Garmin monthly load by zone (aerobic low · aerobic high · anaerobic)</span></h3>
   <div class="vega-wrap" id="load-chart"></div>
 </div>
 
@@ -32,17 +38,18 @@
 </div>
 
 <div class="chart-block">
-  <h3>Resting HR <span style="color:#f4a261;font-size:0.72rem">— dashed = 7-day avg</span></h3>
-  <div class="vega-wrap" id="rhr-chart"></div>
+  <h3>VO2 Max</h3>
+  <div class="vega-wrap" id="vo2max-chart"></div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 embed('hrv-chart',     {{ hrv_spec|safe }});
+embed('hr-chart',      {{ hr_spec|safe }});
 embed('sleep-chart',   {{ sleep_spec|safe }});
 embed('load-chart',    {{ load_spec|safe }});
 embed('battery-chart', {{ battery_spec|safe }});
-embed('rhr-chart',     {{ rhr_spec|safe }});
+embed('vo2max-chart',  {{ vo2max_spec|safe }});
 </script>
 {% endblock %}

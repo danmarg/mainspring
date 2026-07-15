@@ -150,57 +150,70 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
     )
 
 
-def _load_chart(rows: list[dict]) -> str:
+def _zone_load_chart(rows: list[dict]) -> str:
+    """Stacked area: monthly zone load trend (aerobic low/high, anaerobic)."""
     if not rows:
         return "{}"
-    base = alt.Chart(alt.Data(values=rows))
-    acute = base.mark_line(color="#e05c5c", strokeWidth=1.5).encode(
-        x=alt.X("date:T", title=None),
-        y=alt.Y("acute_training_load:Q", title="Load", scale=alt.Scale(zero=False)),
-        tooltip=["date:T", "acute_training_load:Q"],
-    )
-    chronic = base.mark_line(color="#4e9af1", strokeWidth=1.5, strokeDash=[3, 3]).encode(
-        x="date:T",
-        y="chronic_training_load:Q",
-        tooltip=["date:T", "chronic_training_load:Q"],
-    )
-    lines = alt.layer(acute, chronic).properties(width="container", height=160)
-
-    # ratio bands
-    ratio_rows = [r for r in rows if r.get("training_load_ratio") is not None]
-    if ratio_rows:
-        ratio_base = alt.Chart(alt.Data(values=ratio_rows))
-        ratio_line = ratio_base.mark_line(color="#a8d8a8", strokeWidth=1.5).encode(
+    # Unpivot to long form
+    long = []
+    for r in rows:
+        for zone, key in [
+            ("Aerobic low",  "monthly_load_aerobic_low"),
+            ("Aerobic high", "monthly_load_aerobic_high"),
+            ("Anaerobic",    "monthly_load_anaerobic"),
+        ]:
+            if r.get(key) is not None:
+                long.append({"date": r["date"], "zone": zone, "load": r[key]})
+    if not long:
+        return "{}"
+    chart = (
+        alt.Chart(alt.Data(values=long))
+        .mark_area(opacity=0.8)
+        .encode(
             x=alt.X("date:T", title=None),
-            y=alt.Y("training_load_ratio:Q", title="ATL/CTL ratio", scale=alt.Scale(domain=[0, 2])),
-            tooltip=["date:T", "training_load_ratio:Q"],
+            y=alt.Y("load:Q", title="Monthly zone load", stack="zero"),
+            color=alt.Color("zone:N", scale=alt.Scale(
+                domain=["Aerobic low", "Aerobic high", "Anaerobic"],
+                range=["#4e9af1", "#f4a261", "#e05c5c"],
+            ), title="Zone"),
+            tooltip=["date:T", "zone:N", alt.Tooltip("load:Q", format=".0f")],
         )
-        zone_data = [
-            {"y1": 0, "y2": 0.8, "zone": "Detraining"},
-            {"y1": 0.8, "y2": 1.0, "zone": "Maintenance"},
-            {"y1": 1.0, "y2": 1.3, "zone": "Productive"},
-            {"y1": 1.3, "y2": 1.5, "zone": "Overreaching"},
-            {"y1": 1.5, "y2": 2.5, "zone": "High risk"},
-        ]
-        bands = (
-            alt.Chart(alt.Data(values=zone_data))
-            .mark_rect(opacity=0.12)
-            .encode(
-                y=alt.Y("y1:Q", scale=alt.Scale(domain=[0, 2])),
-                y2="y2:Q",
-                color=alt.Color("zone:N", scale=alt.Scale(
-                    domain=["Detraining", "Maintenance", "Productive", "Overreaching", "High risk"],
-                    range=["#888888", "#4e9af1", "#5cb85c", "#f0ad4e", "#e05c5c"],
-                ), legend=None),
-            )
-        )
-        ratio_chart = alt.layer(bands, ratio_line).properties(width="container", height=120)
-        combined = alt.vconcat(lines, ratio_chart, spacing=8)
-    else:
-        combined = lines
+        .properties(width="container", height=200)
+        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+        .configure_view(strokeWidth=0, fill="#1a1a1a")
+    )
+    return chart.to_json()
 
+
+def _hr_chart(rows: list[dict]) -> str:
+    """Dual line: resting HR (blue) + daily max HR from activities (red) on one chart."""
+    if not rows:
+        return "{}"
+    rhr_rows = [r for r in rows if r.get("resting_hr") is not None]
+    max_rows = [r for r in rows if r.get("max_hr") is not None]
+    if not rhr_rows and not max_rows:
+        return "{}"
+    layers = []
+    if rhr_rows:
+        base_rhr = alt.Chart(alt.Data(values=rhr_rows))
+        layers.append(base_rhr.mark_line(color="#4e9af1", strokeWidth=1.5).encode(
+            x=alt.X("date:T", title=None),
+            y=alt.Y("resting_hr:Q", title="HR (bpm)", scale=alt.Scale(zero=False)),
+            tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("resting_hr:Q", title="Resting HR")],
+        ))
+        layers.append(base_rhr.mark_line(color="#4e9af1", strokeDash=[4, 4], opacity=0.6, strokeWidth=1.2).encode(
+            x="date:T", y="rhr_7d_avg:Q",
+        ))
+    if max_rows:
+        base_max = alt.Chart(alt.Data(values=max_rows))
+        layers.append(base_max.mark_line(color="#e05c5c", strokeWidth=1.5, opacity=0.7).encode(
+            x=alt.X("date:T", title=None),
+            y=alt.Y("max_hr:Q", scale=alt.Scale(zero=False)),
+            tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("max_hr:Q", title="Max HR (activity)")],
+        ))
     return (
-        combined
+        alt.layer(*layers)
+        .properties(width="container", height=200)
         .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
         .configure_view(strokeWidth=0, fill="#1a1a1a")
         .to_json()
@@ -346,6 +359,138 @@ def _macro_dow_chart(rows: list[dict]) -> str:
             tooltip=["dow_name:N", "macro:N", alt.Tooltip("avg_g:Q", title="Avg g", format=".1f")],
         )
         .properties(width="container", height=220, title="Average macros by day of week")
+        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+        .configure_view(strokeWidth=0, fill="#1a1a1a")
+        .configure_title(color="#ccc")
+    )
+    return chart.to_json()
+
+
+def _sparse_line_chart(rows: list[dict], field: str, title: str,
+                       color: str = "#4e9af1", ref_bands: list | None = None) -> str:
+    """Dots + connecting line for infrequently sampled metrics (weight, BP, VO2max)."""
+    if not rows:
+        return "{}"
+    base = alt.Chart(alt.Data(values=rows))
+    line = base.mark_line(color=color, opacity=0.4, strokeWidth=1).encode(
+        x=alt.X("date:T", title=None),
+        y=alt.Y(f"{field}:Q", title=title, scale=alt.Scale(zero=False)),
+    )
+    dots = base.mark_point(color=color, size=60, opacity=0.9).encode(
+        x="date:T",
+        y=f"{field}:Q",
+        tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip(f"{field}:Q", title=title, format=".1f")],
+    )
+    layers = [line, dots]
+    if ref_bands:
+        band_data = [{"y1": b[0], "y2": b[1], "label": b[2]} for b in ref_bands]
+        bands = (
+            alt.Chart(alt.Data(values=band_data))
+            .mark_rect(opacity=0.08, color="#5cb85c")
+            .encode(y="y1:Q", y2="y2:Q")
+        )
+        layers = [bands] + layers
+    return (
+        alt.layer(*layers)
+        .properties(width="container", height=180)
+        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+        .configure_view(strokeWidth=0, fill="#1a1a1a")
+        .to_json()
+    )
+
+
+def _bp_chart(rows: list[dict]) -> str:
+    """Dual line: systolic + diastolic with normal-range reference band."""
+    if not rows:
+        return "{}"
+    long = []
+    for r in rows:
+        if r.get("bp_systolic"):
+            long.append({"date": r["date"], "reading": "Systolic", "mmhg": r["bp_systolic"]})
+        if r.get("bp_diastolic"):
+            long.append({"date": r["date"], "reading": "Diastolic", "mmhg": r["bp_diastolic"]})
+    if not long:
+        return "{}"
+    ref_data = [
+        {"y1": 90, "y2": 120, "label": "Normal systolic"},
+        {"y1": 60, "y2": 80, "label": "Normal diastolic"},
+    ]
+    bands = (
+        alt.Chart(alt.Data(values=ref_data))
+        .mark_rect(opacity=0.07, color="#5cb85c")
+        .encode(y="y1:Q", y2="y2:Q")
+    )
+    base = alt.Chart(alt.Data(values=long))
+    lines = base.mark_line(strokeWidth=1.5, opacity=0.5).encode(
+        x=alt.X("date:T", title=None),
+        y=alt.Y("mmhg:Q", title="mmHg", scale=alt.Scale(domain=[50, 160])),
+        color=alt.Color("reading:N", scale=alt.Scale(
+            domain=["Systolic", "Diastolic"], range=["#e05c5c", "#4e9af1"]
+        )),
+    )
+    dots = base.mark_point(size=60, opacity=0.9).encode(
+        x="date:T", y="mmhg:Q",
+        color=alt.Color("reading:N", legend=None),
+        tooltip=["date:T", "reading:N", alt.Tooltip("mmhg:Q", title="mmHg")],
+    )
+    return (
+        alt.layer(bands, lines, dots)
+        .properties(width="container", height=200)
+        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+        .configure_view(strokeWidth=0, fill="#1a1a1a")
+        .to_json()
+    )
+
+
+def _pace_trend_chart(rows: list[dict]) -> str:
+    """Running pace (min/km) over time with 4-week rolling avg."""
+    if not rows:
+        return "{}"
+    base = alt.Chart(alt.Data(values=rows))
+    dots = base.mark_point(size=40, opacity=0.6, color="#4e9af1").encode(
+        x=alt.X("date:T", title=None),
+        y=alt.Y("pace_min_km:Q", title="Pace (min/km)", scale=alt.Scale(zero=False),
+                axis=alt.Axis(labelExpr="floor(datum.value) + ':' + (datum.value % 1 * 60 < 10 ? '0' : '') + floor(datum.value % 1 * 60)")),
+        tooltip=[
+            alt.Tooltip("date:T", title="Date"),
+            alt.Tooltip("pace_min_km:Q", title="Pace (min/km)", format=".2f"),
+            alt.Tooltip("distance_km:Q", title="Distance (km)", format=".1f"),
+        ],
+    )
+    avg = base.mark_line(color="#f4a261", strokeWidth=2, strokeDash=[4, 4]).encode(
+        x="date:T",
+        y="pace_4w_avg:Q",
+    )
+    return (
+        alt.layer(dots, avg)
+        .properties(width="container", height=200, title="Running pace trend")
+        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+        .configure_view(strokeWidth=0, fill="#1a1a1a")
+        .configure_title(color="#ccc")
+        .to_json()
+    )
+
+
+def _hr_efficiency_chart(rows: list[dict]) -> str:
+    """Scatter: avg HR vs pace for running. HR dropping at same pace = fitness gain."""
+    if not rows:
+        return "{}"
+    chart = (
+        alt.Chart(alt.Data(values=rows))
+        .mark_point(size=50, opacity=0.7)
+        .encode(
+            x=alt.X("pace_min_km:Q", title="Pace (min/km)", scale=alt.Scale(zero=False)),
+            y=alt.Y("avg_hr:Q", title="Avg HR (bpm)", scale=alt.Scale(zero=False)),
+            color=alt.Color("date:T", scale=alt.Scale(scheme="viridis"),
+                            title="Date", legend=alt.Legend(orient="right")),
+            tooltip=[
+                alt.Tooltip("date:T", title="Date"),
+                alt.Tooltip("pace_min_km:Q", title="Pace (min/km)", format=".2f"),
+                alt.Tooltip("avg_hr:Q", title="Avg HR"),
+                alt.Tooltip("distance_km:Q", title="Distance (km)", format=".1f"),
+            ],
+        )
+        .properties(width="container", height=240, title="HR efficiency (pace vs avg HR) — color = recency, darker = older")
         .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
         .configure_view(strokeWidth=0, fill="#1a1a1a")
         .configure_title(color="#ccc")
@@ -505,13 +650,18 @@ async def trends(request: Request, days: str = "90",
                 if r.get(col) is not None:
                     stage_rows.append({"date": r["date"], "stage": stage, "minutes": r[col]})
 
-        load_rows = _rows(conn, """
-            SELECT date, acute_training_load, chronic_training_load, training_load_ratio
-            FROM daily_metrics
-            WHERE date >= date('now', ?)
-              AND acute_training_load IS NOT NULL
+        # Zone load from raw_daily_metrics (pivot from EAV)
+        zone_raw = _rows(conn, """
+            SELECT date, metric, value FROM raw_daily_metrics
+            WHERE metric IN ('monthly_load_aerobic_low','monthly_load_aerobic_high','monthly_load_anaerobic')
+              AND date >= date('now', ?)
             ORDER BY date
         """, (clause,))
+        # Pivot to wide
+        zone_by_date: dict[str, dict] = {}
+        for r in zone_raw:
+            zone_by_date.setdefault(r["date"], {"date": r["date"]})[r["metric"]] = r["value"]
+        load_rows = sorted(zone_by_date.values(), key=lambda x: x["date"])
 
         battery_rows = _rows(conn, """
             SELECT date, body_battery_high, body_battery_low FROM daily_metrics
@@ -528,13 +678,43 @@ async def trends(request: Request, days: str = "90",
             ORDER BY date
         """, (clause,))
 
+        # Daily max HR from activities
+        max_hr_rows = _rows(conn, """
+            SELECT DATE(start_time) AS date, MAX(max_hr) AS max_hr
+            FROM garmin_activities
+            WHERE DATE(start_time) >= date('now', ?) AND max_hr IS NOT NULL
+            GROUP BY DATE(start_time)
+            ORDER BY date
+        """, (clause,))
+
+        vo2max_rows = _rows(conn, """
+            SELECT date, vo2max FROM daily_metrics
+            WHERE date >= date('now', ?) AND vo2max IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
+    # Merge rhr + max_hr by date for combined HR chart
+    max_hr_by_date = {r["date"]: r["max_hr"] for r in max_hr_rows}
+    hr_rows = []
+    all_dates = sorted(set(r["date"] for r in rhr_rows) | set(max_hr_by_date.keys()))
+    rhr_by_date = {r["date"]: r for r in rhr_rows}
+    for d in all_dates:
+        rr = rhr_by_date.get(d, {})
+        hr_rows.append({
+            "date": d,
+            "resting_hr": rr.get("resting_hr"),
+            "rhr_7d_avg": rr.get("rhr_7d_avg"),
+            "max_hr": max_hr_by_date.get(d),
+        })
+
     return templates.TemplateResponse(request, "trends.html", {
         "days": days,
         "hrv_spec": _trend_chart(hrv_rows, "hrv", "hrv_7d_avg", "HRV (ms)"),
         "sleep_spec": _sleep_chart(score_rows, stage_rows),
-        "load_spec": _load_chart(load_rows),
+        "load_spec": _zone_load_chart(load_rows),
         "battery_spec": _body_battery_chart(battery_rows),
-        "rhr_spec": _trend_chart(rhr_rows, "resting_hr", "rhr_7d_avg", "Resting HR (bpm)", color="#e05c5c"),
+        "hr_spec": _hr_chart(hr_rows),
+        "vo2max_spec": _sparse_line_chart(vo2max_rows, "vo2max", "VO2 Max (mL/kg/min)", color="#5cb85c"),
     })
 
 
@@ -730,9 +910,86 @@ async def activities(request: Request, days: str = "60",
             GROUP BY week, type ORDER BY week, type
         """, (clause,))
 
+        # Pace data: running only, need distance > 0 and duration > 0
+        pace_raw = _rows(conn, """
+            SELECT date,
+              ROUND(distance_m / 1000.0, 2) AS distance_km,
+              ROUND(duration_s / 60.0, 1) AS duration_min,
+              avg_hr
+            FROM activities
+            WHERE date >= date('now', ?)
+              AND LOWER(type) IN ('running','trail_running','treadmill_running','run')
+              AND distance_m > 100 AND duration_s > 60
+            ORDER BY date
+        """, (clause,))
+
+    # Compute pace (min/km) and rolling 4-week avg in Python
+    pace_rows = []
+    for r in pace_raw:
+        if r["distance_km"] and r["duration_min"]:
+            pace = r["duration_min"] / r["distance_km"]
+            pace_rows.append({**r, "pace_min_km": round(pace, 3)})
+
+    # 4-week rolling avg (last 4 entries as simple approximation)
+    window = 4
+    for i, r in enumerate(pace_rows):
+        window_vals = [p["pace_min_km"] for p in pace_rows[max(0, i - window + 1): i + 1]]
+        r["pace_4w_avg"] = round(sum(window_vals) / len(window_vals), 3)
+
+    # HR efficiency: runs with both avg_hr and pace
+    hr_eff_rows = [r for r in pace_rows if r.get("avg_hr")]
+
+    with db() as conn:
+        vo2max_rows = _rows(conn, """
+            SELECT date, vo2max FROM daily_metrics
+            WHERE date >= date('now', ?) AND vo2max IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
     return templates.TemplateResponse(request, "activities.html", {
         "days": days,
         "table_rows": table_rows,
         "count_spec": _activity_bar(count_rows, "count", "Activities"),
         "volume_spec": _weekly_volume_chart(weekly_rows),
+        "pace_spec": _pace_trend_chart(pace_rows),
+        "hr_eff_spec": _hr_efficiency_chart(hr_eff_rows),
+        "vo2max_spec": _sparse_line_chart(vo2max_rows, "vo2max", "VO2 Max (mL/kg/min)", color="#5cb85c"),
+    })
+
+
+# ── vitals ────────────────────────────────────────────────────────────────────
+
+@router.get("/vitals", response_class=HTMLResponse)
+async def vitals(request: Request, days: str = "180",
+                 ms_dash_auth: str | None = Cookie(default=None)):
+    if not _is_authed(request, ms_dash_auth):
+        return _auth_redirect()
+
+    clause = _days_clause(days)
+
+    with db() as conn:
+        spo2_rows = _rows(conn, """
+            SELECT date, spo2_avg FROM daily_metrics
+            WHERE date >= date('now', ?) AND spo2_avg IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
+        weight_rows = _rows(conn, """
+            SELECT date, weight_kg FROM daily_metrics
+            WHERE date >= date('now', ?) AND weight_kg IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
+        bp_rows = _rows(conn, """
+            SELECT date, bp_systolic, bp_diastolic FROM daily_metrics
+            WHERE date >= date('now', ?)
+              AND (bp_systolic IS NOT NULL OR bp_diastolic IS NOT NULL)
+            ORDER BY date
+        """, (clause,))
+
+    return templates.TemplateResponse(request, "vitals.html", {
+        "days": days,
+        "weight_spec": _sparse_line_chart(weight_rows, "weight_kg", "Weight (kg)", color="#f4a261"),
+        "spo2_spec": _sparse_line_chart(spo2_rows, "spo2_avg", "SpO2 (%)", color="#7ec8e3"),
+        "bp_spec": _bp_chart(bp_rows),
     })

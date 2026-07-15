@@ -190,9 +190,10 @@ def _parse_training_readiness(conn, date_str: str, data: list | dict) -> int:
 def _parse_training_status(conn, date_str: str, data: dict) -> int:
     now = utc_now()
     rows = 0
-    # VO2max lives in the training status response
+    # VO2max — field name varies by firmware version
     vo2 = (
-        data.get("latestVO2Max")
+        data.get("mostRecentVO2Max")
+        or data.get("latestVO2Max")
         or data.get("mostRecentVO2MaxRunning")
         or data.get("vo2MaxPreciseValue")
     )
@@ -200,19 +201,23 @@ def _parse_training_status(conn, date_str: str, data: dict) -> int:
         upsert_raw_metric(conn, date_str, SOURCE, "vo2max", float(vo2), now)
         rows += 1
 
-    # Acute/chronic training load
-    load_obj = data.get("trainingLoadBalance") or {}
-    acute = load_obj.get("acuteLoad") or data.get("acuteTrainingLoad")
-    chronic = load_obj.get("chronicLoad") or data.get("chronicTrainingLoad")
-    ratio = load_obj.get("loadRatio") or data.get("trainingLoadRatio")
-    for metric, val in [
-        ("acute_training_load", acute),
-        ("chronic_training_load", chronic),
-        ("training_load_ratio", ratio),
-    ]:
-        if val is not None:
-            upsert_raw_metric(conn, date_str, SOURCE, metric, float(val), now)
-            rows += 1
+    # Monthly zone load from mostRecentTrainingLoadBalance
+    mlb = data.get("mostRecentTrainingLoadBalance") or {}
+    dmap = mlb.get("metricsTrainingLoadBalanceDTOMap") or {}
+    entry: dict | None = None
+    for v in dmap.values():
+        if isinstance(v, dict) and (v.get("primaryTrainingDevice") or entry is None):
+            entry = v
+    if entry:
+        for metric, key in [
+            ("monthly_load_aerobic_low",  "monthlyLoadAerobicLow"),
+            ("monthly_load_aerobic_high", "monthlyLoadAerobicHigh"),
+            ("monthly_load_anaerobic",    "monthlyLoadAnaerobic"),
+        ]:
+            val = entry.get(key)
+            if val is not None:
+                upsert_raw_metric(conn, date_str, SOURCE, metric, float(val), now)
+                rows += 1
     return rows
 
 

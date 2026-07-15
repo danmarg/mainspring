@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Vitals{% endblock %}
+{% set active_page = 'vitals' %}
+
+{% block content %}
+<h1>Vitals</h1>
+
+<div class="day-tabs">
+  {% for d in [('90','90d'), ('180','180d'), ('all','All')] %}
+  <a href="/dashboard/vitals?days={{ d[0] }}" class="{% if days == d[0] %}active{% endif %}">{{ d[1] }}</a>
+  {% endfor %}
+</div>
+
+<div class="two-col">
+  <div class="chart-block">
+    <h3>Weight</h3>
+    <div class="vega-wrap" id="weight-chart"></div>
+  </div>
+  <div class="chart-block">
+    <h3>SpO2</h3>
+    <div class="vega-wrap" id="spo2-chart"></div>
+  </div>
+</div>
+
+<div class="chart-block">
+  <h3>Blood pressure <span style="color:#888;font-size:0.72rem">— green band = normal range (systolic 90–120 · diastolic 60–80)</span></h3>
+  <div class="vega-wrap" id="bp-chart"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+embed('weight-chart', {{ weight_spec|safe }});
+embed('spo2-chart',   {{ spo2_spec|safe }});
+embed('bp-chart',     {{ bp_spec|safe }});
+</script>
+{% endblock %}

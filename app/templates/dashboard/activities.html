@@ -22,6 +22,22 @@
   </div>
 </div>
 
+<div class="chart-block">
+  <h3>Running pace trend <span style="color:#888;font-size:0.72rem">— dashed = 4-week rolling avg · lower is faster</span></h3>
+  <div class="vega-wrap" id="pace-chart"></div>
+</div>
+
+<div class="two-col">
+  <div class="chart-block">
+    <h3>HR efficiency — pace vs avg HR <span style="color:#888;font-size:0.72rem">darker = older</span></h3>
+    <div class="vega-wrap" id="hr-eff-chart"></div>
+  </div>
+  <div class="chart-block">
+    <h3>VO2 Max trend</h3>
+    <div class="vega-wrap" id="vo2max-act-chart"></div>
+  </div>
+</div>
+
 <div class="table-wrap">
   <table>
     <thead>
@@ -56,5 +72,8 @@
 <script>
 embed('count-chart',  {{ count_spec|safe }});
 embed('volume-chart', {{ volume_spec|safe }});
+embed('pace-chart',      {{ pace_spec|safe }});
+embed('hr-eff-chart',   {{ hr_eff_spec|safe }});
+embed('vo2max-act-chart', {{ vo2max_spec|safe }});
 </script>
 {% endblock %}
