@@ -104,13 +104,29 @@ def test_parse_training_readiness(tmp_db):
 
 
 def test_parse_training_status_vo2max(tmp_db):
-    data = {"latestVO2Max": 52.3, "trainingLoadBalance": {"acuteLoad": 300, "chronicLoad": 280}}
+    data = {
+        "mostRecentVO2Max": 52.3,
+        "mostRecentTrainingLoadBalance": {
+            "metricsTrainingLoadBalanceDTOMap": {
+                "123": {
+                    "primaryTrainingDevice": True,
+                    "monthlyLoadAerobicLow": 800.0,
+                    "monthlyLoadAerobicHigh": 400.0,
+                    "monthlyLoadAnaerobic": 100.0,
+                }
+            }
+        },
+    }
     rows = _parse_training_status(tmp_db, "2025-01-01", data)
-    assert rows >= 3
+    assert rows >= 4
     vo2 = tmp_db.execute(
         "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='vo2max'"
     ).fetchone()
     assert vo2[0] == 52.3
+    load = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='monthly_load_aerobic_low'"
+    ).fetchone()
+    assert load[0] == 800.0
 
 
 def test_upsert_activity(tmp_db):
