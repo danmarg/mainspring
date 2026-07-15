@@ -357,16 +357,16 @@ def _macro_dow_chart(rows: list[dict]) -> str:
 
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+    return templates.TemplateResponse(request, "login.html", {"error": None})
 
 
 @router.post("/login", response_class=HTMLResponse)
 async def login_submit(request: Request, token: str = Form(...)):
     expected = (os.getenv("DATASETTE_TOKEN") or "").strip()
     if not expected:
-        return templates.TemplateResponse("login.html", {"request": request, "error": "DATASETTE_TOKEN not configured"})
+        return templates.TemplateResponse(request, "login.html", {"error": "DATASETTE_TOKEN not configured"})
     if token.strip() != expected:
-        return templates.TemplateResponse("login.html", {"request": request, "error": "Invalid token"})
+        return templates.TemplateResponse(request, "login.html", {"error": "Invalid token"})
     resp = RedirectResponse("/dashboard", status_code=302)
     resp.set_cookie(
         COOKIE_NAME,
@@ -458,8 +458,7 @@ async def overview(request: Request, ms_dash_auth: str | None = Cookie(default=N
             "calories_estimated": yesterday_row[2],
         }
 
-    return templates.TemplateResponse("overview.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "overview.html", {
         "today": today,
         "cards": cards,
         "hrv_spark": hrv_spark,
@@ -529,8 +528,7 @@ async def trends(request: Request, days: str = "90",
             ORDER BY date
         """, (clause,))
 
-    return templates.TemplateResponse("trends.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "trends.html", {
         "days": days,
         "hrv_spec": _trend_chart(hrv_rows, "hrv", "hrv_7d_avg", "HRV (ms)"),
         "sleep_spec": _sleep_chart(score_rows, stage_rows),
@@ -575,8 +573,7 @@ async def behavior(request: Request, days: str = "90",
     caffeine_rows = [r for r in rows if r.get("caffeine_mg") is not None]
     hrv_delta_rows = [r for r in rows if r.get("hrv_delta") is not None]
 
-    return templates.TemplateResponse("behavior.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "behavior.html", {
         "days": days,
         "alcohol_spec": _calendar_heatmap(alcohol_rows, "alcohol_units", "Alcohol (units)", scheme="reds"),
         "caffeine_spec": _calendar_heatmap(caffeine_rows, "caffeine_mg", "Caffeine (mg)", scheme="purples"),
@@ -690,8 +687,7 @@ async def nutrition(request: Request, days: str = "90",
                 avg_g = sum(vals) / len(vals)
                 dow_macro_rows.append({"dow_name": dow_name, "macro": macro, "avg_g": round(avg_g, 1)})
 
-    return templates.TemplateResponse("nutrition.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "nutrition.html", {
         "days": days,
         "protein_target": protein_target,
         "calories_spec": _calendar_heatmap(cal_rows, "calories", "Calories", scheme="oranges"),
@@ -734,8 +730,7 @@ async def activities(request: Request, days: str = "60",
             GROUP BY week, type ORDER BY week, type
         """, (clause,))
 
-    return templates.TemplateResponse("activities.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "activities.html", {
         "days": days,
         "table_rows": table_rows,
         "count_spec": _activity_bar(count_rows, "count", "Activities"),
