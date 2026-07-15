@@ -50,13 +50,11 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
         today = date.today().isoformat()
 
         # Snapshot sleep state before import so we can detect it newly arriving
-        sleep_before = None
-        if source == "garmin":
-            with db() as conn:
-                row = conn.execute(
-                    "SELECT sleep_score FROM daily_metrics WHERE date=?", (today,)
-                ).fetchone()
-                sleep_before = row[0] if row else None
+        with db() as conn:
+            row = conn.execute(
+                "SELECT sleep_score FROM daily_metrics WHERE date=?", (today,)
+            ).fetchone()
+            sleep_before = row[0] if row else None
 
         with db() as conn:
             result = import_fn(conn, **import_kwargs)
@@ -79,7 +77,7 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
         log.info("%s import run_id=%d finished: %s (%d rows)", source, run_id, status, rows)
 
         # Fire morning webhook when sleep_score lands for today for the first time
-        if source == "garmin" and sleep_before is None and today in imported_dates:
+        if sleep_before is None and today in imported_dates:
             with db() as conn:
                 row = conn.execute(
                     "SELECT sleep_score FROM daily_metrics WHERE date=?", (today,)
