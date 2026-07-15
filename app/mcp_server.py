@@ -567,6 +567,19 @@ def complete_training_event(event_id: int, result: Optional[str] = None) -> str:
 
 
 @mcp.tool()
+def delete_training_event(event_id: int) -> str:
+    """Delete a training event by id."""
+    with db() as conn:
+        existing = conn.execute(
+            "SELECT description FROM training_events WHERE id=?", (event_id,)
+        ).fetchone()
+        if not existing:
+            return f"No training event found with id {event_id}"
+        conn.execute("DELETE FROM training_events WHERE id=?", (event_id,))
+    return f"Deleted training event #{event_id} ({existing[0]})"
+
+
+@mcp.tool()
 def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict:
     """Rich context for workout planning: today's metrics, HRV trend, TSB (form),
     training load status, week progress vs targets, next goal event, yesterday's RPE,
