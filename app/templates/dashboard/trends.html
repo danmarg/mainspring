@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Trends{% endblock %}
+{% set active_page = 'trends' %}
+
+{% block content %}
+<h1>Trends</h1>
+
+<div class="day-tabs">
+  {% for d in [('30','30d'), ('90','90d'), ('180','180d'), ('all','All')] %}
+  <a href="/dashboard/trends?days={{ d[0] }}" class="{% if days == d[0] %}active{% endif %}">{{ d[1] }}</a>
+  {% endfor %}
+</div>
+
+<div class="chart-block">
+  <h3>HRV <span style="color:#f4a261;font-size:0.72rem">— dashed = 7-day avg</span></h3>
+  <div class="vega-wrap" id="hrv-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Sleep</h3>
+  <div class="vega-wrap" id="sleep-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Training load <span style="color:#888;font-size:0.72rem">red = acute · blue dashed = chronic · bottom = ATL/CTL ratio</span></h3>
+  <div class="vega-wrap" id="load-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Body battery (high/low range)</h3>
+  <div class="vega-wrap" id="battery-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Resting HR <span style="color:#f4a261;font-size:0.72rem">— dashed = 7-day avg</span></h3>
+  <div class="vega-wrap" id="rhr-chart"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+embed('hrv-chart',     {{ hrv_spec|safe }});
+embed('sleep-chart',   {{ sleep_spec|safe }});
+embed('load-chart',    {{ load_spec|safe }});
+embed('battery-chart', {{ battery_spec|safe }});
+embed('rhr-chart',     {{ rhr_spec|safe }});
+</script>
+{% endblock %}
