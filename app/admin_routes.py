@@ -33,7 +33,7 @@ def _fire_morning_webhook() -> None:
     url = os.getenv("MORNING_WEBHOOK_URL", "").strip()
     if not url:
         return
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
     secret = os.getenv("MORNING_WEBHOOK_SECRET", "").strip()
     if secret:
         headers["Authorization"] = f"Bearer {secret}"
