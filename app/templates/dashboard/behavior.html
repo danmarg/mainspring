@@ -3,8 +3,7 @@
 {% set active_page = 'behavior' %}
 
 {% block content %}
-<h1>Behavior heatmaps</h1>
-
+<h1>Behavior</h1>
 
 <div class="chart-block">
   <h3>Alcohol — units per day</h3>
@@ -12,27 +11,34 @@
 </div>
 
 <div class="chart-block">
+  <h3>Alcohol — average by day of week</h3>
+  <div class="vega-wrap" id="alcohol-dow-chart"></div>
+</div>
+
+<div class="chart-block">
   <h3>Caffeine — mg per day</h3>
   <div class="vega-wrap" id="caffeine-chart"></div>
 </div>
 
-<div class="two-col">
-  <div class="chart-block">
-    <h3>Sleep score</h3>
-    <div class="vega-wrap" id="sleep-score-chart"></div>
-  </div>
-  <div class="chart-block">
-    <h3>Sleep duration (hours)</h3>
-    <div class="vega-wrap" id="sleep-dur-chart"></div>
-  </div>
+<div class="chart-block">
+  <h3>Caffeine — average by day of week</h3>
+  <div class="vega-wrap" id="caffeine-dow-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>HRV — deviation from 7-day average
+    <span style="color:var(--text-muted);font-size:0.72rem"> · <span style="color:#2ecc71">▲ above baseline</span> · <span style="color:#e05c5c">▼ below</span></span>
+  </h3>
+  <div class="vega-wrap" id="hrv-delta-chart"></div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 embed('alcohol-chart',     {{ alcohol_spec|safe }});
+embed('alcohol-dow-chart', {{ alcohol_dow_spec|safe }});
 embed('caffeine-chart',    {{ caffeine_spec|safe }});
-embed('sleep-score-chart', {{ sleep_score_spec|safe }});
-embed('sleep-dur-chart',   {{ sleep_dur_spec|safe }});
+embed('caffeine-dow-chart',{{ caffeine_dow_spec|safe }});
+embed('hrv-delta-chart',   {{ hrv_delta_spec|safe }});
 </script>
 {% endblock %}

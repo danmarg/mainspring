@@ -97,7 +97,7 @@ def _trend_chart(rows: list[dict], field: str, avg_field: str, title: str,
         return "{}"
     base = alt.Chart(alt.Data(values=rows))
     line = base.mark_line(color=color, strokeWidth=1.5).encode(
-        x=alt.X("date:T", title=None),
+        x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
         y=alt.Y(f"{field}:Q", title=title, scale=alt.Scale(zero=False)),
         tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip(f"{field}:Q", title=title)],
     )
@@ -122,7 +122,7 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
         alt.Chart(alt.Data(values=rows_score))
         .mark_line(color="#7ec8e3", strokeWidth=1.5)
         .encode(
-            x=alt.X("date:T", title=None),
+            x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
             y=alt.Y("sleep_score:Q", title="Sleep score", scale=alt.Scale(domain=[0, 100])),
             tooltip=["date:T", "sleep_score:Q"],
         )
@@ -133,7 +133,7 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
             alt.Chart(alt.Data(values=rows_stages))
             .mark_area()
             .encode(
-                x=alt.X("date:T", title=None),
+                x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
                 y=alt.Y("minutes:Q", title="Stage (min)", stack="zero"),
                 color=alt.Color("stage:N", scale=alt.Scale(
                     domain=["Deep", "REM", "Light"],
@@ -177,7 +177,7 @@ def _zone_load_chart(rows: list[dict]) -> str:
         alt.Chart(alt.Data(values=long))
         .mark_area(opacity=0.8)
         .encode(
-            x=alt.X("date:T", title=None),
+            x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
             y=alt.Y("load:Q", title="Monthly zone load", stack="zero"),
             color=alt.Color("zone:N", scale=alt.Scale(
                 domain=["Aerobic low", "Aerobic high", "Anaerobic"],
@@ -204,7 +204,7 @@ def _hr_chart(rows: list[dict]) -> str:
     if rhr_rows:
         base_rhr = alt.Chart(alt.Data(values=rhr_rows))
         layers.append(base_rhr.mark_line(color="#4e9af1", strokeWidth=1.5).encode(
-            x=alt.X("date:T", title=None),
+            x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
             y=alt.Y("resting_hr:Q", title="HR (bpm)", scale=alt.Scale(zero=False)),
             tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("resting_hr:Q", title="Resting HR")],
         ))
@@ -214,7 +214,7 @@ def _hr_chart(rows: list[dict]) -> str:
     if max_rows:
         base_max = alt.Chart(alt.Data(values=max_rows))
         layers.append(base_max.mark_line(color="#e05c5c", strokeWidth=1.5, opacity=0.7).encode(
-            x=alt.X("date:T", title=None),
+            x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
             y=alt.Y("max_hr:Q", scale=alt.Scale(zero=False)),
             tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("max_hr:Q", title="Max HR (activity)")],
         ))
@@ -234,7 +234,7 @@ def _body_battery_chart(rows: list[dict]) -> str:
         alt.Chart(alt.Data(values=rows))
         .mark_area(opacity=0.6, color="#f4a261")
         .encode(
-            x=alt.X("date:T", title=None),
+            x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
             y=alt.Y("body_battery_low:Q", title="Body battery", scale=alt.Scale(domain=[0, 100])),
             y2="body_battery_high:Q",
             tooltip=["date:T", "body_battery_high:Q", "body_battery_low:Q"],
@@ -244,6 +244,72 @@ def _body_battery_chart(rows: list[dict]) -> str:
         .configure_view(strokeWidth=0, fill="#1a1a1a")
     )
     return chart.to_json()
+
+
+def _diverging_bar_chart(rows: list[dict], field: str, title: str,
+                         x_domain: list[str] | None = None) -> str:
+    """Bar chart with green bars above zero and red below — for HRV delta etc."""
+    if not rows:
+        return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
+    chart = (
+        alt.Chart(alt.Data(values=rows))
+        .mark_bar()
+        .encode(
+            x=alt.X("date:T", title=None, scale=x_scale,
+                    axis=alt.Axis(tickCount="day", format="%b %d")),
+            y=alt.Y(f"{field}:Q", title=title),
+            color=alt.condition(
+                alt.datum[field] >= 0,
+                alt.value("#2ecc71"),
+                alt.value("#e05c5c"),
+            ),
+            tooltip=[alt.Tooltip("date:T", title="Date"),
+                     alt.Tooltip(f"{field}:Q", title=title, format=".1f")],
+        )
+        .properties(width="container", height=160)
+        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+        .configure_view(strokeWidth=0, fill="#1a1a1a")
+    )
+    return chart.to_json()
+
+
+def _dow_avg_chart(rows: list[dict], title: str, color: str) -> str:
+    """Bar chart of average value by day of week. rows: [{dow_name, avg_val}]."""
+    if not rows:
+        return "{}"
+    DOW_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    chart = (
+        alt.Chart(alt.Data(values=rows))
+        .mark_bar(color=color, opacity=0.85)
+        .encode(
+            x=alt.X("dow_name:N", title=None, sort=DOW_ORDER,
+                    scale=alt.Scale(domain=DOW_ORDER)),
+            y=alt.Y("avg_val:Q", title=title),
+            tooltip=["dow_name:N", alt.Tooltip("avg_val:Q", title=title, format=".1f")],
+        )
+        .properties(width="container", height=120)
+        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+        .configure_view(strokeWidth=0, fill="#1a1a1a")
+    )
+    return chart.to_json()
+
+
+def _compute_dow_avgs(rows: list[dict], field: str) -> list[dict]:
+    """Aggregate a field by day of week; rows must have 'dow' (strftime %w) key."""
+    DOW_MAP = {"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed",
+               "4": "Thu", "5": "Fri", "6": "Sat"}
+    accum: dict[str, list] = {}
+    for r in rows:
+        v = r.get(field)
+        if v is None:
+            continue
+        dow = str(r.get("dow", "0"))
+        accum.setdefault(dow, []).append(v)
+    return [
+        {"dow_name": DOW_MAP.get(dow, dow), "avg_val": round(sum(vals) / len(vals), 2)}
+        for dow, vals in sorted(accum.items())
+    ]
 
 
 def _calendar_heatmap(rows: list[dict], field: str, title: str,
@@ -335,7 +401,7 @@ def _pmc_chart(rows: list[dict]) -> str:
             alt.Chart(alt.Data(values=tsb_rows))
             .mark_bar(opacity=0.4)
             .encode(
-                x=alt.X("date:T", title=None),
+                x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
                 y=alt.Y("tsb:Q", title="Load / TSB", scale=alt.Scale(zero=True)),
                 color=alt.condition(
                     alt.datum.tsb >= 0,
@@ -534,7 +600,7 @@ def _sparse_line_chart(rows: list[dict], field: str, title: str,
         return "{}"
     base = alt.Chart(alt.Data(values=rows))
     line = base.mark_line(color=color, opacity=0.4, strokeWidth=1).encode(
-        x=alt.X("date:T", title=None),
+        x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
         y=alt.Y(f"{field}:Q", title=title, scale=alt.Scale(zero=False)),
     )
     dots = base.mark_point(color=color, size=60, opacity=0.9).encode(
@@ -583,7 +649,7 @@ def _bp_chart(rows: list[dict]) -> str:
     )
     base = alt.Chart(alt.Data(values=long))
     lines = base.mark_line(strokeWidth=1.5, opacity=0.5).encode(
-        x=alt.X("date:T", title=None),
+        x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
         y=alt.Y("mmhg:Q", title="mmHg", scale=alt.Scale(domain=[50, 160])),
         color=alt.Color("reading:N", scale=alt.Scale(
             domain=["Systolic", "Diastolic"], range=["#e05c5c", "#4e9af1"]
@@ -609,7 +675,7 @@ def _pace_trend_chart(rows: list[dict]) -> str:
         return "{}"
     base = alt.Chart(alt.Data(values=rows))
     dots = base.mark_point(size=40, opacity=0.6, color="#4e9af1").encode(
-        x=alt.X("date:T", title=None),
+        x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
         y=alt.Y("pace_min_km:Q", title="Pace (min/km)", scale=alt.Scale(zero=False),
                 axis=alt.Axis(labelExpr="floor(datum.value) + ':' + (datum.value % 1 * 60 < 10 ? '0' : '') + floor(datum.value % 1 * 60)")),
         tooltip=[
@@ -964,28 +1030,38 @@ async def behavior(request: Request, days: str = "30",
     with db() as conn:
         rows = _rows(conn, """
             SELECT date,
-              strftime('%Y-%W', date) AS week,
               strftime('%w', date) AS dow,
               COALESCE(alcohol_units, 0) AS alcohol_units,
               COALESCE(caffeine_mg, 0) AS caffeine_mg,
-              sleep_score,
-              ROUND(sleep_duration_min / 60.0, 2) AS sleep_hours
+              hrv,
+              AVG(hrv) OVER (ORDER BY date ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS hrv_7d_avg
             FROM daily_metrics
             WHERE date >= date('now', ?)
             ORDER BY date
         """, (clause,))
 
-    alcohol_rows = [r for r in rows if r.get("alcohol_units") is not None]
-    caffeine_rows = [r for r in rows if r.get("caffeine_mg") is not None]
-    sleep_score_rows = [r for r in rows if r.get("sleep_score") is not None]
-    sleep_dur_rows = [r for r in rows if r.get("sleep_hours") is not None]
+    for r in rows:
+        if r.get("hrv") is not None and r.get("hrv_7d_avg") is not None:
+            r["hrv_delta"] = round(r["hrv"] - r["hrv_7d_avg"], 1)
+        else:
+            r["hrv_delta"] = None
+
+    from datetime import date as _date, timedelta
+    days_int = int(days) if str(days).isdigit() else 30
+    x_domain = [
+        (_date.today() - timedelta(days=days_int)).isoformat(),
+        _date.today().isoformat(),
+    ]
+
+    hrv_delta_rows = [r for r in rows if r.get("hrv_delta") is not None]
 
     return templates.TemplateResponse(request, "behavior.html", {
         "days": days,
-        "alcohol_spec": _calendar_heatmap(alcohol_rows, "alcohol_units", "Alcohol (units)", scheme="reds"),
-        "caffeine_spec": _calendar_heatmap(caffeine_rows, "caffeine_mg", "Caffeine (mg)", scheme="purples"),
-        "sleep_score_spec": _calendar_heatmap(sleep_score_rows, "sleep_score", "Sleep score", scheme="blues", zero_color="#111"),
-        "sleep_dur_spec": _calendar_heatmap(sleep_dur_rows, "sleep_hours", "Sleep (hours)", scheme="greens", zero_color="#111"),
+        "alcohol_spec": _daily_bar_chart(rows, "alcohol_units", "Alcohol (units)", color="#e05c5c", x_domain=x_domain),
+        "alcohol_dow_spec": _dow_avg_chart(_compute_dow_avgs(rows, "alcohol_units"), "Avg units", "#e05c5c"),
+        "caffeine_spec": _daily_bar_chart(rows, "caffeine_mg", "Caffeine (mg)", color="#7b4fa6", x_domain=x_domain),
+        "caffeine_dow_spec": _dow_avg_chart(_compute_dow_avgs(rows, "caffeine_mg"), "Avg mg", "#7b4fa6"),
+        "hrv_delta_spec": _diverging_bar_chart(hrv_delta_rows, "hrv_delta", "HRV delta (ms)", x_domain=x_domain),
     })
 
 
