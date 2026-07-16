@@ -104,6 +104,15 @@ CREATE TABLE IF NOT EXISTS intraday_stress (
   PRIMARY KEY (ts, source)
 );
 
+-- intraday HRV (RMSSD): Fitbit sleep-night samples via Google Health Connect (~5-min resolution)
+-- HRV4Training morning readings also land here when RMSSD is available
+CREATE TABLE IF NOT EXISTS intraday_hrv (
+  ts     TEXT NOT NULL,   -- UTC ISO-8601 second precision
+  source TEXT NOT NULL,
+  rmssd  REAL NOT NULL,
+  PRIMARY KEY (ts, source)
+);
+
 -- manual logs written by Claude via MCP tools
 CREATE TABLE IF NOT EXISTS manual_logs (
   id                    INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -239,6 +239,73 @@ def _list_datapoints(conn, data_type: str, d: date, tokens: dict) -> Any | None:
     return _get(conn, path, {"filter": f}, tokens)
 
 
+def _list_hrv_samples(conn, target_dates: set, tokens: dict) -> list[dict]:
+    """
+    Fetch heart-rate-variability dataPoints. This type does not support AIP-160 filters,
+    so we page through newest-first until all remaining points predate our target window,
+    then filter in Python.
+    """
+    path = "/users/me/dataTypes/heart-rate-variability/dataPoints"
+    # Oldest date we care about — stop paginating once we pass it
+    cutoff = min(target_dates) - timedelta(days=1)
+    cutoff_str = cutoff.isoformat() + "T00:00:00Z"
+
+    all_points: list[dict] = []
+    page_token: str | None = None
+
+    for _ in range(20):  # safety cap: 20 pages × 50 = 1000 points max per call
+        params: dict = {}
+        if page_token:
+            params["pageToken"] = page_token
+        data = _get(conn, path, params, tokens)
+        if not data:
+            break
+        pts = data.get("dataPoints") or []
+        for pt in pts:
+            ts = pt.get("heartRateVariability", {}).get("sampleTime", {}).get("physicalTime", "")
+            if ts and ts < cutoff_str:
+                return all_points  # all subsequent points are even older
+            all_points.append(pt)
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+    return all_points
+
+
+def _parse_intraday_hrv(conn, points: list[dict], target_dates: set) -> int:
+    """
+    Write RMSSD values to intraday_hrv, filtered to target_dates.
+    Skips entries where RMSSD = 0 (HRV4Training records SDNN but not RMSSD; those are useless here).
+    """
+    rows = 0
+    for pt in points:
+        hrv = pt.get("heartRateVariability", {})
+        rmssd = hrv.get("rootMeanSquareOfSuccessiveDifferencesMilliseconds")
+        if rmssd is None or rmssd <= 0:
+            continue
+        ts_str = hrv.get("sampleTime", {}).get("physicalTime", "")
+        if not ts_str:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+            if date(dt.year, dt.month, dt.day) not in target_dates:
+                continue
+            ts_key = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            continue
+        conn.execute(
+            """
+            INSERT INTO intraday_hrv(ts, source, rmssd)
+            VALUES (?, ?, ?)
+            ON CONFLICT(ts, source) DO UPDATE SET rmssd = excluded.rmssd
+            """,
+            (ts_key, SOURCE, round(rmssd, 2)),
+        )
+        rows += 1
+    return rows
+
+
 def _parse_intraday_hr(conn, data: dict) -> int:
     """
     Parse individual heart-rate sample data points from Health Connect and write
@@ -544,6 +611,14 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
             if hr_data:
                 upsert_raw_payload(conn, SOURCE, "heart_rate_intraday", json.dumps(hr_data), ds)
                 rows_upserted += _parse_intraday_hr(conn, hr_data)
+
+    # Intraday HRV (RMSSD): heart-rate-variability doesn't support date filters, so we
+    # fetch with pagination and filter in Python. One call covers all hr_dates.
+    if hr_dates:
+        hrv_points = _list_hrv_samples(conn, hr_dates, tokens)
+        if hrv_points:
+            upsert_raw_payload(conn, SOURCE, "hrv_intraday", json.dumps(hrv_points))
+            rows_upserted += _parse_intraday_hrv(conn, hrv_points, hr_dates)
 
     conn.commit()
     return {
