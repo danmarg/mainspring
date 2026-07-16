@@ -228,7 +228,7 @@ Each import pulls a rolling 7-day window to catch late-arriving Garmin correctio
 
 The time range selector (7d / 30d / 90d / 180d / 360d) persists across page navigation.
 
-Datasette (raw SQL over all tables) is available at `/datasette`, gated by the same `DATASETTE_TOKEN`.
+Datasette (raw SQL over all tables) is available at `/datasette`, gated by the same `DATASETTE_TOKEN`. See the [Datasette section](#datasette--sql-exploration) below for example correlation queries.
 
 ---
 
@@ -240,6 +240,82 @@ Datasette (raw SQL over all tables) is available at `/datasette`, gated by the s
 - `raw_daily_metrics(date, source, metric, value)` — provider-agnostic EAV table; adding a new source = new rows, no schema change
 - `daily_metrics` — normalized wide table rebuilt after each import; this is what the dashboard queries
 - `manual_logs` — write target for all MCP nutrition/caffeine/alcohol logging tools
+
+---
+
+## Datasette / SQL exploration
+
+Datasette is available at `/datasette` (authenticate with `DATASETTE_TOKEN`). It gives you a full SQL interface over every table — useful for ad-hoc correlation queries that go beyond what the dashboard and MCP tools expose.
+
+### Useful queries
+
+**Alcohol the night before vs. next-morning HRV** (lag-1 correlation):
+```sql
+SELECT
+  a.date              AS night,
+  a.alcohol_units,
+  b.hrv               AS next_hrv,
+  b.hrv - AVG(b.hrv) OVER (
+    ORDER BY b.date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW
+  )                   AS hrv_vs_14d_avg
+FROM daily_metrics a
+JOIN daily_metrics b ON b.date = DATE(a.date, '+1 day')
+WHERE a.alcohol_units IS NOT NULL AND b.hrv IS NOT NULL
+ORDER BY a.date DESC;
+```
+
+**Sleep score vs. next-day training readiness:**
+```sql
+SELECT
+  a.date, a.sleep_score, a.sleep_duration_min,
+  b.training_readiness AS next_readiness
+FROM daily_metrics a
+JOIN daily_metrics b ON b.date = DATE(a.date, '+1 day')
+WHERE a.sleep_score IS NOT NULL AND b.training_readiness IS NOT NULL
+ORDER BY a.date DESC;
+```
+
+**Caffeine timing vs. sleep score** — does late caffeine hurt sleep?
+```sql
+SELECT
+  DATE(ts) AS log_date,
+  MAX(CAST(strftime('%H', ts) AS INTEGER)) AS latest_caffeine_hour,
+  SUM(quantity) AS total_mg,
+  m.sleep_score AS next_sleep_score
+FROM manual_logs
+JOIN daily_metrics m ON m.date = DATE(DATE(ts), '+1 day')
+WHERE type = 'caffeine'
+GROUP BY DATE(ts)
+ORDER BY log_date DESC;
+```
+
+**Weekly training load trend:**
+```sql
+SELECT
+  strftime('%Y-W%W', date) AS week,
+  ROUND(AVG(acute_training_load), 1)  AS atl,
+  ROUND(AVG(chronic_training_load), 1) AS ctl,
+  ROUND(AVG(training_load_ratio), 2)  AS tsb
+FROM daily_metrics
+WHERE acute_training_load IS NOT NULL
+GROUP BY week
+ORDER BY week DESC
+LIMIT 12;
+```
+
+**All manual logs with daily HRV for that day:**
+```sql
+SELECT
+  DATE(l.ts) AS date,
+  l.type, l.description, l.quantity, l.unit,
+  m.hrv, m.sleep_score, m.training_readiness
+FROM manual_logs l
+LEFT JOIN daily_metrics m ON m.date = DATE(l.ts)
+ORDER BY l.ts DESC
+LIMIT 100;
+```
+
+These queries run directly in the Datasette UI — no setup required. You can also download a consistent DB snapshot from `/export/db` (requires `EXPORT_TOKEN`) and run heavier analysis locally in a notebook.
 
 ---
 
