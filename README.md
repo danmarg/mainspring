@@ -134,6 +134,69 @@ LITESTREAM_REPLICA_URL=s3://mybucket/health.db
 
 ---
 
+## Claude integration (MCP)
+
+When `MCP_TOKEN` is set, the app exposes an MCP server at `/mcp`. Add it to Claude as a remote MCP server and Claude can log and query your health data directly from conversation.
+
+### Logging tools
+
+| Tool | What it does |
+|---|---|
+| `log_meal(description, estimated_calories?, estimated_macros?, confidence?)` | Log a meal; Claude can estimate calories and macros from a photo or description |
+| `log_caffeine(description, amount_mg?)` | Log a coffee or other caffeine source |
+| `log_alcohol(description, units?)` | Log alcohol in standard units |
+| `log_weight(kg)` | Log a weight measurement |
+| `log_blood_pressure(systolic, diastolic, pulse?)` | Log a BP reading |
+| `log_rpe(value, activity_type?)` | Log perceived exertion after a workout (1–10) |
+| `log_note(description)` | Log a free-text note |
+| `amend_log(log_id, ...)` | Correct a previous log entry |
+| `delete_log(log_id)` | Delete a log entry |
+
+All logging tools accept an optional `ts` parameter (UTC ISO-8601) to back-date entries.
+
+### Query tools
+
+| Tool | What it returns |
+|---|---|
+| `get_logs(start_date, end_date, type?)` | Raw log entries (meals, caffeine, alcohol, notes) |
+| `get_daily_metrics(start_date, end_date)` | HRV, sleep, training load, nutrition totals by date |
+| `get_workout_context(date?)` | Everything needed for workout planning in one call: today's HRV + trend, training stress balance (TSB/form), week volume vs targets, next goal event, yesterday's RPE, recent activities, Garmin's suggested workout, and personalized insights from historical correlations |
+| `get_suggested_workout(date?)` | Garmin's raw workout suggestion for a date |
+| `get_correlations(input_metric, output_metric, lag?)` | Pearson/Spearman correlation between any two metrics with a configurable day lag — e.g. `alcohol_units` → `hrv` at lag 1 reveals last night's drinking vs this morning's recovery |
+| `get_training_goals()` | Current weekly training targets |
+| `set_training_goal(metric, value, unit?)` | Set a weekly target (e.g. `weekly_duration_min = 300`) |
+| `add_training_event(date, type, description, goal_description?)` | Add a goal race or event |
+| `list_training_events(status?)` | List upcoming/completed training events |
+| `get_source_config()` | See which data source is canonical for each metric |
+| `set_source_preference(metric, source)` | Override source priority for a metric |
+
+---
+
+## Morning workout planning webhook
+
+The app fires a webhook after each morning import when today's sleep score arrives for the first time. This lets you trigger an automated Claude routine that reads your overnight recovery data and plans the day's training before you've even looked at your phone.
+
+### Setup
+
+```env
+MORNING_WEBHOOK_URL=https://...
+MORNING_WEBHOOK_SECRET=your-secret   # sent as Bearer token; optional but recommended
+```
+
+The webhook sends a `POST {}` to `MORNING_WEBHOOK_URL` with `Authorization: Bearer <MORNING_WEBHOOK_SECRET>` in the header.
+
+### Example: daily workout planning with Claude
+
+Wire the webhook to any service that can receive an HTTP call and invoke Claude — for example a Claude.ai project with a scheduled prompt, Make/Zapier, or a small serverless function. The prompt can be as simple as:
+
+> Call `get_workout_context()` on the Mainspring MCP server, then recommend today's workout and explain your reasoning. If I have a goal event coming up, factor in the training block. Reply in 3–4 sentences.
+
+Claude will call `get_workout_context()`, which returns HRV, sleep score, TSB (form), week volume so far, yesterday's RPE, the next upcoming race, Garmin's suggestion, and correlation-derived insights about which behaviors most affect your recovery. It then synthesises all of that into a single actionable recommendation.
+
+You can extend the prompt to also check weather, suggest a specific route, or send the result somewhere (email, Slack, push notification).
+
+---
+
 ## Manual imports
 
 Imports run automatically every hour via the `importer` service. To trigger one immediately:
