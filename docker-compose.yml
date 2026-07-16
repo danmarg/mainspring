@@ -1,0 +1,40 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - health_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  importer:
+    build: .
+    entrypoint: ["/bin/sh", "-c"]
+    # Run both importers every hour; gracefully skips unconfigured sources.
+    # $$ADMIN_TOKEN — double-$ so shell inside the container expands it, not compose.
+    command:
+      - |
+        while true; do
+          curl -sf -X POST http://app:8080/admin/import/garmin \
+            -H "Authorization: Bearer $$ADMIN_TOKEN" || true
+          curl -sf -X POST http://app:8080/admin/import/google_health \
+            -H "Authorization: Bearer $$ADMIN_TOKEN" || true
+          sleep 3600
+        done
+    env_file:
+      - .env
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  health_data:
