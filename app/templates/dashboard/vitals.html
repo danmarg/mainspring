@@ -5,11 +5,6 @@
 {% block content %}
 <h1>Vitals</h1>
 
-<div class="day-tabs">
-  {% for d in [('90','90d'), ('180','180d'), ('all','All')] %}
-  <a href="/dashboard/vitals?days={{ d[0] }}" class="{% if days == d[0] %}active{% endif %}">{{ d[1] }}</a>
-  {% endfor %}
-</div>
 
 <div class="two-col">
   <div class="chart-block">

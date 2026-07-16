@@ -54,8 +54,11 @@ def _auth_redirect():
 
 def _days_clause(days: str) -> str:
     """Return SQL date lower-bound string for WHERE date >= date('now', ?)."""
-    mapping = {"30": "-30 days", "90": "-90 days", "180": "-180 days", "all": "-9999 days"}
-    return mapping.get(str(days), "-90 days")
+    mapping = {
+        "7": "-7 days", "30": "-30 days", "90": "-90 days",
+        "180": "-180 days", "360": "-360 days", "all": "-9999 days",
+    }
+    return mapping.get(str(days), "-30 days")
 
 
 def _rows(conn, sql: str, params: tuple = ()) -> list[dict]:
@@ -859,7 +862,7 @@ async def overview(request: Request,
 # ── trends ────────────────────────────────────────────────────────────────────
 
 @router.get("/trends", response_class=HTMLResponse)
-async def trends(request: Request, days: str = "90",
+async def trends(request: Request, days: str = "30",
                  ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
@@ -960,7 +963,7 @@ async def trends(request: Request, days: str = "90",
 # ── behavior ──────────────────────────────────────────────────────────────────
 
 @router.get("/behavior", response_class=HTMLResponse)
-async def behavior(request: Request, days: str = "90",
+async def behavior(request: Request, days: str = "30",
                    ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
@@ -1023,7 +1026,7 @@ DOW_NAMES = {"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed", "4": "Thu", "5": "F
 
 
 @router.get("/nutrition", response_class=HTMLResponse)
-async def nutrition(request: Request, days: str = "90",
+async def nutrition(request: Request, days: str = "30",
                     ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
@@ -1112,7 +1115,7 @@ async def nutrition(request: Request, days: str = "90",
 # ── activities ────────────────────────────────────────────────────────────────
 
 @router.get("/activities", response_class=HTMLResponse)
-async def activities(request: Request, days: str = "60",
+async def activities(request: Request, days: str = "30",
                      ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
@@ -1193,7 +1196,7 @@ async def activities(request: Request, days: str = "60",
 # ── vitals ────────────────────────────────────────────────────────────────────
 
 @router.get("/vitals", response_class=HTMLResponse)
-async def vitals(request: Request, days: str = "180",
+async def vitals(request: Request, days: str = "30",
                  ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
