@@ -139,7 +139,10 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
             )
             .properties(width="container", height=120)
         )
-        combined = alt.vconcat(score_chart, stages_chart, spacing=8)
+        combined = (
+            alt.vconcat(score_chart, stages_chart, spacing=8)
+            .resolve_scale(x="shared")
+        )
     else:
         combined = score_chart
     return (
