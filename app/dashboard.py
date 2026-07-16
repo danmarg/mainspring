@@ -479,7 +479,8 @@ def _daily_bar_chart(rows: list[dict], field: str, title: str,
         alt.Chart(alt.Data(values=rows))
         .mark_bar(color=color, opacity=0.8)
         .encode(
-            x=alt.X("date:T", title=None, scale=x_scale),
+            x=alt.X("date:T", title=None, scale=x_scale,
+                    axis=alt.Axis(tickCount="day", format="%b %e")),
             y=alt.Y(f"{field}:Q", title=title),
             tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip(f"{field}:Q", title=title, format=".0f")],
         )
@@ -509,7 +510,8 @@ def _macro_dow_chart(rows: list[dict]) -> str:
         .mark_bar()
         .encode(
             x=alt.X("dow_name:N", title=None,
-                    sort=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]),
+                    sort=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                    scale=alt.Scale(domain=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])),
             y=alt.Y("avg_g:Q", title="Avg grams", stack="zero"),
             color=alt.Color("macro:N", scale=alt.Scale(
                 domain=["protein_g", "carbs_g", "fat_g"],
