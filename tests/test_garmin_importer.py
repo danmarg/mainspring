@@ -60,6 +60,9 @@ def test_parse_hrv(tmp_db):
 
 
 def test_parse_sleep(tmp_db):
+    # sleepEndTimestampLocal: datetime(2025,1,1,7,30,0) treated as UTC epoch
+    # = 1735716600 seconds = 1735716600000 ms → wake_hour = 7.5
+    WAKE_TS_MS = 1735716600000
     data = {
         "dailySleepDTO": {
             "sleepScores": {"overall": {"value": 75}},
@@ -67,10 +70,11 @@ def test_parse_sleep(tmp_db):
             "deepSleepSeconds": 5400,
             "remSleepSeconds": 7200,
             "lightSleepSeconds": 14400,
+            "sleepEndTimestampLocal": WAKE_TS_MS,
         }
     }
     rows = _parse_sleep(tmp_db, "2025-01-01", data)
-    assert rows >= 4
+    assert rows >= 5
     score = tmp_db.execute(
         "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='sleep_score'"
     ).fetchone()
@@ -79,6 +83,11 @@ def test_parse_sleep(tmp_db):
         "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='sleep_duration_min'"
     ).fetchone()
     assert abs(dur[0] - 450.0) < 0.01
+    wake = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='sleep_wake_hour'"
+    ).fetchone()
+    assert wake is not None
+    assert abs(wake[0] - 7.5) < 0.01
 
 
 def test_parse_stress(tmp_db):

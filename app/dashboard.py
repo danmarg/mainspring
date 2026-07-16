@@ -10,7 +10,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import altair as alt
 from fastapi import APIRouter, Cookie, Form, Request
@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.db import db
+from app.readiness import alertness_curve, readiness_from_db
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard")
@@ -374,6 +375,70 @@ def _pmc_chart(rows: list[dict]) -> str:
     )
 
 
+def _energy_chart(wake_hour: float | None, sleep_score: float | None,
+                  current_hour: float,
+                  caffeine_doses: list[tuple[float, float]] | None = None) -> str:
+    """
+    Energy forecast chart using two-process alertness model (Borbély 1982).
+    Anchored to today's wake time from Garmin sleep data.
+    """
+    if wake_hour is None:
+        return "{}"
+
+    FORECAST_HOURS = 18  # slightly past midnight for late sleepers
+    curve = alertness_curve(wake_hour, sleep_score or 75.0, FORECAST_HOURS, caffeine_doses=caffeine_doses)
+
+    # Use hours-since-wake on X axis to avoid midnight-wrapping issues
+    curve_hw = [
+        {**r, "hw": i / 4.0, "label": f"{int(r['hour']):02d}:{int((r['hour'] % 1) * 60):02d}"}
+        for i, r in enumerate(curve)
+    ]
+    peak = max(curve_hw, key=lambda r: r["alertness"])
+
+    # hours-since-wake for "now"; only show if within the forecast window
+    now_hw = (current_hour - wake_hour) % 24
+    show_now = 0.0 <= now_hw <= FORECAST_HOURS
+
+    # X-axis: tick every 2h from wake, labeled as local clock time
+    tick_vals = list(range(0, FORECAST_HOURS + 1, 2))
+    tick_labels = {h: f"{int((wake_hour + h) % 24):02d}:00" for h in tick_vals}
+    label_expr = "{" + ",".join(f'"{k}":"{v}"' for k, v in tick_labels.items()) + "}[datum.value]"
+
+    base = alt.Chart(alt.Data(values=curve_hw))
+    area = base.mark_area(opacity=0.25, color="#4e9af1").encode(
+        x=alt.X("hw:Q", title=None, scale=alt.Scale(domain=[0, FORECAST_HOURS]),
+                axis=alt.Axis(values=tick_vals, labelExpr=label_expr)),
+        y=alt.Y("alertness:Q", title="Alertness", scale=alt.Scale(domain=[0, 100], zero=True)),
+    )
+    line = base.mark_line(color="#4e9af1", strokeWidth=2).encode(
+        x="hw:Q", y="alertness:Q",
+        tooltip=[alt.Tooltip("label:N", title="Time"),
+                 alt.Tooltip("alertness:Q", title="Alertness", format=".0f")],
+    )
+    peak_dot = (
+        alt.Chart(alt.Data(values=[peak]))
+        .mark_point(color="#2ecc71", size=80, shape="triangle-up")
+        .encode(x="hw:Q", y="alertness:Q",
+                tooltip=[alt.Tooltip("label:N", title="Peak time"),
+                         alt.Tooltip("alertness:Q", title="Peak", format=".0f")])
+    )
+    layers = [area, line, peak_dot]
+    if show_now:
+        rule = (
+            alt.Chart(alt.Data(values=[{"hw": now_hw}]))
+            .mark_rule(color="#f4a261", strokeDash=[4, 4], strokeWidth=2)
+            .encode(x="hw:Q")
+        )
+        layers.insert(2, rule)
+    return (
+        alt.layer(*layers)
+        .properties(width="container", height=160)
+        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+        .configure_view(strokeWidth=0, fill="#1a1a1a")
+        .to_json()
+    )
+
+
 def _activity_bar(rows: list[dict], field: str, y_title: str) -> str:
     if not rows:
         return "{}"
@@ -624,96 +689,170 @@ async def login_submit(request: Request, token: str = Form(...)):
     return resp
 
 
+# ── timezone helper ───────────────────────────────────────────────────────────
+
+def _get_tz(browser_tz: str | None = None):
+    """
+    Return a ZoneInfo for the best available timezone source.
+    Priority: browser cookie > HOME_TZ env > UTC.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    for name in (browser_tz, os.getenv("HOME_TZ"), "UTC"):
+        if not name:
+            continue
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, Exception):
+            continue
+    from zoneinfo import ZoneInfo
+    return ZoneInfo("UTC")
+
+
+def _local_now(browser_tz: str | None = None) -> datetime:
+    """Current datetime in the best available local timezone."""
+    from datetime import timezone
+    return datetime.now(timezone.utc).astimezone(_get_tz(browser_tz))
+
+
+def _utc_to_local_hour(ts_str: str, browser_tz: str | None = None) -> float | None:
+    """Convert UTC ISO timestamp string to local hour-of-day float."""
+    try:
+        from datetime import timezone
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(_get_tz(browser_tz))
+        return local.hour + local.minute / 60
+    except Exception:
+        return None
+
+
 # ── overview ──────────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
 @router.get("", response_class=HTMLResponse)
-async def overview(request: Request, days: str = "14",
-                   ms_dash_auth: str | None = Cookie(default=None)):
+async def overview(request: Request,
+                   ms_dash_auth: str | None = Cookie(default=None),
+                   ms_tz: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
 
-    today = date.today().isoformat()
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    clause = _days_clause(days)
+    local_now = _local_now(ms_tz)
+    today = local_now.strftime("%Y-%m-%d")
+    yesterday = (local_now - timedelta(days=1)).strftime("%Y-%m-%d")
+    current_hour = local_now.hour + local_now.minute / 60
 
     with db() as conn:
+        # If HOME_TZ isn't set and it's early UTC (e.g. 1-6am), today might have
+        # no data yet. Fall back to yesterday when that happens.
+        has_today = _scalar(conn, "SELECT 1 FROM daily_metrics WHERE date=? LIMIT 1", (today,))
+        if not has_today:
+            has_yesterday = _scalar(conn, "SELECT 1 FROM daily_metrics WHERE date=? LIMIT 1", (yesterday,))
+            if has_yesterday:
+                today = yesterday
+                yesterday = (local_now - timedelta(days=2)).strftime("%Y-%m-%d")
+
+        # Readiness (shared module — same formula MCP server uses)
+        readiness = readiness_from_db(conn, today)
+
+        # Today's core metrics for the info strip
         today_row = conn.execute(
-            """SELECT hrv, sleep_score, training_readiness, body_battery_high,
-                      resting_hr, weight_kg, stress_avg, sleep_duration_min
+            """SELECT hrv, sleep_score, resting_hr, body_battery_high,
+                      weight_kg, sleep_duration_min, stress_avg
                FROM daily_metrics WHERE date=?""",
             (today,),
         ).fetchone()
 
-        avg_rows = _rows(conn,
-            """SELECT AVG(hrv) as hrv, AVG(sleep_score) as sleep_score,
-                      AVG(training_readiness) as training_readiness,
-                      AVG(body_battery_high) as body_battery_high,
-                      AVG(resting_hr) as resting_hr
-               FROM daily_metrics
-               WHERE date >= date('now','-7 days') AND date < date('now')""")
-        avgs = avg_rows[0] if avg_rows else {}
-
-        yesterday_row = conn.execute(
-            "SELECT alcohol_units, caffeine_mg, calories_estimated FROM daily_metrics WHERE date=?",
-            (yesterday,),
+        # Wake time and sleep score for energy curve
+        wake_row = conn.execute(
+            """SELECT value FROM raw_daily_metrics
+               WHERE date=? AND source='garmin' AND metric='sleep_wake_hour'""",
+            (today,),
         ).fetchone()
+        wake_hour: float | None = wake_row[0] if wake_row else None
 
-        spark_rows = _rows(conn,
-            """SELECT date, hrv, sleep_score, resting_hr FROM daily_metrics
-               WHERE date >= date('now', ?) ORDER BY date""",
-            (clause,))
+        # If today's sleep data not yet imported, fall back to yesterday
+        if wake_hour is None:
+            wake_row_y = conn.execute(
+                """SELECT value FROM raw_daily_metrics
+                   WHERE date=? AND source='garmin' AND metric='sleep_wake_hour'""",
+                (yesterday,),
+            ).fetchone()
+            wake_hour = wake_row_y[0] if wake_row_y else None
 
-    def _delta(key: int, avg_key: str):
-        if today_row and today_row[key] is not None and avgs.get(avg_key):
-            d = today_row[key] - avgs[avg_key]
-            return f"{'+' if d >= 0 else ''}{d:.1f}"
-        return None
+        # Today's caffeine logs for energy boost component
+        caffeine_logs = _rows(conn,
+            """SELECT ts, quantity FROM manual_logs
+               WHERE type='caffeine' AND DATE(ts)=?
+                 AND quantity IS NOT NULL AND quantity > 0
+               ORDER BY ts""",
+            (today,))
 
-    cards = []
+        # Today's nutrition totals
+        today_nutrition_row = conn.execute(
+            """SELECT SUM(estimated_calories),
+                      GROUP_CONCAT(estimated_macros_json, char(31))
+               FROM manual_logs
+               WHERE type='meal' AND DATE(ts)=?""",
+            (today,),
+        ).fetchone()
+        today_calories = today_nutrition_row[0] if today_nutrition_row else None
+        today_macros = _parse_macros(today_nutrition_row[1]) if today_nutrition_row else {}
+        today_meal_count = _scalar(conn,
+            "SELECT COUNT(*) FROM manual_logs WHERE type='meal' AND DATE(ts)=?",
+            (today,))
+
+        # Nutrition targets
+        protein_target_row = conn.execute(
+            "SELECT value FROM training_goals WHERE metric='protein_g_daily'"
+        ).fetchone()
+        protein_target = float(protein_target_row[0]) if protein_target_row else 160.0
+
+        calorie_target_row = conn.execute(
+            "SELECT value FROM training_goals WHERE metric='calories_daily'"
+        ).fetchone()
+        calorie_target = float(calorie_target_row[0]) if calorie_target_row else None
+
+    # Build caffeine doses list in local hours for the energy curve
+    caffeine_doses: list[tuple[float, float]] = []
+    for cl in caffeine_logs:
+        local_h = _utc_to_local_hour(cl["ts"], ms_tz)
+        if local_h is not None:
+            try:
+                caffeine_doses.append((float(cl["quantity"]), local_h))
+            except (TypeError, ValueError):
+                pass
+
+    # Sleep score from today's metrics (for energy curve quality)
+    sleep_score_for_curve = today_row[1] if today_row and today_row[1] else None
+
+    # Today info strip (compact, not card grid)
+    today_info: dict = {}
     if today_row:
         tr = today_row
-        def card(label, val, avg_key, fmt=".0f", unit=""):
-            raw = val
-            if raw is None:
-                return {"label": label, "value": "—", "delta": None, "unit": unit}
-            avg = avgs.get(avg_key)
-            delta = None
-            if avg:
-                d = raw - avg
-                delta = {"text": f"{'+' if d >= 0 else ''}{d:{fmt}}", "pos": d >= 0}
-            return {"label": label, "value": f"{raw:{fmt}}", "delta": delta, "unit": unit}
-
-        cards = [
-            card("HRV", tr[0], "hrv", ".0f", "ms"),
-            card("Sleep score", tr[1], "sleep_score", ".0f", ""),
-            card("Readiness", tr[2], "training_readiness", ".0f", ""),
-            card("Body battery", tr[3], "body_battery_high", ".0f", ""),
-            card("Resting HR", tr[4], "resting_hr", ".0f", "bpm"),
-            {"label": "Weight", "value": f"{tr[5]:.1f}" if tr[5] else "—", "delta": None, "unit": "kg"},
-        ]
-
-    # Build sparkline specs
-    hrv_spark = _sparkline([r for r in spark_rows if r.get("hrv")], "hrv", "#4e9af1")
-    sleep_spark = _sparkline([r for r in spark_rows if r.get("sleep_score")], "sleep_score", "#7ec8e3")
-    hr_spark = _sparkline([r for r in spark_rows if r.get("resting_hr")], "resting_hr", "#e05c5c")
-
-    yesterday_behavior = None
-    if yesterday_row:
-        yesterday_behavior = {
-            "alcohol_units": yesterday_row[0],
-            "caffeine_mg": yesterday_row[1],
-            "calories_estimated": yesterday_row[2],
+        today_info = {
+            "hrv": tr[0],
+            "sleep_score": tr[1],
+            "rhr": tr[2],
+            "body_battery": tr[3],
+            "weight_kg": tr[4],
+            "sleep_h": round(tr[5] / 60, 1) if tr[5] else None,
+            "stress": tr[6],
         }
 
     return templates.TemplateResponse(request, "overview.html", {
         "today": today,
-        "days": days,
-        "cards": cards,
-        "hrv_spark": hrv_spark,
-        "sleep_spark": sleep_spark,
-        "hr_spark": hr_spark,
-        "yesterday_behavior": yesterday_behavior,
+        "readiness": readiness,
+        "today_info": today_info,
+        "today_calories": today_calories,
+        "today_protein": today_macros.get("protein_g"),
+        "today_carbs": today_macros.get("carbs_g"),
+        "today_fat": today_macros.get("fat_g"),
+        "today_meal_count": today_meal_count or 0,
+        "protein_target": protein_target,
+        "calorie_target": calorie_target,
+        "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve,
+                                     current_hour, caffeine_doses or None),
     })
 
 
