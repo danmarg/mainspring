@@ -114,7 +114,20 @@
   <a href="/dashboard/nutrition" class="{% if active_page == 'nutrition' %}active{% endif %}">Nutrition</a>
   <a href="/dashboard/activities" class="{% if active_page == 'activities' %}active{% endif %}">Activities</a>
   <a href="/dashboard/vitals" class="{% if active_page == 'vitals' %}active{% endif %}">Vitals</a>
-  <a href="/datasette" style="margin-left:auto">Datasette ↗</a>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:0.5rem">
+    {% if active_page != 'overview' %}
+    <select id="days-select" onchange="msChangeDays(this.value)"
+            style="background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);
+                   border-radius:4px;padding:0.22rem 0.5rem;font-size:0.8rem;cursor:pointer">
+      <option value="7">7d</option>
+      <option value="30">30d</option>
+      <option value="90">90d</option>
+      <option value="180">180d</option>
+      <option value="360">360d</option>
+    </select>
+    {% endif %}
+    <a href="/datasette">Datasette ↗</a>
+  </div>
 </nav>
 <main>
 {% block content %}{% endblock %}
@@ -127,6 +140,45 @@
     if (tz) document.cookie = 'ms_tz=' + encodeURIComponent(tz) + '; path=/; SameSite=Lax; Max-Age=86400';
   } catch(e) {}
 })();
+
+// Persist time-range selection across tabs
+(function() {
+  var KEY = 'ms_days', DEFAULT = '30';
+  var params = new URLSearchParams(window.location.search);
+  var urlDays = params.get('days');
+  var savedDays = localStorage.getItem(KEY) || DEFAULT;
+  var currentDays = urlDays || savedDays;
+
+  // Sync URL → localStorage
+  if (urlDays && urlDays !== savedDays) localStorage.setItem(KEY, urlDays);
+
+  // If no days in URL but page supports it, redirect with saved value
+  var hasDaysPicker = !!document.getElementById('days-select');
+  if (hasDaysPicker && !urlDays) {
+    params.set('days', currentDays);
+    window.location.replace(window.location.pathname + '?' + params.toString());
+    return;
+  }
+
+  // Set dropdown to current value
+  var sel = document.getElementById('days-select');
+  if (sel) { sel.value = currentDays; if (!sel.value) sel.value = DEFAULT; }
+
+  // Update nav links to carry current days when switching tabs
+  document.querySelectorAll('nav a[href^="/dashboard"]').forEach(function(a) {
+    if (a.href.indexOf('/login') !== -1) return;
+    var u = new URL(a.href);
+    u.searchParams.set('days', currentDays);
+    a.href = u.toString();
+  });
+})();
+
+function msChangeDays(val) {
+  localStorage.setItem('ms_days', val);
+  var u = new URL(window.location.href);
+  u.searchParams.set('days', val);
+  window.location.href = u.toString();
+}
 
 function embed(id, spec) {
   if (!spec || !spec['$schema']) return;
