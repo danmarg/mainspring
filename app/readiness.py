@@ -1,14 +1,76 @@
 """
 Readiness score and energy curve — shared between dashboard and MCP server.
 
-Readiness algorithm draws on:
-  - HRV vs 7-day baseline: Plews et al. (2012, Int J Sports Physiol Perform)
-  - Training Stress Balance / TSB: Banister (1991) impulse-response model
-  - Sleep score and resting HR as established recovery markers
+━━━ Readiness score ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Weighted composite of four signals (weights in compute_readiness):
 
-Energy curve uses a simplified two-process model of alertness:
-  - Borbély (1982) / Daan, Beersma, Borbély (1984)
-  - Circadian component C(t) and homeostatic pressure S(t) combined
+HRV / 7-day baseline (40%)
+  The ratio of today's HRV to its own 7-day rolling mean is a better fatigue
+  signal than the raw value, because individual baselines vary so much.
+  Reference: Plews, D.J. et al. (2012). "Heart rate variability in elite
+  triathletes, is variation in variability the key to effective training?
+  A case comparison." Int J Sports Physiol Perform, 7(4), 327-336.
+
+Sleep score (30%)
+  Passed through as-is from Garmin/Fitbit sleep staging algorithms, which
+  are themselves calibrated against polysomnography.
+
+Resting HR vs baseline (20%)
+  Elevated morning resting HR is an established marker of incomplete recovery
+  and autonomic stress. Inverted from the HRV ratio so high = bad.
+  Reference: Coote, J.H. (2010). "Recovery of heart rate following intense
+  dynamic exercise." Exp Physiol, 95(3), 431-440.
+
+Training Stress Balance / form (10%)
+  TSB = CTL − ATL (chronic minus acute training load). Positive TSB = freshness,
+  negative TSB = accumulated fatigue. Garmin provides CTL/ATL directly.
+  Reference: Banister, E.W. (1991). "Modeling elite athletic performance."
+  Physiological Testing of Elite Athletes, 403-424.
+
+━━━ Energy / alertness curve ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Two-process model: alertness(t) = f(C(t), S(t)) where:
+
+  C(t) — circadian process: the ~24h oscillation driven by the suprachiasmatic
+          nucleus (SCN). Modeled as a cosine peaking at 15:00 (typical
+          chronotype). Shifts the alert zone into the afternoon and creates the
+          characteristic post-lunch dip and evening wake-maintenance zone.
+          Reference: Daan, S., Beersma, D.C.M. & Borbély, A.A. (1984).
+          "Timing of human sleep: recovery process gated by a circadian
+          pacemaker." Am J Physiol, 246(2), R161-R183.
+
+  S(t) — homeostatic sleep pressure: adenosine accumulates in the brain during
+          waking and is cleared during sleep. Modeled as exponential rise toward
+          saturation, with time constant 16h (Achermann & Borbély 2003).
+          Starting level s0 is raised when sleep quality is poor (worse sleep
+          = more residual pressure at wake).
+          Reference: Borbély, A.A. (1982). "A two process model of sleep
+          regulation." Hum Neurobiol, 1(3), 195-204.
+          Reference: Achermann, P. & Borbély, A.A. (2003). "Mathematical
+          models of sleep regulation." Front Biosci, 8, s683-693.
+
+  Caffeine — delays adenosine clearance by competitively binding A1/A2A
+             receptors. Effect modeled as a reduction in S proportional to
+             dose (reference dose 200mg), ramping over 45 min and decaying with
+             5h half-life (matching caffeine plasma half-life in most adults).
+             Reference: Nehlig, A., Daval, J.L. & Debry, G. (1992). "Caffeine
+             and the central nervous system: mechanisms of action, biochemical,
+             metabolic and psychostimulant effects." Brain Res Rev, 17(2),
+             139-170.
+             Reference: Lovallo, W.R. et al. (2006). "Caffeine stimulation of
+             cortisol secretion across the waking hours in relation to caffeine
+             intake levels." Psychosom Med, 68(5), 734-739.
+
+  Exercise — post-workout sympathetic arousal (catecholamine release,
+             elevated core temperature) suppresses perceived sleepiness for
+             1-3h after session end. Effect scales with intensity (RPE or
+             avg-HR proxy) and decays with 90-min half-life. Morning workouts
+             therefore provide a sustained alertness boost into mid-morning;
+             evening workouts delay the evening decline.
+             Reference: Youngstedt, S.D. (2005). "Effects of exercise on
+             sleep." Clin Sports Med, 24(2), 355-365.
+             Reference: Kline, C.E. et al. (2010). "The effect of exercise
+             intensity on sleep in young women." Eur J Appl Physiol,
+             110(2), 389-397.
 """
 
 from __future__ import annotations
@@ -147,6 +209,7 @@ def alertness_curve(
     sleep_score: float = 75.0,
     hours: int = 17,
     caffeine_doses: list[tuple[float, float]] | None = None,
+    activity_boosts: list[tuple[float, float]] | None = None,
 ) -> list[dict]:
     """
     Simplified two-process alertness model (Borbély 1982; Daan, Beersma, Borbély 1984).
@@ -157,12 +220,15 @@ def alertness_curve(
       - Sleep-quality factor: low score shifts starting S upward
       - Caffeine boost: blocks adenosine, suppressing S with ~5h half-life
         (Nehlig et al. 1992; Lovallo et al. 2006)
+      - Exercise boost: post-workout sympathetic arousal suppresses sleep pressure
+        for ~2-3h after the session; effect scales with intensity (RPE or avg HR proxy)
 
     Args:
         wake_hour: local hour of waking (e.g. 6.5 = 6:30am)
         sleep_score: 0-100 sleep quality (affects depth of post-wake restoration)
         hours: how many hours forward to forecast
         caffeine_doses: list of (dose_mg, local_hour_of_dose) tuples for today
+        activity_boosts: list of (intensity_0_to_1, local_end_hour) tuples for today
 
     Returns:
         List of {hour, alertness} dicts at 15-min resolution.
@@ -194,7 +260,17 @@ def alertness_curve(
                     decay = math.exp(-0.693 * max(0.0, hours_since - 0.75) / 5.0)
                     caffeine_reduction += (dose_mg / 200.0) * 0.25 * ramp * decay
 
-        S_effective = max(0.0, S - caffeine_reduction)
+        # Exercise: post-workout sympathetic arousal suppresses perceived sleep pressure.
+        # Effect peaks immediately after session end, decays with 90-min half-life.
+        # Intensity 1.0 (hard effort) reduces S by up to 0.20 at peak.
+        exercise_reduction = 0.0
+        if activity_boosts:
+            for intensity, end_local_hour in activity_boosts:
+                hrs_since = (hour - end_local_hour) % 24
+                if 0 < hrs_since <= 4:
+                    exercise_reduction += intensity * 0.20 * math.exp(-0.693 * hrs_since / 1.5)
+
+        S_effective = max(0.0, S - caffeine_reduction - exercise_reduction)
 
         # Alertness ∝ C (circadian drive) minus S_effective (sleep pressure)
         raw = C * 0.65 + (1 - S_effective) * 0.35
