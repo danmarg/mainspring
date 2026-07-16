@@ -469,15 +469,17 @@ def _weekly_volume_chart(rows: list[dict]) -> str:
 
 
 def _daily_bar_chart(rows: list[dict], field: str, title: str,
-                     color: str = "#4e9af1", ref_line: float | None = None) -> str:
+                     color: str = "#4e9af1", ref_line: float | None = None,
+                     x_domain: list[str] | None = None) -> str:
     """Bar chart of a daily value over time, with optional horizontal reference line."""
     if not rows:
         return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     bars = (
         alt.Chart(alt.Data(values=rows))
         .mark_bar(color=color, opacity=0.8)
         .encode(
-            x=alt.X("date:T", title=None),
+            x=alt.X("date:T", title=None, scale=x_scale),
             y=alt.Y(f"{field}:Q", title=title),
             tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip(f"{field}:Q", title=title, format=".0f")],
         )
@@ -1090,11 +1092,18 @@ async def nutrition(request: Request, days: str = "30",
                 avg_g = sum(vals) / len(vals)
                 dow_macro_rows.append({"dow_name": dow_name, "macro": macro, "avg_g": round(avg_g, 1)})
 
+    from datetime import date as _date, timedelta
+    days_int = int(days) if str(days).isdigit() else 30
+    x_domain = [
+        (_date.today() - timedelta(days=days_int)).isoformat(),
+        _date.today().isoformat(),
+    ]
+
     return templates.TemplateResponse(request, "nutrition.html", {
         "days": days,
         "protein_target": protein_target,
-        "calories_spec": _daily_bar_chart(cal_logged_rows, "calories", "Calories (kcal)", color="#f4a261"),
-        "protein_spec": _daily_bar_chart(protein_rows, "protein_g", "Protein (g)", color="#e05c5c", ref_line=protein_target),
+        "calories_spec": _daily_bar_chart(cal_logged_rows, "calories", "Calories (kcal)", color="#f4a261", x_domain=x_domain),
+        "protein_spec": _daily_bar_chart(protein_rows, "protein_g", "Protein (g)", color="#e05c5c", ref_line=protein_target, x_domain=x_domain),
         "macro_dow_spec": _macro_dow_chart(dow_macro_rows),
     })
 
