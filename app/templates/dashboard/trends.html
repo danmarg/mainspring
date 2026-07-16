@@ -27,7 +27,12 @@
 </div>
 
 <div class="chart-block">
-  <h3>Training zone load <span style="color:#888;font-size:0.72rem">Garmin monthly load by zone (aerobic low · aerobic high · anaerobic)</span></h3>
+  <h3>Training load — ATL/CTL/TSB <span style="color:#888;font-size:0.72rem"><span style="color:#4e9af1">blue = CTL (fitness)</span> · <span style="color:#f4a261">orange = ATL (fatigue)</span> · bars = TSB form</span></h3>
+  <div class="vega-wrap" id="pmc-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Training zone load <span style="color:#888;font-size:0.72rem">monthly load by zone (aerobic low · aerobic high · anaerobic)</span></h3>
   <div class="vega-wrap" id="load-chart"></div>
 </div>
 
@@ -42,6 +47,7 @@
 embed('hrv-chart',     {{ hrv_spec|safe }});
 embed('hr-chart',      {{ hr_spec|safe }});
 embed('sleep-chart',   {{ sleep_spec|safe }});
+embed('pmc-chart',     {{ pmc_spec|safe }});
 embed('load-chart',    {{ load_spec|safe }});
 embed('battery-chart', {{ battery_spec|safe }});
 </script>
