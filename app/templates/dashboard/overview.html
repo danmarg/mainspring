@@ -32,17 +32,23 @@
 {% endfor %}
 </div>
 
+<div class="day-tabs">
+  {% for d in [('14','14d'), ('30','30d'), ('90','90d'), ('all','All')] %}
+  <a href="/dashboard?days={{ d[0] }}" class="{% if days == d[0] %}active{% endif %}">{{ d[1] }}</a>
+  {% endfor %}
+</div>
+
 <div class="two-col">
   <div class="chart-block">
-    <h3>HRV — 14 days</h3>
+    <h3>HRV</h3>
     <div class="vega-wrap" id="hrv-spark"></div>
   </div>
   <div class="chart-block">
-    <h3>Sleep score — 14 days</h3>
+    <h3>Sleep score</h3>
     <div class="vega-wrap" id="sleep-spark"></div>
   </div>
   <div class="chart-block">
-    <h3>Resting HR — 14 days</h3>
+    <h3>Resting HR</h3>
     <div class="vega-wrap" id="hr-spark"></div>
   </div>
 </div>
