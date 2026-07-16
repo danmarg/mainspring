@@ -21,16 +21,23 @@
   <div class="vega-wrap" id="caffeine-chart"></div>
 </div>
 
-<div class="chart-block">
-  <h3>HRV deviation from 7-day rolling average <span style="color:#888;font-size:0.72rem">blue = above avg · red = below avg</span></h3>
-  <div class="vega-wrap" id="hrv-delta-chart"></div>
+<div class="two-col">
+  <div class="chart-block">
+    <h3>Sleep score</h3>
+    <div class="vega-wrap" id="sleep-score-chart"></div>
+  </div>
+  <div class="chart-block">
+    <h3>Sleep duration (hours)</h3>
+    <div class="vega-wrap" id="sleep-dur-chart"></div>
+  </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-embed('alcohol-chart',   {{ alcohol_spec|safe }});
-embed('caffeine-chart',  {{ caffeine_spec|safe }});
-embed('hrv-delta-chart', {{ hrv_delta_spec|safe }});
+embed('alcohol-chart',     {{ alcohol_spec|safe }});
+embed('caffeine-chart',    {{ caffeine_spec|safe }});
+embed('sleep-score-chart', {{ sleep_score_spec|safe }});
+embed('sleep-dur-chart',   {{ sleep_dur_spec|safe }});
 </script>
 {% endblock %}

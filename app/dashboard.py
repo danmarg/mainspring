@@ -342,6 +342,37 @@ def _weekly_volume_chart(rows: list[dict]) -> str:
     return chart.to_json()
 
 
+def _daily_bar_chart(rows: list[dict], field: str, title: str,
+                     color: str = "#4e9af1", ref_line: float | None = None) -> str:
+    """Bar chart of a daily value over time, with optional horizontal reference line."""
+    if not rows:
+        return "{}"
+    bars = (
+        alt.Chart(alt.Data(values=rows))
+        .mark_bar(color=color, opacity=0.8)
+        .encode(
+            x=alt.X("date:T", title=None),
+            y=alt.Y(f"{field}:Q", title=title),
+            tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip(f"{field}:Q", title=title, format=".0f")],
+        )
+    )
+    layers: list = [bars]
+    if ref_line is not None:
+        rule = (
+            alt.Chart(alt.Data(values=[{"ref": ref_line}]))
+            .mark_rule(color="#5cb85c", strokeDash=[4, 4], strokeWidth=1.5)
+            .encode(y="ref:Q")
+        )
+        layers.append(rule)
+    return (
+        alt.layer(*layers)
+        .properties(width="container", height=200)
+        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+        .configure_view(strokeWidth=0, fill="#1a1a1a")
+        .to_json()
+    )
+
+
 def _macro_dow_chart(rows: list[dict]) -> str:
     if not rows:
         return "{}"
@@ -527,12 +558,14 @@ async def login_submit(request: Request, token: str = Form(...)):
 
 @router.get("/", response_class=HTMLResponse)
 @router.get("", response_class=HTMLResponse)
-async def overview(request: Request, ms_dash_auth: str | None = Cookie(default=None)):
+async def overview(request: Request, days: str = "14",
+                   ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
 
     today = date.today().isoformat()
     yesterday = (date.today() - timedelta(days=1)).isoformat()
+    clause = _days_clause(days)
 
     with db() as conn:
         today_row = conn.execute(
@@ -556,10 +589,10 @@ async def overview(request: Request, ms_dash_auth: str | None = Cookie(default=N
             (yesterday,),
         ).fetchone()
 
-        # Sparklines: last 14 days
         spark_rows = _rows(conn,
             """SELECT date, hrv, sleep_score, resting_hr FROM daily_metrics
-               WHERE date >= date('now','-14 days') ORDER BY date""")
+               WHERE date >= date('now', ?) ORDER BY date""",
+            (clause,))
 
     def _delta(key: int, avg_key: str):
         if today_row and today_row[key] is not None and avgs.get(avg_key):
@@ -605,6 +638,7 @@ async def overview(request: Request, ms_dash_auth: str | None = Cookie(default=N
 
     return templates.TemplateResponse(request, "overview.html", {
         "today": today,
+        "days": days,
         "cards": cards,
         "hrv_spark": hrv_spark,
         "sleep_spark": sleep_spark,
@@ -728,29 +762,24 @@ async def behavior(request: Request, days: str = "90",
               strftime('%w', date) AS dow,
               COALESCE(alcohol_units, 0) AS alcohol_units,
               COALESCE(caffeine_mg, 0) AS caffeine_mg,
-              hrv,
-              AVG(hrv) OVER (ORDER BY date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS hrv_7d_avg
+              sleep_score,
+              ROUND(sleep_duration_min / 60.0, 2) AS sleep_hours
             FROM daily_metrics
             WHERE date >= date('now', ?)
             ORDER BY date
         """, (clause,))
 
-    # Compute hrv_delta in Python
-    for r in rows:
-        if r.get("hrv") is not None and r.get("hrv_7d_avg") is not None:
-            r["hrv_delta"] = round(r["hrv"] - r["hrv_7d_avg"], 1)
-        else:
-            r["hrv_delta"] = None
-
     alcohol_rows = [r for r in rows if r.get("alcohol_units") is not None]
     caffeine_rows = [r for r in rows if r.get("caffeine_mg") is not None]
-    hrv_delta_rows = [r for r in rows if r.get("hrv_delta") is not None]
+    sleep_score_rows = [r for r in rows if r.get("sleep_score") is not None]
+    sleep_dur_rows = [r for r in rows if r.get("sleep_hours") is not None]
 
     return templates.TemplateResponse(request, "behavior.html", {
         "days": days,
         "alcohol_spec": _calendar_heatmap(alcohol_rows, "alcohol_units", "Alcohol (units)", scheme="reds"),
         "caffeine_spec": _calendar_heatmap(caffeine_rows, "caffeine_mg", "Caffeine (mg)", scheme="purples"),
-        "hrv_delta_spec": _hrv_delta_heatmap(hrv_delta_rows),
+        "sleep_score_spec": _calendar_heatmap(sleep_score_rows, "sleep_score", "Sleep score", scheme="blues", zero_color="#111"),
+        "sleep_dur_spec": _calendar_heatmap(sleep_dur_rows, "sleep_hours", "Sleep (hours)", scheme="greens", zero_color="#111"),
     })
 
 
@@ -830,17 +859,16 @@ async def nutrition(request: Request, days: str = "90",
             **macros,
         }
 
-    # Add calendar fields and protein compliance to cal_rows
+    # Add protein grams to cal_rows for time-series chart
     for r in cal_rows:
         m = macro_by_date.get(r["date"], {})
         protein = m.get("protein_g")
-        if protein is None:
-            r["protein_pct"] = None
-        else:
-            r["protein_pct"] = min(round(protein / protein_target * 100), 150)
+        r["protein_g"] = round(protein, 1) if protein is not None else None
 
-    # Protein compliance heatmap — only days with macro data
-    protein_rows = [r for r in cal_rows if r.get("protein_pct") is not None]
+    # Only days with macro data logged
+    protein_rows = [r for r in cal_rows if r.get("protein_g") is not None]
+    # Only days with calories logged
+    cal_logged_rows = [r for r in cal_rows if r.get("calories")]
 
     # Day-of-week macro breakdown (long form)
     dow_macro_rows = []
@@ -863,8 +891,8 @@ async def nutrition(request: Request, days: str = "90",
     return templates.TemplateResponse(request, "nutrition.html", {
         "days": days,
         "protein_target": protein_target,
-        "calories_spec": _calendar_heatmap(cal_rows, "calories", "Calories", scheme="oranges"),
-        "protein_spec": _calendar_heatmap(protein_rows, "protein_pct", "Protein % of target", scheme="greens"),
+        "calories_spec": _daily_bar_chart(cal_logged_rows, "calories", "Calories (kcal)", color="#f4a261"),
+        "protein_spec": _daily_bar_chart(protein_rows, "protein_g", "Protein (g)", color="#e05c5c", ref_line=protein_target),
         "macro_dow_spec": _macro_dow_chart(dow_macro_rows),
     })
 
