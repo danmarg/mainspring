@@ -11,7 +11,7 @@ Each API call is wrapped so a single endpoint failure doesn't abort the run.
 import json
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from app.db import upsert_raw_metric, upsert_raw_payload, utc_now
@@ -120,6 +120,17 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
         if val is not None:
             upsert_raw_metric(conn, date_str, SOURCE, "sleep_score", float(val), now)
             rows += 1
+        # Wake time: sleepEndTimestampLocal is epoch ms in local time
+        wake_ts_ms = score_obj.get("sleepEndTimestampLocal")
+        if wake_ts_ms is not None:
+            try:
+                from datetime import timezone as _tz
+                wake_dt = datetime.fromtimestamp(int(wake_ts_ms) / 1000, tz=_tz.utc)
+                wake_hour = wake_dt.hour + wake_dt.minute / 60
+                upsert_raw_metric(conn, date_str, SOURCE, "sleep_wake_hour", wake_hour, now)
+                rows += 1
+            except (TypeError, ValueError, OSError):
+                pass
         for api_key, metric in {
             "sleepTimeSeconds": ("sleep_duration_min", 1 / 60),
             "deepSleepSeconds": ("sleep_deep_min", 1 / 60),

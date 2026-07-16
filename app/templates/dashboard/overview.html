@@ -1,63 +1,151 @@
 {% extends "base.html" %}
-{% block title %}Overview{% endblock %}
+{% block title %}Today{% endblock %}
 {% set active_page = 'overview' %}
 
 {% block content %}
-<h1>Overview — {{ today }}</h1>
+<h1>Today <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">{{ today }}</span></h1>
 
-{% if yesterday_behavior %}
-<div class="behavior-summary">
-  Yesterday:
-  {% if yesterday_behavior.alcohol_units is not none %}
-    <span>{{ "%.1f"|format(yesterday_behavior.alcohol_units) }}</span> units alcohol &nbsp;·&nbsp;
+{# ── Readiness score ──────────────────────────────────────────────────────── #}
+<div class="readiness-block">
+  <div class="readiness-header">
+    <div class="readiness-score-wrap">
+      <span class="readiness-number" style="color:{{ readiness.color }}">
+        {{ readiness.score if readiness.score is not none else '—' }}
+      </span>
+      <span class="readiness-label" style="background:{{ readiness.color }}20;color:{{ readiness.color }}">
+        {{ readiness.label }}
+      </span>
+    </div>
+    <div class="readiness-subtitle">Readiness
+      <span style="color:var(--text-muted);font-size:0.72rem"> — HRV · sleep · resting HR
+        {%- if readiness.components | selectattr('name', 'equalto', 'Form (TSB)') | list %} · form{% endif %}
+      </span>
+    </div>
+  </div>
+
+  {% if readiness.components %}
+  <div class="readiness-drivers">
+    {% for c in readiness.components %}
+    <div class="driver-row">
+      <div class="driver-name">{{ c.name }}</div>
+      <div class="driver-bar-wrap">
+        <div class="driver-bar" style="width:{{ c.score | round | int }}%;
+          background:{% if c.score >= 70 %}#2ecc71{% elif c.score >= 45 %}#f39c12{% else %}#e74c3c{% endif %}">
+        </div>
+      </div>
+      <div class="driver-detail">{{ c.detail }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p style="color:var(--text-muted);font-size:0.85rem;margin:0.5rem 0">
+    No data yet for today — import will update this after your morning sync.
+  </p>
   {% endif %}
-  {% if yesterday_behavior.caffeine_mg is not none %}
-    <span>{{ "%.0f"|format(yesterday_behavior.caffeine_mg) }}</span> mg caffeine &nbsp;·&nbsp;
+</div>
+
+{# ── Info strip ───────────────────────────────────────────────────────────── #}
+{% if today_info %}
+<div class="info-strip">
+  {% if today_info.hrv is not none %}
+  <span class="info-chip"><span class="chip-label">HRV</span> {{ today_info.hrv | round | int }}ms</span>
   {% endif %}
-  {% if yesterday_behavior.calories_estimated is not none %}
-    <span>{{ "%.0f"|format(yesterday_behavior.calories_estimated) }}</span> kcal
+  {% if today_info.sleep_score is not none %}
+  <span class="info-chip"><span class="chip-label">Sleep</span> {{ today_info.sleep_score | round | int }}</span>
+  {% endif %}
+  {% if today_info.sleep_h is not none %}
+  <span class="info-chip"><span class="chip-label">Sleep time</span> {{ today_info.sleep_h }}h</span>
+  {% endif %}
+  {% if today_info.rhr is not none %}
+  <span class="info-chip"><span class="chip-label">RHR</span> {{ today_info.rhr | round | int }}bpm</span>
+  {% endif %}
+  {% if today_info.body_battery is not none %}
+  <span class="info-chip"><span class="chip-label">Battery</span> {{ today_info.body_battery | round | int }}</span>
+  {% endif %}
+  {% if today_info.stress is not none %}
+  <span class="info-chip"><span class="chip-label">Stress</span> {{ today_info.stress | round | int }}</span>
+  {% endif %}
+  {% if today_info.weight_kg is not none %}
+  <span class="info-chip"><span class="chip-label">Weight</span> {{ "%.1f"|format(today_info.weight_kg) }}kg</span>
   {% endif %}
 </div>
 {% endif %}
 
-<div class="card-grid">
-{% for card in cards %}
-<div class="card">
-  <div class="label">{{ card.label }}</div>
-  <div class="value">{{ card.value }}<span class="unit">{{ card.unit }}</span></div>
-  {% if card.delta %}
-  <div class="delta {% if card.delta.pos %}pos{% else %}neg{% endif %}">{{ card.delta.text }} vs 7d avg</div>
+{# ── Today's nutrition ────────────────────────────────────────────────────── #}
+<div class="chart-block">
+  <h3>Today's nutrition
+    {% if today_meal_count > 0 %}
+    <span style="color:var(--text-muted);font-size:0.72rem"> — {{ today_meal_count }} meal{{ 's' if today_meal_count != 1 }} logged</span>
+    {% endif %}
+  </h3>
+  {% if today_meal_count == 0 %}
+  <p style="color:var(--text-muted);font-size:0.85rem;margin:0.25rem 0 0">No meals logged today.</p>
+  {% else %}
+  <div class="nutrition-bars">
+    {% if today_calories is not none %}
+    <div class="nbar-row">
+      <span class="nbar-label">Calories</span>
+      <div class="nbar-track">
+        <div class="nbar-fill calories-fill" style="width:{{ [[today_calories / (calorie_target or today_calories) * 100, 100] | min, 0] | max | round | int }}%"></div>
+      </div>
+      <span class="nbar-val">
+        {{ today_calories | round | int }} kcal
+        {% if calorie_target %}<span style="color:var(--text-muted)"> / {{ calorie_target | round | int }}</span>{% endif %}
+      </span>
+    </div>
+    {% endif %}
+    {% if today_protein is not none %}
+    <div class="nbar-row">
+      <span class="nbar-label">Protein</span>
+      <div class="nbar-track">
+        <div class="nbar-fill protein-fill" style="width:{{ [[today_protein / protein_target * 100, 100] | min, 0] | max | round | int }}%"></div>
+      </div>
+      <span class="nbar-val">
+        {{ today_protein | round | int }}g
+        <span style="color:var(--text-muted)"> / {{ protein_target | round | int }}g</span>
+      </span>
+    </div>
+    {% endif %}
+    {% if today_carbs is not none %}
+    <div class="nbar-row">
+      <span class="nbar-label">Carbs</span>
+      <div class="nbar-track">
+        <div class="nbar-fill carbs-fill" style="width:100%"></div>
+      </div>
+      <span class="nbar-val">{{ today_carbs | round | int }}g</span>
+    </div>
+    {% endif %}
+    {% if today_fat is not none %}
+    <div class="nbar-row">
+      <span class="nbar-label">Fat</span>
+      <div class="nbar-track">
+        <div class="nbar-fill fat-fill" style="width:100%"></div>
+      </div>
+      <span class="nbar-val">{{ today_fat | round | int }}g</span>
+    </div>
+    {% endif %}
+  </div>
   {% endif %}
 </div>
-{% endfor %}
-</div>
 
-<div class="day-tabs">
-  {% for d in [('14','14d'), ('30','30d'), ('90','90d'), ('all','All')] %}
-  <a href="/dashboard?days={{ d[0] }}" class="{% if days == d[0] %}active{% endif %}">{{ d[1] }}</a>
-  {% endfor %}
+{# ── Energy forecast ──────────────────────────────────────────────────────── #}
+{% if energy_spec != '{}' %}
+<div class="chart-block">
+  <h3>Alertness forecast
+    <span style="color:var(--text-muted);font-size:0.72rem"> — two-process model (Borbély 1982)
+    · <span style="color:#f4a261">┊ now</span>
+    · <span style="color:#2ecc71">▲ peak</span>
+    </span>
+  </h3>
+  <div class="vega-wrap" id="energy-chart"></div>
 </div>
+{% endif %}
 
-<div class="two-col">
-  <div class="chart-block">
-    <h3>HRV</h3>
-    <div class="vega-wrap" id="hrv-spark"></div>
-  </div>
-  <div class="chart-block">
-    <h3>Sleep score</h3>
-    <div class="vega-wrap" id="sleep-spark"></div>
-  </div>
-  <div class="chart-block">
-    <h3>Resting HR</h3>
-    <div class="vega-wrap" id="hr-spark"></div>
-  </div>
-</div>
+
 {% endblock %}
 
 {% block scripts %}
-<script>
-embed('hrv-spark',   {{ hrv_spark|safe }});
-embed('sleep-spark', {{ sleep_spark|safe }});
-embed('hr-spark',    {{ hr_spark|safe }});
-</script>
+{% if energy_spec != '{}' %}
+<script>embed('energy-chart', {{ energy_spec|safe }});</script>
+{% endif %}
 {% endblock %}
