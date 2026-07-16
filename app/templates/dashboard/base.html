@@ -180,6 +180,32 @@ function msChangeDays(val) {
   window.location.href = u.toString();
 }
 
+// Swipe left/right to navigate between dashboard tabs
+(function() {
+  var TABS = ['/dashboard', '/dashboard/trends', '/dashboard/behavior',
+              '/dashboard/nutrition', '/dashboard/activities', '/dashboard/vitals'];
+  var THRESHOLD = 50;
+  var sx, sy;
+  document.addEventListener('touchstart', function(e) {
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+  }, {passive: true});
+  document.addEventListener('touchend', function(e) {
+    if (sx == null) return;
+    var dx = e.changedTouches[0].clientX - sx;
+    var dy = e.changedTouches[0].clientY - sy;
+    sx = null;
+    if (Math.abs(dx) < THRESHOLD || Math.abs(dx) < Math.abs(dy)) return;
+    var path = window.location.pathname;
+    var idx = TABS.findIndex(function(t) { return path === t || path.startsWith(t + '/'); });
+    if (idx === -1) return;
+    var next = dx < 0 ? TABS[idx + 1] : TABS[idx - 1];
+    if (!next) return;
+    var days = new URLSearchParams(window.location.search).get('days');
+    window.location.href = next + (days ? '?days=' + days : '');
+  }, {passive: true});
+})();
+
 function embed(id, spec) {
   if (!spec || !spec['$schema']) return;
   vegaEmbed('#' + id, spec, {

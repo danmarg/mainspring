@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from typing import Callable
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.db import init_db
 from app.admin_routes import router as admin_router
@@ -65,6 +65,11 @@ if _ds_app is not None:
     log.info("Datasette mounted at /datasette")
 else:
     log.warning("DATASETTE_TOKEN not set — /datasette not mounted")
+
+
+@app.get("/")
+async def root():
+    return RedirectResponse("/dashboard")
 
 
 @app.get("/healthz")
