@@ -88,6 +88,22 @@ CREATE TABLE IF NOT EXISTS suggested_workouts (
   PRIMARY KEY (date, source)
 );
 
+-- intraday HR: 2-min native Garmin intervals averaged to 1-min buckets (~720 rows/day)
+CREATE TABLE IF NOT EXISTS intraday_hr (
+  ts     TEXT NOT NULL,   -- UTC ISO-8601 second precision, e.g. 2026-07-12T04:00:00Z
+  source TEXT NOT NULL,
+  bpm    REAL NOT NULL,
+  PRIMARY KEY (ts, source)
+);
+
+-- intraday stress: 3-min native Garmin intervals; -1/-2 (unmeasured/activity) excluded
+CREATE TABLE IF NOT EXISTS intraday_stress (
+  ts     TEXT NOT NULL,   -- UTC ISO-8601 second precision
+  source TEXT NOT NULL,
+  stress REAL NOT NULL,
+  PRIMARY KEY (ts, source)
+);
+
 -- manual logs written by Claude via MCP tools
 CREATE TABLE IF NOT EXISTS manual_logs (
   id                    INTEGER PRIMARY KEY AUTOINCREMENT,

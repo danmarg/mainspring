@@ -11,7 +11,7 @@ Each API call is wrapped so a single endpoint failure doesn't abort the run.
 import json
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from app.db import upsert_raw_metric, upsert_raw_payload, utc_now
@@ -147,6 +147,59 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
     return rows
 
 
+def _ts_from_epoch_ms(ms: int) -> str:
+    """Convert Garmin epoch-ms (true UTC) to ISO-8601 second-precision UTC string."""
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_intraday_hr(conn, data: dict) -> int:
+    """Aggregate 2-min Garmin HR samples into 1-min buckets and upsert to intraday_hr."""
+    values = data.get("heartRateValues") or []
+    if not values:
+        return 0
+
+    buckets: dict[int, list[float]] = {}
+    for entry in values:
+        ts_ms, bpm = entry
+        if bpm is None or bpm <= 0:
+            continue
+        minute_ms = (ts_ms // 60000) * 60000
+        buckets.setdefault(minute_ms, []).append(float(bpm))
+
+    rows = 0
+    for minute_ms, bpms in buckets.items():
+        conn.execute(
+            """
+            INSERT INTO intraday_hr(ts, source, bpm)
+            VALUES (?, ?, ?)
+            ON CONFLICT(ts, source) DO UPDATE SET bpm = excluded.bpm
+            """,
+            (_ts_from_epoch_ms(minute_ms), SOURCE, round(sum(bpms) / len(bpms), 1)),
+        )
+        rows += 1
+    return rows
+
+
+def _parse_intraday_stress_ts(conn, data: dict) -> int:
+    """Write stressValuesArray to intraday_stress, filtering out unmeasured/activity markers."""
+    values = data.get("stressValuesArray") or []
+    rows = 0
+    for entry in values:
+        ts_ms, stress = entry
+        if stress < 0:  # -1 = unmeasured, -2 = during activity
+            continue
+        conn.execute(
+            """
+            INSERT INTO intraday_stress(ts, source, stress)
+            VALUES (?, ?, ?)
+            ON CONFLICT(ts, source) DO UPDATE SET stress = excluded.stress
+            """,
+            (_ts_from_epoch_ms(ts_ms), SOURCE, float(stress)),
+        )
+        rows += 1
+    return rows
+
+
 def _parse_stress(conn, date_str: str, data: dict) -> int:
     now = utc_now()
     rows = 0
@@ -158,6 +211,7 @@ def _parse_stress(conn, date_str: str, data: dict) -> int:
     if mx is not None and mx >= 0:
         upsert_raw_metric(conn, date_str, SOURCE, "stress_max", float(mx), now)
         rows += 1
+    rows += _parse_intraday_stress_ts(conn, data)
     return rows
 
 
@@ -415,6 +469,11 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
     rows_upserted = 0
     log.info("garmin import: %s → %s (%d days)", start_str, end_str, len(dates))
 
+    # For intraday HR: limit to last 2 days on default rolling runs (not subject to
+    # late corrections like HRV/sleep, so full 7-day re-fetch is unnecessary load).
+    # Explicit date range imports still fetch the full requested window.
+    hr_dates = set(dates) if (start_date or end_date) else set(dates[-2:])
+
     # ── per-day endpoints ───────────────────────────────────────────────────
     for d in dates:
         ds = d.isoformat()
@@ -437,11 +496,18 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
             _store_raw(conn, "get_sleep_data", data, ds)
             rows_upserted += _parse_sleep(conn, ds, data)
 
-        # stress
+        # stress (daily aggregates + intraday timeseries)
         data = _safe(lambda: client.get_stress_data(ds), f"get_stress_data({ds})")
         if data:
             _store_raw(conn, "get_stress_data", data, ds)
             rows_upserted += _parse_stress(conn, ds, data)
+
+        # intraday HR (limited to last 2 days on default runs — not late-corrected)
+        if d in hr_dates:
+            data = _safe(lambda: client.get_heart_rates(ds), f"get_heart_rates({ds})")
+            if data:
+                _store_raw(conn, "get_heart_rates", data, ds)
+                rows_upserted += _parse_intraday_hr(conn, data)
 
         # training readiness
         data = _safe(lambda: client.get_training_readiness(ds), f"get_training_readiness({ds})")
