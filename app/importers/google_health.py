@@ -239,11 +239,14 @@ def _list_datapoints(conn, data_type: str, d: date, tokens: dict) -> Any | None:
     return _get(conn, path, {"filter": f}, tokens)
 
 
-def _list_hrv_samples(conn, target_dates: set, tokens: dict) -> list[dict]:
+def _list_hrv_samples(conn, target_dates: set, tokens: dict, max_pages: int = 20) -> list[dict]:
     """
     Fetch heart-rate-variability dataPoints. This type does not support AIP-160 filters,
     so we page through newest-first until all remaining points predate our target window,
     then filter in Python.
+
+    max_pages=20 covers ~10-20 recent nights (sufficient for nightly runs).
+    Pass a higher value when backfilling: each month of history needs ~50-100 pages.
     """
     path = "/users/me/dataTypes/heart-rate-variability/dataPoints"
     # Oldest date we care about — stop paginating once we pass it
@@ -253,7 +256,7 @@ def _list_hrv_samples(conn, target_dates: set, tokens: dict) -> list[dict]:
     all_points: list[dict] = []
     page_token: str | None = None
 
-    for _ in range(20):  # safety cap: 20 pages × 50 = 1000 points max per call
+    for _ in range(max_pages):
         params: dict = {}
         if page_token:
             params["pageToken"] = page_token
@@ -613,9 +616,13 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
                 rows_upserted += _parse_intraday_hr(conn, hr_data)
 
     # Intraday HRV (RMSSD): heart-rate-variability doesn't support date filters, so we
-    # fetch with pagination and filter in Python. One call covers all hr_dates.
+    # page newest-first and filter in Python. One call covers all hr_dates.
+    # For backfills (explicit date range), use a higher page cap: each month of history
+    # needs ~50-100 pages (50 points/page, ~50-96 readings/night).
     if hr_dates:
-        hrv_points = _list_hrv_samples(conn, hr_dates, tokens)
+        is_backfill = bool(start_date or end_date)
+        hrv_max_pages = 500 if is_backfill else 20
+        hrv_points = _list_hrv_samples(conn, hr_dates, tokens, max_pages=hrv_max_pages)
         if hrv_points:
             upsert_raw_payload(conn, SOURCE, "hrv_intraday", json.dumps(hrv_points))
             rows_upserted += _parse_intraday_hrv(conn, hrv_points, hr_dates)
