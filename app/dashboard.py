@@ -304,6 +304,73 @@ def _hrv_delta_heatmap(rows: list[dict]) -> str:
     return chart.to_json()
 
 
+def _pmc_chart(rows: list[dict]) -> str:
+    """Performance Management Chart: CTL (fitness), ATL (fatigue), TSB (form) bars."""
+    if not rows:
+        return "{}"
+    # Compute TSB = CTL - ATL in Python
+    for r in rows:
+        if r.get("ctl") is not None and r.get("atl") is not None:
+            r["tsb"] = round(r["ctl"] - r["atl"], 1)
+        else:
+            r["tsb"] = None
+    tsb_rows = [r for r in rows if r.get("tsb") is not None]
+    ctl_rows = [r for r in rows if r.get("ctl") is not None]
+    atl_rows = [r for r in rows if r.get("atl") is not None]
+    if not ctl_rows and not atl_rows:
+        return "{}"
+
+    layers = []
+
+    # TSB bars (green = fresh/positive, red = tired/negative)
+    if tsb_rows:
+        tsb_bars = (
+            alt.Chart(alt.Data(values=tsb_rows))
+            .mark_bar(opacity=0.4)
+            .encode(
+                x=alt.X("date:T", title=None),
+                y=alt.Y("tsb:Q", title="Load / TSB", scale=alt.Scale(zero=True)),
+                color=alt.condition(
+                    alt.datum.tsb >= 0,
+                    alt.value("#5cb85c"),
+                    alt.value("#e05c5c"),
+                ),
+                tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("tsb:Q", title="TSB (form)")],
+            )
+        )
+        layers.append(tsb_bars)
+
+    if ctl_rows:
+        layers.append(
+            alt.Chart(alt.Data(values=ctl_rows))
+            .mark_line(color="#4e9af1", strokeWidth=2)
+            .encode(
+                x="date:T",
+                y=alt.Y("ctl:Q", scale=alt.Scale(zero=True)),
+                tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("ctl:Q", title="CTL (fitness)")],
+            )
+        )
+    if atl_rows:
+        layers.append(
+            alt.Chart(alt.Data(values=atl_rows))
+            .mark_line(color="#f4a261", strokeWidth=2)
+            .encode(
+                x="date:T",
+                y=alt.Y("atl:Q", scale=alt.Scale(zero=True)),
+                tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("atl:Q", title="ATL (fatigue)")],
+            )
+        )
+
+    return (
+        alt.layer(*layers)
+        .resolve_scale(y="shared")
+        .properties(width="container", height=220)
+        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+        .configure_view(strokeWidth=0, fill="#1a1a1a")
+        .to_json()
+    )
+
+
 def _activity_bar(rows: list[dict], field: str, y_title: str) -> str:
     if not rows:
         return "{}"
@@ -684,18 +751,20 @@ async def trends(request: Request, days: str = "90",
                 if r.get(col) is not None:
                     stage_rows.append({"date": r["date"], "stage": stage, "minutes": r[col]})
 
-        # Zone load from raw_daily_metrics (pivot from EAV)
-        zone_raw = _rows(conn, """
+        # Zone load + ATL/CTL from raw_daily_metrics (pivot from EAV)
+        load_raw = _rows(conn, """
             SELECT date, metric, value FROM raw_daily_metrics
-            WHERE metric IN ('monthly_load_aerobic_low','monthly_load_aerobic_high','monthly_load_anaerobic')
+            WHERE metric IN ('monthly_load_aerobic_low','monthly_load_aerobic_high',
+                             'monthly_load_anaerobic','atl','ctl')
               AND date >= date('now', ?)
             ORDER BY date
         """, (clause,))
-        # Pivot to wide
-        zone_by_date: dict[str, dict] = {}
-        for r in zone_raw:
-            zone_by_date.setdefault(r["date"], {"date": r["date"]})[r["metric"]] = r["value"]
-        load_rows = sorted(zone_by_date.values(), key=lambda x: x["date"])
+        load_by_date: dict[str, dict] = {}
+        for r in load_raw:
+            load_by_date.setdefault(r["date"], {"date": r["date"]})[r["metric"]] = r["value"]
+        all_load_rows = sorted(load_by_date.values(), key=lambda x: x["date"])
+        load_rows = all_load_rows  # zone load chart uses aerobic_low/high/anaerobic
+        pmc_rows = all_load_rows   # PMC chart uses atl/ctl
 
         battery_rows = _rows(conn, """
             SELECT date, body_battery_high, body_battery_low FROM daily_metrics
@@ -740,6 +809,7 @@ async def trends(request: Request, days: str = "90",
         "hrv_spec": _trend_chart(hrv_rows, "hrv", "hrv_7d_avg", "HRV (ms)"),
         "sleep_spec": _sleep_chart(score_rows, stage_rows),
         "load_spec": _zone_load_chart(load_rows),
+        "pmc_spec": _pmc_chart(pmc_rows),
         "battery_spec": _body_battery_chart(battery_rows),
         "hr_spec": _hr_chart(hr_rows),
     })

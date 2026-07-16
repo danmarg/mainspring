@@ -223,6 +223,25 @@ def _parse_training_status(conn, date_str: str, data: dict) -> int:
             if val is not None:
                 upsert_raw_metric(conn, date_str, SOURCE, metric, float(val), now)
                 rows += 1
+
+    # ATL/CTL from mostRecentTrainingStatus → latestTrainingStatusData[device].acuteTrainingLoadDTO
+    mts = data.get("mostRecentTrainingStatus") or {}
+    ts_dmap = mts.get("latestTrainingStatusData") or {}
+    ts_entry: dict | None = None
+    for v in ts_dmap.values():
+        if isinstance(v, dict) and (v.get("primaryTrainingDevice") or ts_entry is None):
+            ts_entry = v
+    if ts_entry:
+        atl_dto = ts_entry.get("acuteTrainingLoadDTO") or {}
+        atl = atl_dto.get("dailyTrainingLoadAcute")
+        ctl = atl_dto.get("dailyTrainingLoadChronic")
+        if atl is not None:
+            upsert_raw_metric(conn, date_str, SOURCE, "atl", float(atl), now)
+            rows += 1
+        if ctl is not None:
+            upsert_raw_metric(conn, date_str, SOURCE, "ctl", float(ctl), now)
+            rows += 1
+
     return rows
 
 

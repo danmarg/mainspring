@@ -121,9 +121,20 @@ def test_parse_training_status_vo2max(tmp_db):
                 }
             }
         },
+        "mostRecentTrainingStatus": {
+            "latestTrainingStatusData": {
+                "123": {
+                    "primaryTrainingDevice": True,
+                    "acuteTrainingLoadDTO": {
+                        "dailyTrainingLoadAcute": 450,
+                        "dailyTrainingLoadChronic": 520,
+                    },
+                }
+            }
+        },
     }
     rows = _parse_training_status(tmp_db, "2025-01-01", data)
-    assert rows >= 4
+    assert rows >= 6
     vo2 = tmp_db.execute(
         "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='vo2max'"
     ).fetchone()
@@ -132,6 +143,14 @@ def test_parse_training_status_vo2max(tmp_db):
         "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='monthly_load_aerobic_low'"
     ).fetchone()
     assert load[0] == 800.0
+    atl = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='atl'"
+    ).fetchone()
+    assert atl[0] == 450.0
+    ctl = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='ctl'"
+    ).fetchone()
+    assert ctl[0] == 520.0
 
 
 def test_upsert_activity(tmp_db):
