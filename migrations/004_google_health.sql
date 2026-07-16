@@ -1,2 +1,0 @@
--- Google Health API tables moved to baseline schema.sql.
--- This file is intentionally empty; the migration runner applies it idempotently.

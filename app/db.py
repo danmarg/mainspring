@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo
 
 DB_PATH = Path("/data/health.db")
 SCHEMA_PATH = Path(__file__).parent.parent / "schema.sql"
-MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 
 HOME_TZ = os.getenv("HOME_TZ", "Europe/Berlin")
 
@@ -50,35 +49,11 @@ def _drop_legacy_columns(conn: sqlite3.Connection) -> None:
 
 
 def init_db(path: Path | None = None) -> None:
-    """Apply schema.sql then any pending migrations, idempotently."""
+    """Apply schema.sql idempotently, then clean up any legacy columns."""
     with get_connection(path or DB_PATH) as conn:
         conn.executescript(SCHEMA_PATH.read_text())
         conn.commit()
-        _apply_migrations(conn)
         _drop_legacy_columns(conn)
-
-
-def _apply_migrations(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS _schema_migrations "
-        "(filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
-    )
-    conn.commit()
-
-    applied = {
-        row[0]
-        for row in conn.execute("SELECT filename FROM _schema_migrations").fetchall()
-    }
-
-    for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
-        if sql_file.name in applied:
-            continue
-        conn.executescript(sql_file.read_text())
-        conn.execute(
-            "INSERT INTO _schema_migrations(filename, applied_at) VALUES (?, ?)",
-            (sql_file.name, utc_now()),
-        )
-        conn.commit()
 
 
 def utc_now() -> str:

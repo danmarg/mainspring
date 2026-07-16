@@ -1,24 +1,23 @@
--- v1 baseline schema — run once on fresh DB
--- All subsequent changes go in migrations/NNN_xxx.sql
+-- Baseline schema — applied on every startup via executescript (all statements are idempotent).
 
 PRAGMA journal_mode=WAL;
 
 -- append-only landing zone: the untouched upstream response for every fetch.
 -- Never updated, only inserted. All parsing is replayable from here.
 CREATE TABLE IF NOT EXISTS raw_import_payloads (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  source      TEXT NOT NULL,        -- 'garmin' | 'google_health' | ...
-  endpoint    TEXT NOT NULL,        -- which API call produced this payload
-  date        TEXT,                 -- health date this payload covers, if applicable
-  payload_json TEXT NOT NULL,       -- verbatim upstream response
-  fetched_at  TEXT NOT NULL         -- UTC ISO-8601
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  source       TEXT NOT NULL,        -- 'garmin' | 'google_health' | ...
+  endpoint     TEXT NOT NULL,        -- which API call produced this payload
+  date         TEXT,                 -- health date this payload covers, if applicable
+  payload_json TEXT NOT NULL,        -- verbatim upstream response
+  fetched_at   TEXT NOT NULL         -- UTC ISO-8601
 );
 
 -- source-agnostic scalar biometrics: every daily metric from every source
 CREATE TABLE IF NOT EXISTS raw_daily_metrics (
   date       TEXT NOT NULL,
-  source     TEXT NOT NULL,         -- 'garmin' | 'google_health' | ...
-  metric     TEXT NOT NULL,         -- 'resting_hr' | 'hrv' | 'sleep_score' | ...
+  source     TEXT NOT NULL,          -- 'garmin' | 'google_health' | ...
+  metric     TEXT NOT NULL,          -- 'resting_hr' | 'hrv' | 'sleep_score' | ...
   value      REAL,
   fetched_at TEXT NOT NULL,
   PRIMARY KEY (date, source, metric)
@@ -32,19 +31,19 @@ CREATE TABLE IF NOT EXISTS source_config (
 
 -- per-source activity tables (structured, not EAV — too many fields)
 CREATE TABLE IF NOT EXISTS garmin_activities (
-  activity_id                 TEXT PRIMARY KEY,
-  date                        TEXT,
-  start_time                  TEXT,
-  type                        TEXT,
-  duration_s                  INTEGER,
-  distance_m                  REAL,
-  avg_hr                      INTEGER,
-  max_hr                      INTEGER,
-  training_effect_aerobic     REAL,
-  training_effect_anaerobic   REAL,
-  calories                    INTEGER,
-  raw_json                    TEXT,
-  fetched_at                  TEXT
+  activity_id               TEXT PRIMARY KEY,
+  date                      TEXT,
+  start_time                TEXT,
+  type                      TEXT,
+  duration_s                INTEGER,
+  distance_m                REAL,
+  avg_hr                    INTEGER,
+  max_hr                    INTEGER,
+  training_effect_aerobic   REAL,
+  training_effect_anaerobic REAL,
+  calories                  INTEGER,
+  raw_json                  TEXT,
+  fetched_at                TEXT
 );
 
 CREATE TABLE IF NOT EXISTS google_health_activities (
@@ -62,30 +61,30 @@ CREATE TABLE IF NOT EXISTS google_health_activities (
 
 -- normalized, deduped activities for analysis/Datasette
 CREATE TABLE IF NOT EXISTS activities (
-  id                         INTEGER PRIMARY KEY AUTOINCREMENT,
-  date                       TEXT,
-  start_time                 TEXT,
-  type                       TEXT,
-  duration_s                 INTEGER,
-  distance_m                 REAL,
-  avg_hr                     INTEGER,
-  max_hr                     INTEGER,
-  calories                   INTEGER,
-  canonical_source           TEXT,
-  garmin_activity_id         TEXT,
-  google_health_activity_id  TEXT
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+  date                      TEXT,
+  start_time                TEXT,
+  type                      TEXT,
+  duration_s                INTEGER,
+  distance_m                REAL,
+  avg_hr                    INTEGER,
+  max_hr                    INTEGER,
+  calories                  INTEGER,
+  canonical_source          TEXT,
+  garmin_activity_id        TEXT,
+  google_health_activity_id TEXT
 );
 
 -- Garmin daily workout recommendation
 CREATE TABLE IF NOT EXISTS suggested_workouts (
-  date                 TEXT NOT NULL,
-  source               TEXT NOT NULL,
-  workout_type         TEXT,
-  description          TEXT,
-  target_duration_min  REAL,
-  target_intensity     TEXT,
-  raw_json             TEXT,
-  fetched_at           TEXT NOT NULL,
+  date                TEXT NOT NULL,
+  source              TEXT NOT NULL,
+  workout_type        TEXT,
+  description         TEXT,
+  target_duration_min REAL,
+  target_intensity    TEXT,
+  raw_json            TEXT,
+  fetched_at          TEXT NOT NULL,
   PRIMARY KEY (date, source)
 );
 
@@ -112,27 +111,35 @@ CREATE TABLE IF NOT EXISTS day_timezone (
 
 -- normalized wide view rebuilt by normalization job after each import
 CREATE TABLE IF NOT EXISTS daily_metrics (
-  date                TEXT PRIMARY KEY,
-  resting_hr          REAL,
-  hrv                 REAL,
-  sleep_score         REAL,
-  sleep_duration_min  REAL,
-  sleep_deep_min      REAL,
-  sleep_rem_min       REAL,
-  sleep_light_min     REAL,
-  body_battery_high   REAL,
-  body_battery_low    REAL,
-  stress_avg          REAL,
-  training_readiness  REAL,
-  vo2max              REAL,
-  steps               REAL,
-  active_zone_minutes REAL,
-  spo2_avg            REAL,
-  breathing_rate      REAL,
-  caffeine_mg         REAL,
-  alcohol_units       REAL,
-  calories_estimated  REAL,
-  source_flags_json   TEXT   -- {"metric": "source_used", ...}
+  date                 TEXT PRIMARY KEY,
+  resting_hr           REAL,
+  hrv                  REAL,
+  sleep_score          REAL,
+  sleep_duration_min   REAL,
+  sleep_deep_min       REAL,
+  sleep_rem_min        REAL,
+  sleep_light_min      REAL,
+  body_battery_high    REAL,
+  body_battery_low     REAL,
+  stress_avg           REAL,
+  training_readiness   REAL,
+  vo2max               REAL,
+  steps                REAL,
+  active_zone_minutes  REAL,
+  spo2_avg             REAL,
+  breathing_rate       REAL,
+  caffeine_mg          REAL,
+  alcohol_units        REAL,
+  calories_estimated   REAL,
+  source_flags_json    TEXT,   -- {"metric": "source_used", ...}
+  weight_kg            REAL,
+  acute_training_load  REAL,
+  chronic_training_load REAL,
+  training_load_ratio  REAL,
+  bp_systolic          REAL,
+  bp_diastolic         REAL,
+  bp_pulse             REAL,
+  rpe                  REAL
 );
 
 -- Google Health API OAuth token storage (single row, id=1 enforced by CHECK)
@@ -153,4 +160,58 @@ CREATE TABLE IF NOT EXISTS import_runs (
   status        TEXT,
   rows_upserted INTEGER,
   error         TEXT
+);
+
+-- MCP OAuth 2.1 tables (single-user)
+CREATE TABLE IF NOT EXISTS mcp_oauth_clients (
+  client_id   TEXT PRIMARY KEY,
+  client_json TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_pending_auth (
+  session_id  TEXT PRIMARY KEY,
+  client_id   TEXT NOT NULL,
+  params_json TEXT NOT NULL,
+  expires_at  REAL NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_auth_codes (
+  code       TEXT PRIMARY KEY,
+  code_json  TEXT NOT NULL,
+  expires_at REAL NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_access_tokens (
+  token      TEXT PRIMARY KEY,
+  token_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_refresh_tokens (
+  token      TEXT PRIMARY KEY,
+  token_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- steady-state weekly training targets
+CREATE TABLE IF NOT EXISTS training_goals (
+  metric     TEXT PRIMARY KEY,
+  value      REAL NOT NULL,
+  unit       TEXT,
+  updated_at TEXT NOT NULL
+);
+
+-- goal races / training events
+CREATE TABLE IF NOT EXISTS training_events (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  date             TEXT NOT NULL,
+  type             TEXT NOT NULL,
+  description      TEXT NOT NULL,
+  goal_description TEXT,
+  status           TEXT NOT NULL DEFAULT 'upcoming',
+  result           TEXT,
+  created_at       TEXT NOT NULL
 );
