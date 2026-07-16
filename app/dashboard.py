@@ -444,8 +444,22 @@ def _pmc_chart(rows: list[dict]) -> str:
     )
 
 
+def _activity_end_local_hour(start_time: str, duration_s: int, browser_tz: str | None) -> float | None:
+    """Return local clock hour when the activity ended; handles TZ-aware and naive start_times."""
+    try:
+        dt = datetime.fromisoformat(start_time)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(_get_tz(browser_tz))
+        # TZ-naive (Garmin startTimeLocal) → already local time
+        end_dt = dt + timedelta(seconds=duration_s)
+        return end_dt.hour + end_dt.minute / 60 + end_dt.second / 3600
+    except Exception:
+        return None
+
+
 def _energy_chart(wake_hour: float | None, sleep_score: float | None,
-                  caffeine_doses: list[tuple[float, float]] | None = None) -> str:
+                  caffeine_doses: list[tuple[float, float]] | None = None,
+                  activity_boosts: list[tuple[float, float]] | None = None) -> str:
     """
     Energy forecast chart using two-process alertness model (Borbély 1982).
     Anchored to today's wake time from Garmin sleep data.
@@ -455,7 +469,8 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
         return "{}"
 
     FORECAST_HOURS = 18  # slightly past midnight for late sleepers
-    curve = alertness_curve(wake_hour, sleep_score or 75.0, FORECAST_HOURS, caffeine_doses=caffeine_doses)
+    curve = alertness_curve(wake_hour, sleep_score or 75.0, FORECAST_HOURS,
+                            caffeine_doses=caffeine_doses, activity_boosts=activity_boosts)
 
     # Use hours-since-wake on X axis to avoid midnight-wrapping issues
     curve_hw = [
@@ -848,6 +863,22 @@ async def overview(request: Request,
                ORDER BY ts""",
             (today,))
 
+        # Today's activities for exercise adjustment to the energy curve.
+        # Queries the normalized activities table (source-agnostic).
+        activity_rows = _rows(conn,
+            """SELECT start_time, duration_s, avg_hr FROM activities
+               WHERE date=? AND duration_s >= 600 AND start_time IS NOT NULL""",
+            (today,))
+
+        # Today's RPE log — if the user logged it, prefer it over avg_hr as intensity proxy
+        rpe_row = conn.execute(
+            """SELECT quantity FROM manual_logs
+               WHERE type='rpe' AND DATE(ts)=? AND quantity IS NOT NULL
+               ORDER BY ts DESC LIMIT 1""",
+            (today,),
+        ).fetchone()
+        today_rpe = float(rpe_row[0]) if rpe_row else None
+
         # Today's nutrition totals
         today_nutrition_row = conn.execute(
             """SELECT SUM(estimated_calories),
@@ -883,6 +914,24 @@ async def overview(request: Request,
             except (TypeError, ValueError):
                 pass
 
+    # Exercise boosts: (intensity 0-1, local end hour) per activity today.
+    # Intensity = RPE/10 if logged, else (avg_hr - resting_hr) / (190 - resting_hr).
+    resting_hr_for_calc = float(today_row[2]) if today_row and today_row[2] else 55.0
+    activity_boosts: list[tuple[float, float]] = []
+    for act in activity_rows:
+        end_h = _activity_end_local_hour(act["start_time"], act["duration_s"] or 0, ms_tz)
+        if end_h is None:
+            continue
+        if today_rpe is not None:
+            intensity = min(1.0, today_rpe / 10.0)
+        elif act["avg_hr"] and act["avg_hr"] > 0:
+            denom = max(1.0, 190.0 - resting_hr_for_calc)
+            intensity = max(0.0, min(1.0, (act["avg_hr"] - resting_hr_for_calc) / denom))
+        else:
+            intensity = 0.4  # moderate default when no HR data
+        if intensity >= 0.1:
+            activity_boosts.append((intensity, end_h))
+
     # Sleep score from today's metrics (for energy curve quality)
     sleep_score_for_curve = today_row[1] if today_row and today_row[1] else None
 
@@ -911,7 +960,7 @@ async def overview(request: Request,
         "today_meal_count": today_meal_count or 0,
         "protein_target": protein_target,
         "calorie_target": calorie_target,
-        "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None),
+        "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None),
         "wake_hour": wake_hour,
     })
 
