@@ -379,11 +379,11 @@ def _pmc_chart(rows: list[dict]) -> str:
 
 
 def _energy_chart(wake_hour: float | None, sleep_score: float | None,
-                  current_hour: float,
                   caffeine_doses: list[tuple[float, float]] | None = None) -> str:
     """
     Energy forecast chart using two-process alertness model (Borbély 1982).
     Anchored to today's wake time from Garmin sleep data.
+    The "now" rule is injected client-side so timezone is always accurate.
     """
     if wake_hour is None:
         return "{}"
@@ -397,10 +397,6 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
         for i, r in enumerate(curve)
     ]
     peak = max(curve_hw, key=lambda r: r["alertness"])
-
-    # hours-since-wake for "now"; only show if within the forecast window
-    now_hw = (current_hour - wake_hour) % 24
-    show_now = 0.0 <= now_hw <= FORECAST_HOURS
 
     # X-axis: tick every 2h from wake, labeled as local clock time
     tick_vals = list(range(0, FORECAST_HOURS + 1, 2))
@@ -425,16 +421,8 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
                 tooltip=[alt.Tooltip("label:N", title="Peak time"),
                          alt.Tooltip("alertness:Q", title="Peak", format=".0f")])
     )
-    layers = [area, line, peak_dot]
-    if show_now:
-        rule = (
-            alt.Chart(alt.Data(values=[{"hw": now_hw}]))
-            .mark_rule(color="#f4a261", strokeDash=[4, 4], strokeWidth=2)
-            .encode(x="hw:Q")
-        )
-        layers.insert(2, rule)
     return (
-        alt.layer(*layers)
+        alt.layer(area, line, peak_dot)
         .properties(width="container", height=160)
         .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
         .configure_view(strokeWidth=0, fill="#1a1a1a")
@@ -743,7 +731,6 @@ async def overview(request: Request,
     local_now = _local_now(ms_tz)
     today = local_now.strftime("%Y-%m-%d")
     yesterday = (local_now - timedelta(days=1)).strftime("%Y-%m-%d")
-    current_hour = local_now.hour + local_now.minute / 60
 
     with db() as conn:
         # If HOME_TZ isn't set and it's early UTC (e.g. 1-6am), today might have
@@ -854,8 +841,8 @@ async def overview(request: Request,
         "today_meal_count": today_meal_count or 0,
         "protein_target": protein_target,
         "calorie_target": calorie_target,
-        "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve,
-                                     current_hour, caffeine_doses or None),
+        "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None),
+        "wake_hour": wake_hour,
     })
 
 

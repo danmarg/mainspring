@@ -132,7 +132,7 @@
 {% if energy_spec != '{}' %}
 <div class="chart-block">
   <h3>Alertness forecast
-    <span style="color:var(--text-muted);font-size:0.72rem"> — two-process model (Borbély 1982)
+    <span style="color:var(--text-muted);font-size:0.72rem">
     · <span style="color:#f4a261">┊ now</span>
     · <span style="color:#2ecc71">▲ peak</span>
     </span>
@@ -146,6 +146,30 @@
 
 {% block scripts %}
 {% if energy_spec != '{}' %}
-<script>embed('energy-chart', {{ energy_spec|safe }});</script>
+<script>
+(function() {
+  var spec = {{ energy_spec|safe }};
+  var wakeHour = {{ wake_hour | tojson }};
+  var FORECAST_HOURS = 18;
+
+  // Compute now position using browser local time — always correct regardless of server TZ
+  var now = new Date();
+  var localHour = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
+  var nowHw = ((localHour - wakeHour) % 24 + 24) % 24;
+
+  if (nowHw >= 0 && nowHw <= FORECAST_HOURS) {
+    var rule = {
+      "data": {"values": [{"hw": nowHw}]},
+      "mark": {"type": "rule", "color": "#f4a261", "strokeDash": [4, 4], "strokeWidth": 2},
+      "encoding": {"x": {"field": "hw", "type": "quantitative"}}
+    };
+    if (Array.isArray(spec.layer)) {
+      spec.layer.splice(2, 0, rule);
+    }
+  }
+
+  embed('energy-chart', spec);
+})();
+</script>
 {% endif %}
 {% endblock %}
