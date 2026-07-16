@@ -239,21 +239,20 @@ def _list_datapoints(conn, data_type: str, d: date, tokens: dict) -> Any | None:
     return _get(conn, path, {"filter": f}, tokens)
 
 
-def _list_hrv_samples(conn, target_dates: set, tokens: dict, max_pages: int = 20) -> list[dict]:
+def _fetch_and_store_hrv(conn, target_dates: set, tokens: dict, max_pages: int = 20) -> int:
     """
-    Fetch heart-rate-variability dataPoints. This type does not support AIP-160 filters,
-    so we page through newest-first until all remaining points predate our target window,
-    then filter in Python.
+    Page through heart-rate-variability dataPoints newest-first, writing RMSSD values
+    to intraday_hrv as each page arrives (no accumulation in memory, no raw payload blob).
+    Stops as soon as all points on a page predate the oldest target date.
 
-    max_pages=20 covers ~10-20 recent nights (sufficient for nightly runs).
-    Pass a higher value when backfilling: each month of history needs ~50-100 pages.
+    max_pages=20 covers ~10-20 recent nights (nightly runs).
+    Raise for backfills: each month of history needs ~50-100 pages.
     """
     path = "/users/me/dataTypes/heart-rate-variability/dataPoints"
-    # Oldest date we care about — stop paginating once we pass it
     cutoff = min(target_dates) - timedelta(days=1)
     cutoff_str = cutoff.isoformat() + "T00:00:00Z"
 
-    all_points: list[dict] = []
+    rows = 0
     page_token: str | None = None
 
     for _ in range(max_pages):
@@ -263,49 +262,42 @@ def _list_hrv_samples(conn, target_dates: set, tokens: dict, max_pages: int = 20
         data = _get(conn, path, params, tokens)
         if not data:
             break
-        pts = data.get("dataPoints") or []
-        for pt in pts:
-            ts = pt.get("heartRateVariability", {}).get("sampleTime", {}).get("physicalTime", "")
-            if ts and ts < cutoff_str:
-                return all_points  # all subsequent points are even older
-            all_points.append(pt)
+
+        past_window = False
+        for pt in (data.get("dataPoints") or []):
+            hrv = pt.get("heartRateVariability", {})
+            ts_str = hrv.get("sampleTime", {}).get("physicalTime", "")
+            if not ts_str:
+                continue
+            if ts_str < cutoff_str:
+                past_window = True
+                break
+            rmssd = hrv.get("rootMeanSquareOfSuccessiveDifferencesMilliseconds")
+            if rmssd is None or rmssd <= 0:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+                if date(dt.year, dt.month, dt.day) not in target_dates:
+                    continue
+                ts_key = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                continue
+            conn.execute(
+                """
+                INSERT INTO intraday_hrv(ts, source, rmssd)
+                VALUES (?, ?, ?)
+                ON CONFLICT(ts, source) DO UPDATE SET rmssd = excluded.rmssd
+                """,
+                (ts_key, SOURCE, round(rmssd, 2)),
+            )
+            rows += 1
+
+        if past_window:
+            break
         page_token = data.get("nextPageToken")
         if not page_token:
             break
 
-    return all_points
-
-
-def _parse_intraday_hrv(conn, points: list[dict], target_dates: set) -> int:
-    """
-    Write RMSSD values to intraday_hrv, filtered to target_dates.
-    Skips entries where RMSSD = 0 (HRV4Training records SDNN but not RMSSD; those are useless here).
-    """
-    rows = 0
-    for pt in points:
-        hrv = pt.get("heartRateVariability", {})
-        rmssd = hrv.get("rootMeanSquareOfSuccessiveDifferencesMilliseconds")
-        if rmssd is None or rmssd <= 0:
-            continue
-        ts_str = hrv.get("sampleTime", {}).get("physicalTime", "")
-        if not ts_str:
-            continue
-        try:
-            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-            if date(dt.year, dt.month, dt.day) not in target_dates:
-                continue
-            ts_key = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        except Exception:
-            continue
-        conn.execute(
-            """
-            INSERT INTO intraday_hrv(ts, source, rmssd)
-            VALUES (?, ?, ?)
-            ON CONFLICT(ts, source) DO UPDATE SET rmssd = excluded.rmssd
-            """,
-            (ts_key, SOURCE, round(rmssd, 2)),
-        )
-        rows += 1
     return rows
 
 
@@ -616,16 +608,11 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
                 rows_upserted += _parse_intraday_hr(conn, hr_data)
 
     # Intraday HRV (RMSSD): heart-rate-variability doesn't support date filters, so we
-    # page newest-first and filter in Python. One call covers all hr_dates.
-    # For backfills (explicit date range), use a higher page cap: each month of history
-    # needs ~50-100 pages (50 points/page, ~50-96 readings/night).
+    # page newest-first, writing to DB as each page arrives (no in-memory accumulation).
+    # No raw payload stored — data is already in intraday_hrv and the blob would be huge.
     if hr_dates:
-        is_backfill = bool(start_date or end_date)
-        hrv_max_pages = 500 if is_backfill else 20
-        hrv_points = _list_hrv_samples(conn, hr_dates, tokens, max_pages=hrv_max_pages)
-        if hrv_points:
-            upsert_raw_payload(conn, SOURCE, "hrv_intraday", json.dumps(hrv_points))
-            rows_upserted += _parse_intraday_hrv(conn, hrv_points, hr_dates)
+        hrv_max_pages = 500 if (start_date or end_date) else 20
+        rows_upserted += _fetch_and_store_hrv(conn, hr_dates, tokens, max_pages=hrv_max_pages)
 
     conn.commit()
     return {
