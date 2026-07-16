@@ -134,7 +134,7 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
                 color=alt.Color("stage:N", scale=alt.Scale(
                     domain=["Deep", "REM", "Light"],
                     range=["#1a6b9e", "#7b4fa6", "#2d8a6d"],
-                )),
+                ), legend=alt.Legend(orient="bottom", labelColor="#aaa", titleColor="#aaa")),
                 tooltip=["date:T", "stage:N", "minutes:Q"],
             )
             .properties(width="container", height=120)
