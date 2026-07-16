@@ -197,7 +197,7 @@ function msChangeDays(val) {
     sx = null;
     if (Math.abs(dx) < THRESHOLD || Math.abs(dx) < Math.abs(dy)) return;
     var path = window.location.pathname;
-    var idx = TABS.findIndex(function(t) { return path === t || path.startsWith(t + '/'); });
+    var idx = TABS.indexOf(path);
     if (idx === -1) return;
     var next = dx < 0 ? TABS[idx + 1] : TABS[idx - 1];
     if (!next) return;
