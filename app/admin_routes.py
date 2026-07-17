@@ -29,10 +29,11 @@ _import_auth = _require_token("ADMIN_TOKEN")
 _export_auth = _require_token("EXPORT_TOKEN")
 
 
-def _fire_morning_webhook() -> None:
+def _fire_morning_webhook() -> bool:
+    """Fire the morning webhook. Returns True if the request succeeded."""
     url = os.getenv("MORNING_WEBHOOK_URL", "").strip()
     if not url:
-        return
+        return False
     headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
     secret = os.getenv("MORNING_WEBHOOK_SECRET", "").strip()
     if secret:
@@ -41,21 +42,16 @@ def _fire_morning_webhook() -> None:
         req = urllib.request.Request(url, data=b"{}", method="POST", headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
             log.info("morning webhook fired → %s", resp.status)
+            return True
     except Exception as exc:
         log.warning("morning webhook failed: %s", exc)
+        return False
 
 
 def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
     """Run an import synchronously in a background thread and update import_runs."""
     try:
         today = date.today().isoformat()
-
-        # Snapshot sleep state before import so we can detect it newly arriving
-        with db() as conn:
-            row = conn.execute(
-                "SELECT sleep_score FROM daily_metrics WHERE date=?", (today,)
-            ).fetchone()
-            sleep_before = row[0] if row else None
 
         with db() as conn:
             result = import_fn(conn, **import_kwargs)
@@ -77,14 +73,24 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
             )
         log.info("%s import run_id=%d finished: %s (%d rows)", source, run_id, status, rows)
 
-        # Fire morning webhook when sleep_score lands for today for the first time
-        if sleep_before is None and today in imported_dates:
+        # Fire morning webhook when sleep_score lands for today for the first time.
+        # Checks the morning_webhooks table so retries work if the machine was killed
+        # before the webhook could fire (Fly auto-stop race condition).
+        if today in imported_dates:
             with db() as conn:
-                row = conn.execute(
+                already_sent = conn.execute(
+                    "SELECT 1 FROM morning_webhooks WHERE date=?", (today,)
+                ).fetchone()
+                sleep_now = conn.execute(
                     "SELECT sleep_score FROM daily_metrics WHERE date=?", (today,)
                 ).fetchone()
-                if row and row[0] is not None:
-                    _fire_morning_webhook()
+            if not already_sent and sleep_now and sleep_now[0] is not None:
+                if _fire_morning_webhook():
+                    with db() as conn:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO morning_webhooks(date, sent_at) VALUES (?,?)",
+                            (today, utc_now()),
+                        )
 
     except Exception as exc:
         log.exception("%s import run_id=%d failed", source, run_id)

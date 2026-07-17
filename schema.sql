@@ -229,6 +229,12 @@ CREATE TABLE IF NOT EXISTS training_goals (
   updated_at TEXT NOT NULL
 );
 
+-- tracks which dates have had the morning webhook sent (prevents duplicate fires)
+CREATE TABLE IF NOT EXISTS morning_webhooks (
+  date    TEXT PRIMARY KEY,
+  sent_at TEXT NOT NULL
+);
+
 -- goal races / training events
 CREATE TABLE IF NOT EXISTS training_events (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
