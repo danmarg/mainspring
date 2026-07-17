@@ -436,6 +436,20 @@ def _parse_calories(conn, date_str: str, data: dict) -> int:
     return 1
 
 
+def _session_duration_ms(session: dict) -> float:
+    """Compute session duration in ms from interval.startTime/endTime (actual API format)
+    or durationMs fallback (older assumed format)."""
+    sleep = session.get("sleep", {})
+    interval = sleep.get("interval", {})
+    try:
+        s = datetime.fromisoformat(interval["startTime"].replace("Z", "+00:00"))
+        e = datetime.fromisoformat(interval["endTime"].replace("Z", "+00:00"))
+        return max(0.0, (e - s).total_seconds() * 1000)
+    except (KeyError, ValueError, TypeError):
+        pass
+    return float(session.get("durationMs") or sleep.get("durationMs") or 0)
+
+
 def _parse_sleep(conn, date_str: str, data: dict) -> int:
     """Sleep is a session type — list returns multiple sessions; aggregate the main one."""
     if not data:
@@ -445,30 +459,47 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
         return 0
 
     # pick the longest sleep session as "main sleep"
-    main = max(sessions, key=lambda s: s.get("durationMs", 0), default=None)
+    main = max(sessions, key=_session_duration_ms, default=None)
     if not main:
         return 0
 
     now = utc_now()
     rows = 0
     sleep_data = main.get("sleep", {})
+    dur_ms = _session_duration_ms(main)
 
-    duration_ms = main.get("durationMs") or sleep_data.get("durationMs")
-    if duration_ms:
+    if dur_ms:
         upsert_raw_metric(conn, date_str, SOURCE, "sleep_duration_min",
-                          float(duration_ms) / 60000, now)
+                          dur_ms / 60000, now)
         rows += 1
 
-    # stages is a list of {type: str, durationMs: int}; type values like "DEEP", "REM", "LIGHT"
+    # Extract wake hour from interval.endTime
+    interval = sleep_data.get("interval", {})
+    end_str = interval.get("endTime")
+    if end_str:
+        try:
+            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            wake_hour = end_dt.hour + end_dt.minute / 60
+            upsert_raw_metric(conn, date_str, SOURCE, "sleep_wake_hour", wake_hour, now)
+            rows += 1
+        except (ValueError, TypeError):
+            pass
+
+    # stages: actual format is [{startTime, endTime, type}, ...]; durationMs is a fallback
     stages_raw = sleep_data.get("stages", [])
     if isinstance(stages_raw, dict):
-        # defensive: handle old assumed shape
-        stage_totals = {k.upper(): v for k, v in stages_raw.items()}
+        stage_totals = {k.upper(): float(v) for k, v in stages_raw.items()}
     else:
         stage_totals: dict[str, float] = {}
         for s in stages_raw:
             t = str(s.get("type", "")).upper()
-            stage_totals[t] = stage_totals.get(t, 0) + (s.get("durationMs") or 0)
+            try:
+                s_dt = datetime.fromisoformat(s["startTime"].replace("Z", "+00:00"))
+                e_dt = datetime.fromisoformat(s["endTime"].replace("Z", "+00:00"))
+                stage_ms = max(0.0, (e_dt - s_dt).total_seconds() * 1000)
+            except (KeyError, ValueError, TypeError):
+                stage_ms = float(s.get("durationMs") or 0)
+            stage_totals[t] = stage_totals.get(t, 0) + stage_ms
 
     stage_map = [
         ("DEEP",  "sleep_deep_min"),
@@ -478,7 +509,7 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
     for stage_key, metric in stage_map:
         val = stage_totals.get(stage_key)
         if val:
-            upsert_raw_metric(conn, date_str, SOURCE, metric, float(val) / 60000, now)
+            upsert_raw_metric(conn, date_str, SOURCE, metric, val / 60000, now)
             rows += 1
 
     score = sleep_data.get("sleepScore") or sleep_data.get("efficiency")
