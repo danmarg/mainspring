@@ -20,6 +20,11 @@
       <span style="color:var(--text-muted);font-size:0.72rem"> — HRV · sleep · resting HR
         {%- if readiness.components | selectattr('name', 'equalto', 'Form (TSB)') | list %} · form{% endif %}
       </span>
+      {% if metrics_date != today %}
+      <span style="color:var(--text-muted);font-size:0.72rem;display:block;margin-top:0.2rem">
+        Based on {{ metrics_date }} — today's import not yet available
+      </span>
+      {% endif %}
     </div>
   </div>
 

@@ -790,6 +790,32 @@ def _local_now(browser_tz: str | None = None) -> datetime:
     return datetime.now(timezone.utc).astimezone(_get_tz(browser_tz))
 
 
+def _local_day_utc_bounds(local_date_str: str, browser_tz: str | None = None) -> tuple[str, str]:
+    """
+    Return (utc_start, utc_end) ISO strings bracketing a local calendar day.
+    Used for ts >= utc_start AND ts < utc_end queries on manual_logs.ts (stored UTC).
+    """
+    from datetime import timezone
+    tz = _get_tz(browser_tz)
+    naive = datetime.strptime(local_date_str, "%Y-%m-%d")
+    start = naive.replace(tzinfo=tz).astimezone(timezone.utc)
+    end = (naive + timedelta(days=1)).replace(tzinfo=tz).astimezone(timezone.utc)
+    return start.isoformat(), end.isoformat()
+
+
+def _local_window_utc_start(days_int: int, browser_tz: str | None = None) -> str:
+    """
+    Return UTC ISO string for local midnight N days ago — the correct lower bound
+    for range queries on manual_logs.ts when the user wants the last N local days.
+    """
+    from datetime import timezone
+    tz = _get_tz(browser_tz)
+    local_now = datetime.now(timezone.utc).astimezone(tz)
+    local_start = (local_now - timedelta(days=days_int)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return local_start.astimezone(timezone.utc).isoformat()
+
+
 def _utc_to_local_hour(ts_str: str, browser_tz: str | None = None) -> float | None:
     """Convert UTC ISO timestamp string to local hour-of-day float."""
     try:
@@ -818,50 +844,46 @@ async def overview(request: Request,
     yesterday = (local_now - timedelta(days=1)).strftime("%Y-%m-%d")
 
     with db() as conn:
-        # If HOME_TZ isn't set and it's early UTC (e.g. 1-6am), today might have
-        # no data yet. Fall back to yesterday when that happens.
-        has_today = _scalar(conn, "SELECT 1 FROM daily_metrics WHERE date=? LIMIT 1", (today,))
-        if not has_today:
-            has_yesterday = _scalar(conn, "SELECT 1 FROM daily_metrics WHERE date=? LIMIT 1", (yesterday,))
-            if has_yesterday:
-                today = yesterday
-                yesterday = (local_now - timedelta(days=2)).strftime("%Y-%m-%d")
+        # For readiness/metrics, use the most recent date with actual sleep/HRV data.
+        # Garmin doesn't return daily summaries for the current UTC day until the next
+        # morning import, so today's row is often all NULLs until ~6am local.
+        metrics_date = _scalar(conn,
+            """SELECT date FROM daily_metrics
+               WHERE hrv IS NOT NULL OR sleep_score IS NOT NULL
+               ORDER BY date DESC LIMIT 1""")
+        if not metrics_date:
+            metrics_date = today
 
         # Readiness (shared module — same formula MCP server uses)
-        readiness = readiness_from_db(conn, today)
+        readiness = readiness_from_db(conn, metrics_date)
 
-        # Today's core metrics for the info strip
+        # Biometric stat cards and energy curve use metrics_date (most recent with data)
         today_row = conn.execute(
             """SELECT hrv, sleep_score, resting_hr, body_battery_high,
                       weight_kg, sleep_duration_min, stress_avg
                FROM daily_metrics WHERE date=?""",
-            (today,),
+            (metrics_date,),
         ).fetchone()
 
-        # Wake time and sleep score for energy curve
+        # Wake time and sleep score for energy curve — same date as metrics
         wake_row = conn.execute(
             """SELECT value FROM raw_daily_metrics
                WHERE date=? AND source='garmin' AND metric='sleep_wake_hour'""",
-            (today,),
+            (metrics_date,),
         ).fetchone()
         wake_hour: float | None = wake_row[0] if wake_row else None
 
-        # If today's sleep data not yet imported, fall back to yesterday
-        if wake_hour is None:
-            wake_row_y = conn.execute(
-                """SELECT value FROM raw_daily_metrics
-                   WHERE date=? AND source='garmin' AND metric='sleep_wake_hour'""",
-                (yesterday,),
-            ).fetchone()
-            wake_hour = wake_row_y[0] if wake_row_y else None
+        # UTC bounds for today's local date — used for all manual_logs queries so that
+        # logs made late in the evening (after UTC midnight) land on the right local day.
+        today_utc_start, today_utc_end = _local_day_utc_bounds(today, ms_tz)
 
         # Today's caffeine logs for energy boost component
         caffeine_logs = _rows(conn,
             """SELECT ts, quantity FROM manual_logs
-               WHERE type='caffeine' AND DATE(ts)=?
+               WHERE type='caffeine' AND ts >= ? AND ts < ?
                  AND quantity IS NOT NULL AND quantity > 0
                ORDER BY ts""",
-            (today,))
+            (today_utc_start, today_utc_end))
 
         # Today's activities for exercise adjustment to the energy curve.
         # Queries the normalized activities table (source-agnostic).
@@ -873,9 +895,9 @@ async def overview(request: Request,
         # Today's RPE log — if the user logged it, prefer it over avg_hr as intensity proxy
         rpe_row = conn.execute(
             """SELECT quantity FROM manual_logs
-               WHERE type='rpe' AND DATE(ts)=? AND quantity IS NOT NULL
+               WHERE type='rpe' AND ts >= ? AND ts < ? AND quantity IS NOT NULL
                ORDER BY ts DESC LIMIT 1""",
-            (today,),
+            (today_utc_start, today_utc_end),
         ).fetchone()
         today_rpe = float(rpe_row[0]) if rpe_row else None
 
@@ -884,14 +906,14 @@ async def overview(request: Request,
             """SELECT SUM(estimated_calories),
                       GROUP_CONCAT(estimated_macros_json, char(31))
                FROM manual_logs
-               WHERE type='meal' AND DATE(ts)=?""",
-            (today,),
+               WHERE type='meal' AND ts >= ? AND ts < ?""",
+            (today_utc_start, today_utc_end),
         ).fetchone()
         today_calories = today_nutrition_row[0] if today_nutrition_row else None
         today_macros = _parse_macros(today_nutrition_row[1]) if today_nutrition_row else {}
         today_meal_count = _scalar(conn,
-            "SELECT COUNT(*) FROM manual_logs WHERE type='meal' AND DATE(ts)=?",
-            (today,))
+            "SELECT COUNT(*) FROM manual_logs WHERE type='meal' AND ts >= ? AND ts < ?",
+            (today_utc_start, today_utc_end))
 
         # Nutrition targets
         protein_target_row = conn.execute(
@@ -951,6 +973,7 @@ async def overview(request: Request,
 
     return templates.TemplateResponse(request, "overview.html", {
         "today": today,
+        "metrics_date": metrics_date,
         "readiness": readiness,
         "today_info": today_info,
         "today_calories": today_calories,
@@ -1143,41 +1166,69 @@ DOW_NAMES = {"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed", "4": "Thu", "5": "F
 
 @router.get("/nutrition", response_class=HTMLResponse)
 async def nutrition(request: Request, days: str = "30",
-                    ms_dash_auth: str | None = Cookie(default=None)):
+                    ms_dash_auth: str | None = Cookie(default=None),
+                    ms_tz: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
 
     clause = _days_clause(days)
+    days_int = int(days) if str(days).isdigit() else 30
+    utc_window_start = _local_window_utc_start(days_int, ms_tz)
+    local_now = _local_now(ms_tz)
+    local_today = local_now.strftime("%Y-%m-%d")
+    local_window_start = (local_now - timedelta(days=days_int)).strftime("%Y-%m-%d")
 
     with db() as conn:
-        # Pull calories from daily_metrics for heatmap
+        # Pull calories from daily_metrics (date column is already local health date)
         cal_rows = _rows(conn, """
             SELECT date,
               strftime('%Y-%W', date) AS week,
               strftime('%w', date) AS dow,
               COALESCE(calories_estimated, 0) AS calories
             FROM daily_metrics
-            WHERE date >= date('now', ?)
+            WHERE date >= ?
             ORDER BY date
-        """, (clause,))
+        """, (local_window_start,))
 
-        # Pull individual meal logs for macro parsing
-        meal_rows = _rows(conn, """
-            SELECT DATE(ts) AS date,
-              strftime('%w', ts) AS dow,
-              SUM(estimated_calories) AS calories,
-              GROUP_CONCAT(estimated_macros_json, char(31)) AS macros_list
+        # Fetch individual meal rows; group by local date in Python (server is UTC,
+        # so SQLite's 'localtime' modifier won't match the browser's timezone).
+        _raw_meal_rows = _rows(conn, """
+            SELECT ts, estimated_calories, estimated_macros_json
             FROM manual_logs
-            WHERE type='meal' AND DATE(ts) >= date('now', ?)
-            GROUP BY DATE(ts)
-            ORDER BY date
-        """, (clause,))
+            WHERE type='meal' AND ts >= ?
+            ORDER BY ts
+        """, (utc_window_start,))
 
         # Pull protein target from training_goals if set
         protein_target_row = conn.execute(
             "SELECT value FROM training_goals WHERE metric='protein_g_daily'"
         ).fetchone()
         protein_target = float(protein_target_row[0]) if protein_target_row else 150.0
+
+    # Assign each log to its local date in Python using browser tz
+    tz = _get_tz(ms_tz)
+    _meal_by_local_date: dict[str, dict] = {}
+    for row in _raw_meal_rows:
+        try:
+            dt = datetime.fromisoformat(row["ts"].replace("Z", "+00:00")).astimezone(tz)
+        except Exception:
+            continue
+        local_d = dt.strftime("%Y-%m-%d")
+        # Convert Python weekday (0=Mon) to SQLite %w convention (0=Sun)
+        sqlite_dow = str((dt.weekday() + 1) % 7)
+        if local_d not in _meal_by_local_date:
+            _meal_by_local_date[local_d] = {
+                "date": local_d,
+                "dow": sqlite_dow,
+                "calories": 0,
+                "macros_list": [],
+            }
+        _meal_by_local_date[local_d]["calories"] += row.get("estimated_calories") or 0
+        if row.get("estimated_macros_json"):
+            _meal_by_local_date[local_d]["macros_list"].append(row["estimated_macros_json"])
+    meal_rows = []
+    for v in sorted(_meal_by_local_date.values(), key=lambda x: x["date"]):
+        meal_rows.append({**v, "macros_list": chr(31).join(v["macros_list"])})
 
     # Build per-day macro totals
     macro_by_date: dict[str, dict] = {}
@@ -1219,12 +1270,7 @@ async def nutrition(request: Request, days: str = "30",
                 avg_g = sum(vals) / len(vals)
                 dow_macro_rows.append({"dow_name": dow_name, "macro": macro, "avg_g": round(avg_g, 1)})
 
-    from datetime import date as _date, timedelta
-    days_int = int(days) if str(days).isdigit() else 30
-    x_domain = [
-        (_date.today() - timedelta(days=days_int)).isoformat(),
-        _date.today().isoformat(),
-    ]
+    x_domain = [local_window_start, local_today]
 
     return templates.TemplateResponse(request, "nutrition.html", {
         "days": days,

@@ -137,7 +137,7 @@
 (function() {
   try {
     var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (tz) document.cookie = 'ms_tz=' + encodeURIComponent(tz) + '; path=/; SameSite=Lax; Max-Age=86400';
+    if (tz) document.cookie = 'ms_tz=' + tz + '; path=/; SameSite=Lax; Max-Age=86400';
   } catch(e) {}
 })();
 
