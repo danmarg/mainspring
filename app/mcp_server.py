@@ -15,8 +15,9 @@ The login page lives at /mcp-auth/login on the main FastAPI app.
 
 import json
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mcp.server import FastMCP
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
@@ -174,30 +175,48 @@ def delete_log(log_id: int) -> str:
 
 # ── query tools ─────────────────────────────────────────────────────────────
 
+def _local_date_utc_bounds(date_str: str, tz_name: str | None) -> tuple[str, str]:
+    """Return (utc_start, utc_end_exclusive) for a local calendar date."""
+    try:
+        tz = ZoneInfo(tz_name or os.getenv("HOME_TZ", "UTC"))
+    except (ZoneInfoNotFoundError, TypeError):
+        tz = ZoneInfo("UTC")
+    d = date.fromisoformat(date_str)
+    local_start = datetime(d.year, d.month, d.day, tzinfo=tz)
+    local_end = local_start + timedelta(days=1)
+    return local_start.astimezone(timezone.utc).isoformat(), local_end.astimezone(timezone.utc).isoformat()
+
+
 @mcp.tool()
 def get_logs(
     start_date: str,
     end_date: str,
     type: Optional[str] = None,
+    tz: Optional[str] = None,
 ) -> list[dict]:
-    """Return manual logs between start_date and end_date (YYYY-MM-DD).
-    type filters to 'meal' | 'caffeine' | 'alcohol' | 'note'."""
+    """Return manual logs between start_date and end_date (YYYY-MM-DD, inclusive).
+    type filters to 'meal' | 'caffeine' | 'alcohol' | 'note'.
+    tz: IANA timezone name for the user's local date (e.g. 'America/New_York').
+    Always pass tz when you know the user's timezone — logs are stored in UTC and
+    date boundaries differ by up to a day without it."""
+    utc_start, _ = _local_date_utc_bounds(start_date, tz)
+    _, utc_end = _local_date_utc_bounds(end_date, tz)
     with db() as conn:
         if type:
             rows = conn.execute(
                 "SELECT id, ts, type, description, quantity, unit, "
                 "estimated_calories, estimated_macros_json, confidence, created_at "
                 "FROM manual_logs "
-                "WHERE DATE(ts) BETWEEN ? AND ? AND type=? ORDER BY ts",
-                (start_date, end_date, type),
+                "WHERE ts >= ? AND ts < ? AND type=? ORDER BY ts",
+                (utc_start, utc_end, type),
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT id, ts, type, description, quantity, unit, "
                 "estimated_calories, estimated_macros_json, confidence, created_at "
                 "FROM manual_logs "
-                "WHERE DATE(ts) BETWEEN ? AND ? ORDER BY ts",
-                (start_date, end_date),
+                "WHERE ts >= ? AND ts < ? ORDER BY ts",
+                (utc_start, utc_end),
             ).fetchall()
 
     return [
@@ -923,6 +942,10 @@ A TSB of -30 with a marathon in 2 weeks = needs to taper urgently.
 
 Log things at the time they happen. Past entries can use the `ts` parameter (UTC ISO-8601)
 or `date` parameter (for log_rpe). RPE should be logged same day as the workout.
+
+**Timezone note**: logs are stored in UTC. Always pass `tz` (e.g. `'America/New_York'`)
+to `get_logs` so date boundaries are computed in local time, not UTC. Without it, meals
+after ~8pm local time appear on the wrong day.
 
 ---
 
