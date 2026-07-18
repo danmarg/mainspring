@@ -30,6 +30,7 @@
   <h1>Mainspring</h1>
   <p>Enter your Datasette token to access the dashboard.</p>
   <form method="post" action="/dashboard/login">
+    <input type="text" name="username" value="mainspring" autocomplete="username" style="display:none">
     <label for="token">Token</label>
     <input type="password" id="token" name="token" autofocus autocomplete="current-password">
     <button type="submit">Sign in</button>
