@@ -126,7 +126,7 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
             y=alt.Y("sleep_score:Q", title="Sleep score", scale=alt.Scale(domain=[0, 100])),
             tooltip=["date:T", "sleep_score:Q"],
         )
-        .properties(width="container", height=140)
+        .properties(height=140)
     )
     if rows_stages:
         stages_chart = (
@@ -141,20 +141,23 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
                 ), legend=alt.Legend(orient="bottom", labelColor="#aaa", titleColor="#aaa")),
                 tooltip=["date:T", "stage:N", "minutes:Q"],
             )
-            .properties(width="container", height=120)
+            .properties(height=120)
         )
         combined = (
             alt.vconcat(score_chart, stages_chart, spacing=8)
             .resolve_scale(x="shared")
         )
     else:
-        combined = score_chart
-    return (
+        combined = score_chart.properties(width="container")
+    import json as _json
+    spec = _json.loads(
         combined
         .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
         .configure_view(strokeWidth=0, fill="#1a1a1a")
         .to_json()
     )
+    spec["width"] = "container"
+    return _json.dumps(spec)
 
 
 def _zone_load_chart(rows: list[dict]) -> str:
@@ -312,11 +315,17 @@ def _compute_dow_avgs(rows: list[dict], field: str) -> list[dict]:
     ]
 
 
+def _heatmap_to_json(chart: alt.Chart) -> str:
+    import json as _json
+    spec = _json.loads(chart.to_json())
+    spec["autosize"] = {"type": "fit-x", "contains": "padding"}
+    return _json.dumps(spec)
+
+
 def _calendar_heatmap(rows: list[dict], field: str, title: str,
                       scheme: str = "reds", zero_color: str = "#1a1a1a") -> str:
     if not rows:
         return "{}"
-    # Filter to non-null for color, include zeros as a separate condition
     chart = (
         alt.Chart(alt.Data(values=rows))
         .mark_rect(cornerRadius=2)
@@ -342,7 +351,7 @@ def _calendar_heatmap(rows: list[dict], field: str, title: str,
         .configure_view(strokeWidth=0, fill="#111")
         .configure_title(color="#ccc")
     )
-    return chart.to_json()
+    return _heatmap_to_json(chart)
 
 
 def _hrv_delta_heatmap(rows: list[dict]) -> str:
@@ -374,7 +383,7 @@ def _hrv_delta_heatmap(rows: list[dict]) -> str:
         .configure_view(strokeWidth=0, fill="#111")
         .configure_title(color="#ccc")
     )
-    return chart.to_json()
+    return _heatmap_to_json(chart)
 
 
 def _pmc_chart(rows: list[dict]) -> str:
@@ -844,12 +853,15 @@ async def overview(request: Request,
     yesterday = (local_now - timedelta(days=1)).strftime("%Y-%m-%d")
 
     with db() as conn:
-        # For readiness/metrics, use the most recent date with actual sleep/HRV data.
+        # For readiness/metrics, use the most recent date with actual biometric data.
         # Garmin doesn't return daily summaries for the current UTC day until the next
         # morning import, so today's row is often all NULLs until ~6am local.
+        # Include resting_hr and sleep_duration_min so Fitbit-only days (no Garmin HRV/score)
+        # still resolve to the correct date rather than falling back to the last Garmin date.
         metrics_date = _scalar(conn,
             """SELECT date FROM daily_metrics
                WHERE hrv IS NOT NULL OR sleep_score IS NOT NULL
+                  OR resting_hr IS NOT NULL OR sleep_duration_min IS NOT NULL
                ORDER BY date DESC LIMIT 1""")
         if not metrics_date:
             metrics_date = today
@@ -865,10 +877,14 @@ async def overview(request: Request,
             (metrics_date,),
         ).fetchone()
 
-        # Wake time and sleep score for energy curve — same date as metrics
+        # Wake time for energy curve — prefer garmin, fall back to any available source.
+        # Google Health (Fitbit) also provides sleep_wake_hour so the chart works on
+        # Fitbit-only days when Garmin isn't worn.
         wake_row = conn.execute(
             """SELECT value FROM raw_daily_metrics
-               WHERE date=? AND source='garmin' AND metric='sleep_wake_hour'""",
+               WHERE date=? AND metric='sleep_wake_hour'
+               ORDER BY CASE source WHEN 'garmin' THEN 0 WHEN 'google_health' THEN 1 ELSE 2 END
+               LIMIT 1""",
             (metrics_date,),
         ).fetchone()
         wake_hour: float | None = wake_row[0] if wake_row else None
