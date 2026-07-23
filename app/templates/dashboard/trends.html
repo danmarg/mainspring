@@ -17,11 +17,6 @@
 </div>
 
 <div class="chart-block">
-  <h3>Sleep</h3>
-  <div class="vega-wrap" id="sleep-chart"></div>
-</div>
-
-<div class="chart-block">
   <h3>Training load — ATL/CTL/TSB <span style="color:#888;font-size:0.72rem"><span style="color:#4e9af1">blue = CTL (fitness)</span> · <span style="color:#f4a261">orange = ATL (fatigue)</span> · bars = TSB form</span></h3>
   <div class="vega-wrap" id="pmc-chart"></div>
 </div>
@@ -41,7 +36,6 @@
 <script>
 embed('hrv-chart',     {{ hrv_spec|safe }});
 embed('hr-chart',      {{ hr_spec|safe }});
-embed('sleep-chart',   {{ sleep_spec|safe }});
 embed('pmc-chart',     {{ pmc_spec|safe }});
 embed('load-chart',    {{ load_spec|safe }});
 embed('battery-chart', {{ battery_spec|safe }});

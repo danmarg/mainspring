@@ -156,7 +156,10 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
         .configure_view(strokeWidth=0, fill="#1a1a1a")
         .to_json()
     )
-    spec["width"] = "container"
+    # width="container" must be on each sub-chart individually; setting it at the
+    # vconcat top level or via autosize leaves sub-charts at their ~300px default.
+    for sub in spec.get("vconcat", []):
+        sub["width"] = "container"
     return _json.dumps(spec)
 
 
@@ -1023,24 +1026,6 @@ async def trends(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
-        score_rows = _rows(conn, """
-            SELECT date, sleep_score FROM daily_metrics
-            WHERE date >= date('now', ?) AND sleep_score IS NOT NULL ORDER BY date
-        """, (clause,))
-
-        stage_rows_raw = _rows(conn, """
-            SELECT date, sleep_deep_min, sleep_rem_min, sleep_light_min FROM daily_metrics
-            WHERE date >= date('now', ?)
-              AND (sleep_deep_min IS NOT NULL OR sleep_rem_min IS NOT NULL OR sleep_light_min IS NOT NULL)
-            ORDER BY date
-        """, (clause,))
-        # Unpivot to long form for Altair stacked area
-        stage_rows = []
-        for r in stage_rows_raw:
-            for stage, col in [("Deep", "sleep_deep_min"), ("REM", "sleep_rem_min"), ("Light", "sleep_light_min")]:
-                if r.get(col) is not None:
-                    stage_rows.append({"date": r["date"], "stage": stage, "minutes": r[col]})
-
         # Zone load + ATL/CTL from raw_daily_metrics (pivot from EAV)
         load_raw = _rows(conn, """
             SELECT date, metric, value FROM raw_daily_metrics
@@ -1097,7 +1082,6 @@ async def trends(request: Request, days: str = "30",
     return templates.TemplateResponse(request, "trends.html", {
         "days": days,
         "hrv_spec": _trend_chart(hrv_rows, "hrv", "hrv_7d_avg", "HRV (ms)"),
-        "sleep_spec": _sleep_chart(score_rows, stage_rows),
         "load_spec": _zone_load_chart(load_rows),
         "pmc_spec": _pmc_chart(pmc_rows),
         "battery_spec": _body_battery_chart(battery_rows),
@@ -1119,14 +1103,34 @@ async def behavior(request: Request, days: str = "30",
         rows = _rows(conn, """
             SELECT date,
               strftime('%w', date) AS dow,
+              strftime('%Y-%W', date) AS week,
               COALESCE(alcohol_units, 0) AS alcohol_units,
               COALESCE(caffeine_mg, 0) AS caffeine_mg,
+              sleep_score,
               hrv,
               AVG(hrv) OVER (ORDER BY date ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS hrv_7d_avg
             FROM daily_metrics
             WHERE date >= date('now', ?)
             ORDER BY date
         """, (clause,))
+
+        score_rows = _rows(conn, """
+            SELECT date, sleep_score FROM daily_metrics
+            WHERE date >= date('now', ?) AND sleep_score IS NOT NULL ORDER BY date
+        """, (clause,))
+
+        stage_rows_raw = _rows(conn, """
+            SELECT date, sleep_deep_min, sleep_rem_min, sleep_light_min FROM daily_metrics
+            WHERE date >= date('now', ?)
+              AND (sleep_deep_min IS NOT NULL OR sleep_rem_min IS NOT NULL OR sleep_light_min IS NOT NULL)
+            ORDER BY date
+        """, (clause,))
+
+    stage_rows = []
+    for r in stage_rows_raw:
+        for stage, col in [("Deep", "sleep_deep_min"), ("REM", "sleep_rem_min"), ("Light", "sleep_light_min")]:
+            if r.get(col) is not None:
+                stage_rows.append({"date": r["date"], "stage": stage, "minutes": r[col]})
 
     for r in rows:
         if r.get("hrv") is not None and r.get("hrv_7d_avg") is not None:
@@ -1142,6 +1146,7 @@ async def behavior(request: Request, days: str = "30",
     ]
 
     hrv_delta_rows = [r for r in rows if r.get("hrv_delta") is not None]
+    sleep_heat_rows = [r for r in rows if r.get("sleep_score") is not None]
 
     return templates.TemplateResponse(request, "behavior.html", {
         "days": days,
@@ -1150,6 +1155,8 @@ async def behavior(request: Request, days: str = "30",
         "caffeine_spec": _daily_bar_chart(rows, "caffeine_mg", "Caffeine (mg)", color="#7b4fa6", x_domain=x_domain),
         "caffeine_dow_spec": _dow_avg_chart(_compute_dow_avgs(rows, "caffeine_mg"), "Avg mg", "#7b4fa6"),
         "hrv_delta_spec": _diverging_bar_chart(hrv_delta_rows, "hrv_delta", "HRV delta (ms)", x_domain=x_domain),
+        "sleep_score_spec": _calendar_heatmap(sleep_heat_rows, "sleep_score", "Sleep score", scheme="blues", zero_color="#1a1a1a"),
+        "sleep_spec": _sleep_chart(score_rows, stage_rows),
     })
 
 
