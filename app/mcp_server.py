@@ -53,6 +53,17 @@ def _date_or_today(d: Optional[str]) -> str:
     return d or date.today().isoformat()
 
 
+def _renormalize_date(ts_iso: str) -> None:
+    """Run normalization for the UTC date of ts_iso so daily_metrics is immediately current."""
+    try:
+        from app.normalize import run_normalization
+        date_str = ts_iso[:10]
+        with db() as conn:
+            run_normalization(conn, dates={date_str})
+    except Exception:
+        pass  # normalization is best-effort; the next import run will catch it
+
+
 # ── log tools ───────────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -404,6 +415,7 @@ def log_weight(kg: float, ts: Optional[str] = None) -> str:
             "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
             (event_ts, "weight", f"{kg}kg", kg, "kg", utc_now()),
         )
+    _renormalize_date(event_ts)
     return f"Logged weight at {event_ts}: {kg}kg"
 
 
@@ -429,6 +441,7 @@ def log_blood_pressure(
                 utc_now(),
             ),
         )
+    _renormalize_date(event_ts)
     return f"Logged BP at {event_ts}: {desc}"
 
 
