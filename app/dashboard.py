@@ -1103,10 +1103,8 @@ async def behavior(request: Request, days: str = "30",
         rows = _rows(conn, """
             SELECT date,
               strftime('%w', date) AS dow,
-              strftime('%Y-%W', date) AS week,
               COALESCE(alcohol_units, 0) AS alcohol_units,
               COALESCE(caffeine_mg, 0) AS caffeine_mg,
-              sleep_score,
               hrv,
               AVG(hrv) OVER (ORDER BY date ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS hrv_7d_avg
             FROM daily_metrics
@@ -1146,7 +1144,6 @@ async def behavior(request: Request, days: str = "30",
     ]
 
     hrv_delta_rows = [r for r in rows if r.get("hrv_delta") is not None]
-    sleep_heat_rows = [r for r in rows if r.get("sleep_score") is not None]
 
     return templates.TemplateResponse(request, "behavior.html", {
         "days": days,
@@ -1155,7 +1152,6 @@ async def behavior(request: Request, days: str = "30",
         "caffeine_spec": _daily_bar_chart(rows, "caffeine_mg", "Caffeine (mg)", color="#7b4fa6", x_domain=x_domain),
         "caffeine_dow_spec": _dow_avg_chart(_compute_dow_avgs(rows, "caffeine_mg"), "Avg mg", "#7b4fa6"),
         "hrv_delta_spec": _diverging_bar_chart(hrv_delta_rows, "hrv_delta", "HRV delta (ms)", x_domain=x_domain),
-        "sleep_score_spec": _calendar_heatmap(sleep_heat_rows, "sleep_score", "Sleep score", scheme="blues", zero_color="#1a1a1a"),
         "sleep_spec": _sleep_chart(score_rows, stage_rows),
     })
 
