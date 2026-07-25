@@ -1,12 +1,13 @@
-app = "mainspring"
-primary_region = "fra"
+app = "mainspring"        # change to your Fly.io app name
+primary_region = "fra"   # change to your preferred region
 
 [build]
 
 [env]
 PORT = "8080"
 HOME_TZ = "Europe/Berlin"
-APP_BASE_URL = "https://your-app.fly.dev"
+# APP_BASE_URL is set as a Fly secret (fly secrets set APP_BASE_URL=https://your-app.fly.dev)
+# so it isn't exposed in this file.
 
 [http_service]
 internal_port = 8080
