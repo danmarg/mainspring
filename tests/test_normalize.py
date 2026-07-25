@@ -26,7 +26,8 @@ def tmp_db(tmp_path):
     orig = db_module.DB_PATH
     db_module.DB_PATH = path
     init_db(path)
-    conn = sqlite3.connect(str(path))
+    from app.db import get_connection
+    conn = get_connection(path)
     yield conn
     conn.close()
     db_module.DB_PATH = orig

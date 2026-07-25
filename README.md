@@ -136,7 +136,15 @@ LITESTREAM_REPLICA_URL=s3://mybucket/health.db
 
 ## Claude integration (MCP)
 
-When `MCP_TOKEN` is set, the app exposes an MCP server at `/mcp`. Add it to Claude as a remote MCP server and Claude can log and query your health data directly from conversation.
+`MCP_TOKEN` is a bearer token you choose (or let `scripts/generate_config.sh` generate). When it is set, the app exposes an MCP server at `/mcp`.
+
+To connect it to Claude:
+
+1. In Claude, go to **Settings → Integrations** and add a remote MCP server
+2. URL: `https://your-app/mcp` (or `http://localhost:8080/mcp` locally)
+3. Auth: Bearer token — paste the value of `MCP_TOKEN` from your `.env`
+
+Once connected, Claude can log meals, caffeine, alcohol, weight, and blood pressure directly from conversation, and query your health history.
 
 ### Logging tools
 
@@ -178,20 +186,27 @@ The app fires a webhook after each morning import when today's sleep score arriv
 
 ### Setup
 
+1. Go to [claude.ai/code/routines](https://claude.ai/code/routines) and click **New Routine**
+2. Choose **API trigger** — Claude will generate a webhook URL and a secret token
+3. Paste your prompt (see example below)
+4. Copy the webhook URL and secret into your `.env`:
+
 ```env
-MORNING_WEBHOOK_URL=https://...
-MORNING_WEBHOOK_SECRET=your-secret   # sent as Bearer token; optional but recommended
+MORNING_WEBHOOK_URL=https://...   # the URL Claude gave you
+MORNING_WEBHOOK_SECRET=...        # the secret Claude gave you
 ```
 
-The webhook sends a `POST {}` to `MORNING_WEBHOOK_URL` with `Authorization: Bearer <MORNING_WEBHOOK_SECRET>` in the header.
+The app sends a `POST {}` to `MORNING_WEBHOOK_URL` with `Authorization: Bearer <MORNING_WEBHOOK_SECRET>` after each morning import when the day's sleep score first arrives.
 
-### Example: daily workout planning with Claude
+### Example prompt
 
-Wire the webhook to any service that can receive an HTTP call and invoke Claude — for example a Claude.ai project with a scheduled prompt, Make/Zapier, or a small serverless function. The prompt can be as simple as:
+```
+Call get_workout_context() on the Mainspring MCP server, then recommend
+today's workout and explain your reasoning. If I have a goal event coming
+up, factor in the training block. Reply in 3–4 sentences.
+```
 
-> Call `get_workout_context()` on the Mainspring MCP server, then recommend today's workout and explain your reasoning. If I have a goal event coming up, factor in the training block. Reply in 3–4 sentences.
-
-Claude will call `get_workout_context()`, which returns HRV, sleep score, TSB (form), week volume so far, yesterday's RPE, the next upcoming race, Garmin's suggestion, and correlation-derived insights about which behaviors most affect your recovery. It then synthesises all of that into a single actionable recommendation.
+`get_workout_context()` returns HRV, sleep score, TSB (form), week volume so far, yesterday's RPE, the next upcoming race, Garmin's suggested workout, and correlation-derived insights about which behaviors most affect your recovery. Claude synthesises all of that into a single actionable recommendation.
 
 You can extend the prompt to also check weather, suggest a specific route, or send the result somewhere (email, Slack, push notification).
 
@@ -321,7 +336,7 @@ These queries run directly in the Datasette UI — no setup required. You can al
 
 ## Deploying to Fly.io
 
-The `fly.toml` and `deploy.sh` deploy to [Fly.io](https://fly.io). This is optional — Docker Compose is the primary path.
+The `fly.toml` and `scripts/fly-deploy.sh` deploy to [Fly.io](https://fly.io). This is optional — Docker Compose is the primary path.
 
 ```bash
 fly auth login
@@ -333,13 +348,31 @@ fly secrets set \
   ADMIN_TOKEN=... \
   DATASETTE_TOKEN=... \
   EXPORT_TOKEN=... \
+  MCP_TOKEN=... \
   HOME_TZ=Europe/Berlin \
   GARMINTOKENS='...' \
   GOOGLE_CLIENT_ID=... \
   GOOGLE_CLIENT_SECRET=...
 
-./deploy.sh
+./scripts/fly-deploy.sh
 ```
 
-`deploy.sh` also updates the hourly scheduler machine. The app auto-stops when idle; the scheduler uses the public URL so the Fly proxy wakes it on each import run.
+The app auto-stops when idle and wakes on the first incoming request.
+
+### Scheduled imports on Fly.io
+
+`fly-deploy.sh` manages a dedicated Fly Machine that runs the importers hourly. On first run it creates the scheduler machine automatically; on subsequent deploys it updates it to the new image. No manual setup required.
+
+The scheduler calls the app via its public URL so the Fly proxy wakes the auto-stopped app machine on each run.
+
+**Fallback: GitHub Actions**
+
+The included `.github/workflows/import.yml` provides a secondary hourly trigger via GitHub Actions. To enable it, add two secrets to your repository (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|---|---|
+| `MAINSPRING_URL` | Your app's public URL, e.g. `https://your-app.fly.dev` |
+| `MAINSPRING_ADMIN_TOKEN` | The value of `ADMIN_TOKEN` from your `.env` |
+
+The workflow also has a manual trigger that lets you run a backfill for a specific date range.
 

@@ -10,7 +10,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import altair as alt
 from fastapi import APIRouter, Cookie, Form, Request
@@ -74,6 +74,13 @@ def _scalar(conn, sql: str, params: tuple = ()):
 
 # ── chart builders ────────────────────────────────────────────────────────────
 
+def _dark(chart: alt.Chart, title: bool = False) -> alt.Chart:
+    """Apply standard dark-theme configure to a chart."""
+    c = (chart
+         .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
+         .configure_view(strokeWidth=0, fill="#1a1a1a"))
+    return c.configure_title(color="#ccc") if title else c
+
 def _sparkline(rows: list[dict], field: str, color: str = "#4e9af1") -> str:
     if not rows:
         return "{}"
@@ -106,13 +113,9 @@ def _trend_chart(rows: list[dict], field: str, avg_field: str, title: str,
         y=f"{avg_field}:Q",
         tooltip=[alt.Tooltip(f"{avg_field}:Q", title="7d avg")],
     )
-    return (
-        alt.layer(line, avg)
-        .properties(width="container", height=height)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .to_json()
-    )
+    return _dark(
+        alt.layer(line, avg).properties(width="container", height=height)
+    ).to_json()
 
 
 def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
@@ -149,18 +152,12 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
         )
     else:
         combined = score_chart.properties(width="container")
-    import json as _json
-    spec = _json.loads(
-        combined
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .to_json()
-    )
+    spec = json.loads(_dark(combined).to_json())
     # width="container" must be on each sub-chart individually; setting it at the
     # vconcat top level or via autosize leaves sub-charts at their ~300px default.
     for sub in spec.get("vconcat", []):
         sub["width"] = "container"
-    return _json.dumps(spec)
+    return json.dumps(spec)
 
 
 def _zone_load_chart(rows: list[dict]) -> str:
@@ -192,10 +189,8 @@ def _zone_load_chart(rows: list[dict]) -> str:
             tooltip=["date:T", "zone:N", alt.Tooltip("load:Q", format=".0f")],
         )
         .properties(width="container", height=200)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
     )
-    return chart.to_json()
+    return _dark(chart).to_json()
 
 
 def _hr_chart(rows: list[dict]) -> str:
@@ -224,13 +219,9 @@ def _hr_chart(rows: list[dict]) -> str:
             y=alt.Y("max_hr:Q", scale=alt.Scale(zero=False)),
             tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("max_hr:Q", title="Max HR (activity)")],
         ))
-    return (
-        alt.layer(*layers)
-        .properties(width="container", height=200)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .to_json()
-    )
+    return _dark(
+        alt.layer(*layers).properties(width="container", height=200)
+    ).to_json()
 
 
 def _body_battery_chart(rows: list[dict]) -> str:
@@ -246,10 +237,8 @@ def _body_battery_chart(rows: list[dict]) -> str:
             tooltip=["date:T", "body_battery_high:Q", "body_battery_low:Q"],
         )
         .properties(width="container", height=160)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
     )
-    return chart.to_json()
+    return _dark(chart).to_json()
 
 
 def _diverging_bar_chart(rows: list[dict], field: str, title: str,
@@ -274,10 +263,8 @@ def _diverging_bar_chart(rows: list[dict], field: str, title: str,
                      alt.Tooltip(f"{field}:Q", title=title, format=".1f")],
         )
         .properties(width="container", height=160)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
     )
-    return chart.to_json()
+    return _dark(chart).to_json()
 
 
 def _dow_avg_chart(rows: list[dict], title: str, color: str) -> str:
@@ -295,10 +282,8 @@ def _dow_avg_chart(rows: list[dict], title: str, color: str) -> str:
             tooltip=["dow_name:N", alt.Tooltip("avg_val:Q", title=title, format=".1f")],
         )
         .properties(width="container", height=120)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
     )
-    return chart.to_json()
+    return _dark(chart).to_json()
 
 
 def _compute_dow_avgs(rows: list[dict], field: str) -> list[dict]:
@@ -319,10 +304,9 @@ def _compute_dow_avgs(rows: list[dict], field: str) -> list[dict]:
 
 
 def _heatmap_to_json(chart: alt.Chart) -> str:
-    import json as _json
-    spec = _json.loads(chart.to_json())
+    spec = json.loads(chart.to_json())
     spec["autosize"] = {"type": "fit-x", "contains": "padding"}
-    return _json.dumps(spec)
+    return json.dumps(spec)
 
 
 def _calendar_heatmap(rows: list[dict], field: str, title: str,
@@ -446,14 +430,9 @@ def _pmc_chart(rows: list[dict]) -> str:
             )
         )
 
-    return (
-        alt.layer(*layers)
-        .resolve_scale(y="shared")
-        .properties(width="container", height=220)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .to_json()
-    )
+    return _dark(
+        alt.layer(*layers).resolve_scale(y="shared").properties(width="container", height=220)
+    ).to_json()
 
 
 def _activity_end_local_hour(start_time: str, duration_s: int, browser_tz: str | None) -> float | None:
@@ -517,10 +496,8 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
     return (
         alt.layer(area, line, peak_dot)
         .properties(width="container", height=160)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .to_json()
     )
+    return _dark(chart).to_json()
 
 
 def _activity_bar(rows: list[dict], field: str, y_title: str) -> str:
@@ -536,10 +513,8 @@ def _activity_bar(rows: list[dict], field: str, y_title: str) -> str:
             tooltip=["type:N", alt.Tooltip(f"{field}:Q", title=y_title)],
         )
         .properties(width="container", height=200)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
     )
-    return chart.to_json()
+    return _dark(chart).to_json()
 
 
 def _weekly_volume_chart(rows: list[dict]) -> str:
@@ -555,10 +530,8 @@ def _weekly_volume_chart(rows: list[dict]) -> str:
             tooltip=["week:O", "type:N", alt.Tooltip("duration_min:Q", title="Min")],
         )
         .properties(width="container", height=220)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
     )
-    return chart.to_json()
+    return _dark(chart).to_json()
 
 
 def _daily_bar_chart(rows: list[dict], field: str, title: str,
@@ -586,13 +559,9 @@ def _daily_bar_chart(rows: list[dict], field: str, title: str,
             .encode(y="ref:Q")
         )
         layers.append(rule)
-    return (
-        alt.layer(*layers)
-        .properties(width="container", height=200)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .to_json()
-    )
+    return _dark(
+        alt.layer(*layers).properties(width="container", height=200)
+    ).to_json()
 
 
 def _macro_dow_chart(rows: list[dict]) -> str:
@@ -613,11 +582,8 @@ def _macro_dow_chart(rows: list[dict]) -> str:
             tooltip=["dow_name:N", "macro:N", alt.Tooltip("avg_g:Q", title="Avg g", format=".1f")],
         )
         .properties(width="container", height=220, title="Average macros by day of week")
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .configure_title(color="#ccc")
     )
-    return chart.to_json()
+    return _dark(chart, title=True).to_json()
 
 
 def _sparse_line_chart(rows: list[dict], field: str, title: str,
@@ -644,13 +610,9 @@ def _sparse_line_chart(rows: list[dict], field: str, title: str,
             .encode(y="y1:Q", y2="y2:Q")
         )
         layers = [bands] + layers
-    return (
-        alt.layer(*layers)
-        .properties(width="container", height=180)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .to_json()
-    )
+    return _dark(
+        alt.layer(*layers).properties(width="container", height=180)
+    ).to_json()
 
 
 def _bp_chart(rows: list[dict]) -> str:
@@ -687,13 +649,9 @@ def _bp_chart(rows: list[dict]) -> str:
         color=alt.Color("reading:N", legend=None),
         tooltip=["date:T", "reading:N", alt.Tooltip("mmhg:Q", title="mmHg")],
     )
-    return (
-        alt.layer(bands, lines, dots)
-        .properties(width="container", height=200)
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .to_json()
-    )
+    return _dark(
+        alt.layer(bands, lines, dots).properties(width="container", height=200)
+    ).to_json()
 
 
 def _pace_trend_chart(rows: list[dict]) -> str:
@@ -715,14 +673,10 @@ def _pace_trend_chart(rows: list[dict]) -> str:
         x="date:T",
         y="pace_4w_avg:Q",
     )
-    return (
-        alt.layer(dots, avg)
-        .properties(width="container", height=200, title="Running pace trend")
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .configure_title(color="#ccc")
-        .to_json()
-    )
+    return _dark(
+        alt.layer(dots, avg).properties(width="container", height=200, title="Running pace trend"),
+        title=True,
+    ).to_json()
 
 
 def _hr_efficiency_chart(rows: list[dict]) -> str:
@@ -745,11 +699,8 @@ def _hr_efficiency_chart(rows: list[dict]) -> str:
             ],
         )
         .properties(width="container", height=240, title="HR efficiency (pace vs avg HR) — color = recency, darker = older")
-        .configure_axis(grid=True, gridColor="#333", labelColor="#aaa", titleColor="#aaa")
-        .configure_view(strokeWidth=0, fill="#1a1a1a")
-        .configure_title(color="#ccc")
     )
-    return chart.to_json()
+    return _dark(chart, title=True).to_json()
 
 
 # ── login ─────────────────────────────────────────────────────────────────────
@@ -792,13 +743,11 @@ def _get_tz(browser_tz: str | None = None):
             return ZoneInfo(name)
         except (ZoneInfoNotFoundError, Exception):
             continue
-    from zoneinfo import ZoneInfo
     return ZoneInfo("UTC")
 
 
 def _local_now(browser_tz: str | None = None) -> datetime:
     """Current datetime in the best available local timezone."""
-    from datetime import timezone
     return datetime.now(timezone.utc).astimezone(_get_tz(browser_tz))
 
 
@@ -807,7 +756,6 @@ def _local_day_utc_bounds(local_date_str: str, browser_tz: str | None = None) ->
     Return (utc_start, utc_end) ISO strings bracketing a local calendar day.
     Used for ts >= utc_start AND ts < utc_end queries on manual_logs.ts (stored UTC).
     """
-    from datetime import timezone
     tz = _get_tz(browser_tz)
     naive = datetime.strptime(local_date_str, "%Y-%m-%d")
     start = naive.replace(tzinfo=tz).astimezone(timezone.utc)
@@ -820,7 +768,6 @@ def _local_window_utc_start(days_int: int, browser_tz: str | None = None) -> str
     Return UTC ISO string for local midnight N days ago — the correct lower bound
     for range queries on manual_logs.ts when the user wants the last N local days.
     """
-    from datetime import timezone
     tz = _get_tz(browser_tz)
     local_now = datetime.now(timezone.utc).astimezone(tz)
     local_start = (local_now - timedelta(days=days_int)).replace(
@@ -831,7 +778,6 @@ def _local_window_utc_start(days_int: int, browser_tz: str | None = None) -> str
 def _utc_to_local_hour(ts_str: str, browser_tz: str | None = None) -> float | None:
     """Convert UTC ISO timestamp string to local hour-of-day float."""
     try:
-        from datetime import timezone
         dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -1136,11 +1082,10 @@ async def behavior(request: Request, days: str = "30",
         else:
             r["hrv_delta"] = None
 
-    from datetime import date as _date, timedelta
     days_int = int(days) if str(days).isdigit() else 30
     x_domain = [
-        (_date.today() - timedelta(days=days_int)).isoformat(),
-        _date.today().isoformat(),
+        (date.today() - timedelta(days=days_int)).isoformat(),
+        date.today().isoformat(),
     ]
 
     hrv_delta_rows = [r for r in rows if r.get("hrv_delta") is not None]
@@ -1347,6 +1292,12 @@ async def activities(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
+        vo2max_rows = _rows(conn, """
+            SELECT date, vo2max FROM daily_metrics
+            WHERE date >= date('now', ?) AND vo2max IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
     # Compute pace (min/km) and rolling 4-week avg in Python
     pace_rows = []
     for r in pace_raw:
@@ -1362,13 +1313,6 @@ async def activities(request: Request, days: str = "30",
 
     # HR efficiency: runs with both avg_hr and pace
     hr_eff_rows = [r for r in pace_rows if r.get("avg_hr")]
-
-    with db() as conn:
-        vo2max_rows = _rows(conn, """
-            SELECT date, vo2max FROM daily_metrics
-            WHERE date >= date('now', ?) AND vo2max IS NOT NULL
-            ORDER BY date
-        """, (clause,))
 
     return templates.TemplateResponse(request, "activities.html", {
         "days": days,

@@ -326,18 +326,11 @@ def get_suggested_workout(date: Optional[str] = None) -> dict | None:
         ).fetchone()
 
         metrics = conn.execute(
-            "SELECT training_readiness, hrv, stress_avg FROM daily_metrics WHERE date=?",
+            """SELECT training_readiness, hrv, stress_avg,
+                      acute_training_load, chronic_training_load, training_load_ratio
+               FROM daily_metrics WHERE date=?""",
             (d,),
         ).fetchone()
-
-        load = conn.execute(
-            """
-            SELECT metric, value FROM raw_daily_metrics
-            WHERE date=? AND source='garmin'
-              AND metric IN ('acute_training_load','chronic_training_load','training_load_ratio')
-            """,
-            (d,),
-        ).fetchall()
 
     if not sw:
         return None
@@ -349,8 +342,12 @@ def get_suggested_workout(date: Optional[str] = None) -> dict | None:
             "hrv": metrics[1],
             "stress_avg": metrics[2],
         }
-    for row in load:
-        context[row[0]] = row[1]
+        for key, val in zip(
+            ("acute_training_load", "chronic_training_load", "training_load_ratio"),
+            metrics[3:],
+        ):
+            if val is not None:
+                context[key] = val
 
     return {
         "date": d,
@@ -765,13 +762,13 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
 
     # ── week progress ─────────────────────────────────────────────────────────
     run_types = {"running", "run", "trail_running", "treadmill_running"}
-    strength_types = {"strength_training", "strength", "weight_training", "gym"}
+    strength_types = {"strength", "weight", "gym"}
     runs = sum(1 for a in week_acts if (a[0] or "").lower().replace(" ", "_") in run_types
                or "run" in (a[0] or "").lower())
     volume_km = sum((a[2] or 0) / 1000 for a in week_acts
                     if "run" in (a[0] or "").lower())
     strength = sum(1 for a in week_acts if any(s in (a[0] or "").lower()
-                   for s in ("strength", "weight", "gym")))
+                   for s in strength_types))
 
     week_progress: dict = {"runs": runs, "volume_km": round(volume_km, 1), "strength_sessions": strength}
     if "weekly_runs" in goals:
