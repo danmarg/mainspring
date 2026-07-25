@@ -201,9 +201,10 @@ function msChangeDays(val) {
     if (idx === -1) return;
     var next = dx < 0 ? TABS[idx + 1] : TABS[idx - 1];
     if (!next) return;
+    e.preventDefault();
     var days = new URLSearchParams(window.location.search).get('days');
     window.location.href = next + (days ? '?days=' + days : '');
-  }, {passive: true});
+  }, {passive: false});
 })();
 
 function embed(id, spec) {
