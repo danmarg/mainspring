@@ -493,11 +493,9 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
                 tooltip=[alt.Tooltip("label:N", title="Peak time"),
                          alt.Tooltip("alertness:Q", title="Peak", format=".0f")])
     )
-    return (
-        alt.layer(area, line, peak_dot)
-        .properties(width="container", height=160)
-    )
-    return _dark(chart).to_json()
+    return _dark(
+        alt.layer(area, line, peak_dot).properties(width="container", height=160)
+    ).to_json()
 
 
 def _activity_bar(rows: list[dict], field: str, y_title: str) -> str:
