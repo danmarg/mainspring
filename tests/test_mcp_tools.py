@@ -236,10 +236,9 @@ def test_get_suggested_workout_returns_with_context():
         ("2025-01-01", "garmin", "recovery", "Easy 30 min jog", 30.0, "low", utc_now()),
     )
     conn.execute(
-        "INSERT INTO daily_metrics(date, training_readiness, hrv, stress_avg, source_flags_json) VALUES (?,?,?,?,?)",
-        ("2025-01-01", 68.0, 54.0, 32.0, "{}"),
+        "INSERT INTO daily_metrics(date, training_readiness, hrv, stress_avg, acute_training_load, source_flags_json) VALUES (?,?,?,?,?,?)",
+        ("2025-01-01", 68.0, 54.0, 32.0, 280.0, "{}"),
     )
-    upsert_raw_metric(conn, "2025-01-01", "garmin", "acute_training_load", 280.0, utc_now())
     conn.commit()
     conn.close()
 
@@ -334,3 +333,103 @@ def test_bearer_middleware_rejects_missing_token():
     responses = asyncio.run(_call_middleware(mw, token=None))
     statuses = [r["status"] for r in responses if "status" in r]
     assert 401 in statuses
+
+
+# ── T3: log_weight and log_blood_pressure ────────────────────────────────────
+
+def test_log_weight():
+    from app.mcp_server import log_weight
+    result = log_weight(kg=82.5, ts="2025-06-01T09:00:00+00:00")
+    assert "82.5" in result
+
+    # _renormalize_date runs synchronously, so daily_metrics should be updated
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    row = conn.execute("SELECT weight_kg FROM daily_metrics WHERE date='2025-06-01'").fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == 82.5
+
+
+def test_log_blood_pressure():
+    from app.mcp_server import log_blood_pressure
+    result = log_blood_pressure(systolic=125, diastolic=82, pulse=68, ts="2025-06-01T08:00:00+00:00")
+    assert "125" in result
+    assert "82" in result
+    assert "68" in result
+
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    row = conn.execute(
+        "SELECT bp_systolic, bp_diastolic FROM daily_metrics WHERE date='2025-06-01'"
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == 125
+    assert row[1] == 82
+
+
+def test_log_rpe_validates_range():
+    from app.mcp_server import log_rpe
+    assert "Error" in log_rpe(rpe=11)
+    assert "Error" in log_rpe(rpe=0)
+    result = log_rpe(rpe=7, activity_type="running")
+    assert "Error" not in result
+    assert "7" in result
+
+
+# ── T9: TZ boundary test for get_logs ────────────────────────────────────────
+
+def test_get_logs_tz_boundary():
+    """A log at 23:30 UTC on Jan 1 is on Jan 2 in Europe/Berlin (+1h in winter)."""
+    from app.mcp_server import log_caffeine, get_logs
+    # 2025-01-01T23:30 UTC = 2025-01-02T00:30 Europe/Berlin (UTC+1 in January)
+    log_caffeine(description="late coffee", amount_mg=80, ts="2025-01-01T23:30:00+00:00")
+
+    # In Europe/Berlin it is Jan 2, so Jan 1 query should be empty
+    results_berlin_jan1 = get_logs("2025-01-01", "2025-01-01", tz="Europe/Berlin")
+    assert len(results_berlin_jan1) == 0
+
+    # In Europe/Berlin it is Jan 2
+    results_berlin_jan2 = get_logs("2025-01-02", "2025-01-02", tz="Europe/Berlin")
+    assert len(results_berlin_jan2) == 1
+
+    # In UTC it is still Jan 1
+    results_utc_jan1 = get_logs("2025-01-01", "2025-01-01", tz="UTC")
+    assert len(results_utc_jan1) == 1
+
+
+# ── T1: get_workout_context smoke test ───────────────────────────────────────
+
+def test_get_workout_context():
+    from app.mcp_server import get_workout_context
+    from app.db import utc_now
+
+    target_date = "2025-01-07"
+    # Seed one week of daily_metrics
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    for i, d in enumerate([
+        "2025-01-01", "2025-01-02", "2025-01-03",
+        "2025-01-04", "2025-01-05", "2025-01-06", "2025-01-07",
+    ]):
+        conn.execute(
+            """INSERT INTO daily_metrics(
+                date, hrv, sleep_score, training_readiness,
+                acute_training_load, chronic_training_load, source_flags_json
+            ) VALUES (?,?,?,?,?,?,?)""",
+            (d, 55.0 + i, 78.0, 68.0, 280.0, 310.0, "{}"),
+        )
+    # Add a suggested workout for the target date
+    conn.execute(
+        "INSERT INTO suggested_workouts(date, source, workout_type, description, "
+        "target_duration_min, target_intensity, fetched_at) VALUES (?,?,?,?,?,?,?)",
+        (target_date, "garmin", "base", "Easy 45 min jog", 45.0, "low", utc_now()),
+    )
+    conn.commit()
+    conn.close()
+
+    result = get_workout_context(date=target_date)
+    assert result is not None
+    assert "today" in result
+    assert "week_progress" in result
+    # training_readiness lives inside "today"
+    assert result["today"]["training_readiness"] is not None
+    assert isinstance(result["today"]["hrv"], (int, float))
