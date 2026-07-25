@@ -349,6 +349,7 @@ fly secrets set \
   DATASETTE_TOKEN=... \
   EXPORT_TOKEN=... \
   MCP_TOKEN=... \
+  APP_BASE_URL=https://your-app.fly.dev \
   HOME_TZ=Europe/Berlin \
   GARMINTOKENS='...' \
   GOOGLE_CLIENT_ID=... \

@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-BASE_URL="${BASE_URL:-https://your-app.fly.dev}"
+BASE_URL="${BASE_URL:?BASE_URL env var required (e.g. https://your-app.fly.dev or http://localhost:8080)}"
 START="${1:?Usage: backfill.sh START_DATE END_DATE [source]}"
 END="${2:?Usage: backfill.sh START_DATE END_DATE [source]}"
 SOURCE_FILTER="${3:-both}"  # garmin | google_health | both

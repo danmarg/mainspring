@@ -6,7 +6,8 @@ set -euo pipefail
 # On subsequent runs, updates the scheduler machine to the new image automatically.
 # Usage: ./fly-deploy.sh
 
-APP=mainspring
+# Read app name from fly.toml so there's one place to change it
+APP=$(grep '^app = ' fly.toml | sed 's/app = "\([^"]*\)".*/\1/')
 APP_URL="https://${APP}.fly.dev"
 
 echo "==> Deploying app..."
