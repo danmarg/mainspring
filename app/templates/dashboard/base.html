@@ -33,6 +33,14 @@
   nav a:hover { color: var(--text); }
   nav a.active { color: var(--text); border-bottom-color: var(--accent); }
 
+  .import-status {
+    display: flex; gap: 0.9rem; flex-wrap: wrap;
+    padding: 0.35rem 1.5rem; font-size: 0.72rem; color: var(--text-muted);
+    background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  .import-chip::before { content: "●"; color: var(--green); margin-right: 0.3rem; font-size: 0.65rem; }
+  .import-chip.stale::before { color: var(--red); }
+
   main { max-width: 1280px; margin: 0 auto; padding: 1.5rem 1.5rem 3rem; }
 
   h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 1.2rem; color: var(--text); }
@@ -129,6 +137,20 @@
     <a href="/datasette">Datasette ↗</a>
   </div>
 </nav>
+<div class="import-status">
+  {% for src in import_status() %}
+  <span class="import-chip{% if src.stale %} stale{% endif %}"
+        title="{{ src.status }}">
+    {{ src.source }}
+    {%- if src.ago_min is not none %}
+      {% if src.ago_min < 60 %} · {{ src.ago_min }}m ago
+      {% else %} · {{ (src.ago_min / 60) | round(1) }}h ago
+      {% endif %}
+    {%- else %} · never
+    {%- endif %}
+  </span>
+  {% endfor %}
+</div>
 <main>
 {% block content %}{% endblock %}
 </main>

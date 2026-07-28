@@ -108,6 +108,20 @@ def upsert_raw_payload(
     date: str | None = None,
     fetched_at: str | None = None,
 ) -> None:
+    """Insert the raw payload, skipping it if byte-identical to the most recent
+    stored payload for this (source, endpoint, date) — rolling-window imports
+    re-fetch the same days repeatedly, so most re-fetches have unchanged
+    content and would otherwise duplicate storage forever."""
+    row = conn.execute(
+        """
+        SELECT payload_json FROM raw_import_payloads
+        WHERE source=? AND endpoint=? AND date IS ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (source, endpoint, date),
+    ).fetchone()
+    if row and row[0] == payload_json:
+        return
     conn.execute(
         """
         INSERT INTO raw_import_payloads(source, endpoint, date, payload_json, fetched_at)
