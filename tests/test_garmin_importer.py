@@ -6,6 +6,7 @@ Verifies: raw payload storage, metric parsing, activity upsert, graceful no-op.
 import json
 import os
 import sqlite3
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,6 +24,7 @@ from app.importers.garmin import (
     _parse_training_readiness,
     _parse_training_status,
     _upsert_activity,
+    backfill_decoupling,
     run_import,
 )
 
@@ -327,6 +329,35 @@ def test_compute_decoupling_ignores_malformed_laps():
         {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 150},
     ]
     assert _compute_decoupling(splits) is not None
+
+
+def test_backfill_decoupling_no_credentials(tmp_db, monkeypatch):
+    monkeypatch.delenv("GARMIN_EMAIL", raising=False)
+    monkeypatch.delenv("GARMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("GARMINTOKENS", raising=False)
+    assert backfill_decoupling(tmp_db, days=90) == 0
+
+
+def test_backfill_decoupling_computes_for_existing_activity(tmp_db, monkeypatch):
+    monkeypatch.setenv("GARMINTOKENS", "fake-token-store-value-that-is-long-enough-to-be-treated-as-token-data-not-a-path-xxxxxxxxx")
+
+    activity_date = (date.today() - timedelta(days=10)).isoformat()
+    tmp_db.execute(
+        """
+        INSERT INTO garmin_activities (activity_id, date, start_time, type, duration_s, distance_m, avg_hr, calories, fetched_at)
+        VALUES ('555', ?, ?, 'running', 1800, 5000.0, 145, 400, ?)
+        """,
+        (activity_date, f"{activity_date}T07:00:00", f"{activity_date}T07:00:00+00:00"),
+    )
+    tmp_db.commit()
+
+    mock_client = _make_mock_client()
+    with patch("app.importers.garmin._client", return_value=mock_client):
+        computed = backfill_decoupling(tmp_db, days=365)
+
+    assert computed == 1
+    row = tmp_db.execute("SELECT decoupling_pct FROM garmin_activities WHERE activity_id='555'").fetchone()
+    assert row[0] is not None
 
 
 def test_run_import_no_credentials(tmp_db, monkeypatch):
