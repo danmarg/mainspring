@@ -137,7 +137,11 @@ def _post(conn, path: str, body: dict, tokens: dict) -> Any | None:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
             if e.code == 401 and attempt == 0:
-                tokens = _refresh(conn, tokens)
+                # Mutate in place (not `tokens = _refresh(...)`) so the caller's
+                # dict — shared across every endpoint call in run_import's loop —
+                # sees the refreshed access token too, instead of re-refreshing
+                # from a stale token on every subsequent call this run.
+                tokens.update(_refresh(conn, tokens))
             elif e.code == 429:
                 log.warning("google_health: rate limited on %s", path)
                 return None
@@ -171,7 +175,11 @@ def _get(conn, path: str, params: dict, tokens: dict) -> Any | None:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
             if e.code == 401 and attempt == 0:
-                tokens = _refresh(conn, tokens)
+                # Mutate in place (not `tokens = _refresh(...)`) so the caller's
+                # dict — shared across every endpoint call in run_import's loop —
+                # sees the refreshed access token too, instead of re-refreshing
+                # from a stale token on every subsequent call this run.
+                tokens.update(_refresh(conn, tokens))
             elif e.code == 429:
                 log.warning("google_health: rate limited on GET %s", path)
                 return None
