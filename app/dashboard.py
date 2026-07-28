@@ -17,7 +17,7 @@ from fastapi import APIRouter, Cookie, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from app.db import db
+from app.db import db, DEFAULT_SOURCE_PRIORITY
 from app.readiness import alertness_curve, readiness_from_db
 
 log = logging.getLogger(__name__)
@@ -73,14 +73,16 @@ def _scalar(conn, sql: str, params: tuple = ()):
 
 
 def _import_status_summary() -> list[dict]:
-    """Most recent import_runs row per source, for the nav status strip."""
+    """Most recent import_runs row per active source, for the nav status strip."""
+    placeholders = ",".join("?" * len(DEFAULT_SOURCE_PRIORITY))
     with db() as conn:
-        rows = _rows(conn, """
+        rows = _rows(conn, f"""
             SELECT source, finished_at, started_at, status
             FROM import_runs
-            WHERE id IN (SELECT MAX(id) FROM import_runs GROUP BY source)
+            WHERE source IN ({placeholders})
+              AND id IN (SELECT MAX(id) FROM import_runs GROUP BY source)
             ORDER BY source
-        """)
+        """, tuple(DEFAULT_SOURCE_PRIORITY))
     now = datetime.now(timezone.utc)
     out = []
     for r in rows:
