@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS garmin_activities (
   training_effect_aerobic   REAL,
   training_effect_anaerobic REAL,
   calories                  INTEGER,
+  decoupling_pct            REAL,   -- aerobic decoupling: % HR:pace drift, first half vs second half
   raw_json                  TEXT,
   fetched_at                TEXT
 );
@@ -70,6 +71,7 @@ CREATE TABLE IF NOT EXISTS activities (
   avg_hr                    INTEGER,
   max_hr                    INTEGER,
   calories                  INTEGER,
+  decoupling_pct            REAL,
   canonical_source          TEXT,
   garmin_activity_id        TEXT,
   google_health_activity_id TEXT

@@ -13,9 +13,11 @@ import pytest
 import app.db as db_module
 from app.db import init_db, utc_now
 from app.importers.garmin import (
+    _compute_decoupling,
     _parse_body_battery,
     _parse_hrv,
     _parse_sleep,
+    _parse_splits,
     _parse_stats,
     _parse_stress,
     _parse_training_readiness,
@@ -255,6 +257,16 @@ def _make_mock_client():
     client.get_respiration_data.return_value = MOCK_RESPIRATION
     client.get_intensity_minutes_data.return_value = MOCK_INTENSITY
     client.get_heart_rates.return_value = MOCK_HEART_RATES
+    client.get_activity_splits.return_value = {
+        "lapDTOs": [
+            {"distance": 1000.0, "duration": 300, "averageHR": 135},
+            {"distance": 1000.0, "duration": 300, "averageHR": 138},
+            {"distance": 1000.0, "duration": 300, "averageHR": 140},
+            {"distance": 1000.0, "duration": 300, "averageHR": 145},
+            {"distance": 1000.0, "duration": 300, "averageHR": 148},
+            {"distance": 1000.0, "duration": 300, "averageHR": 150},
+        ]
+    }
     client.get_scheduled_workouts.return_value = [
         {
             "date": "2025-01-01",
@@ -265,6 +277,56 @@ def _make_mock_client():
         }
     ]
     return client
+
+
+# ── aerobic decoupling ───────────────────────────────────────────────────────
+
+def test_parse_splits():
+    data = {"lapDTOs": [{"distance": 1000.0, "duration": 300, "averageHR": 140}]}
+    assert _parse_splits(data) == [{"distance_m": 1000.0, "duration_s": 300, "avg_hr": 140}]
+
+
+def test_parse_splits_empty():
+    assert _parse_splits({}) == []
+
+
+def test_compute_decoupling_hr_drift_is_positive():
+    # steady pace, HR climbs from 135 to 150 across 6 even laps -> HR:pace ratio rises
+    splits = [
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 135},
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 138},
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 140},
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 145},
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 148},
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 150},
+    ]
+    result = _compute_decoupling(splits)
+    assert result is not None
+    assert result > 0
+
+
+def test_compute_decoupling_steady_effort_near_zero():
+    splits = [{"distance_m": 1000.0, "duration_s": 300, "avg_hr": 140} for _ in range(6)]
+    assert _compute_decoupling(splits) == 0.0
+
+
+def test_compute_decoupling_too_few_splits():
+    splits = [{"distance_m": 1000.0, "duration_s": 300, "avg_hr": 140} for _ in range(3)]
+    assert _compute_decoupling(splits) is None
+
+
+def test_compute_decoupling_ignores_malformed_laps():
+    # one lap missing distance_m is filtered internally; 5 remaining valid
+    # laps is still >= the 4-lap minimum, so this should still compute.
+    splits = [
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 135},
+        {"distance_m": None, "duration_s": 300, "avg_hr": 138},
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 140},
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 145},
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 148},
+        {"distance_m": 1000.0, "duration_s": 300, "avg_hr": 150},
+    ]
+    assert _compute_decoupling(splits) is not None
 
 
 def test_run_import_no_credentials(tmp_db, monkeypatch):
