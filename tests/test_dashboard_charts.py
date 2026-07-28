@@ -15,6 +15,7 @@ from app.dashboard import (
     _daily_bar_chart,
     _diverging_bar_chart,
     _dow_avg_chart,
+    _running_economy_chart,
     _sleep_chart,
     _sparse_line_chart,
     _trend_chart,
@@ -89,6 +90,13 @@ def test_diverging_bar_chart_negative():
     assert result != "{}"
 
 
+def test_diverging_bar_chart_invert_color_valid():
+    rows = [{"date": "2025-01-01", "decoupling_pct": 6.0}]
+    result = _diverging_bar_chart(rows, "decoupling_pct", "Aerobic decoupling (%)", invert_color=True)
+    assert _is_valid_json(result)
+    assert result != "{}"
+
+
 # ── _daily_bar_chart ──────────────────────────────────────────────────────────
 
 def test_daily_bar_chart_empty():
@@ -158,3 +166,40 @@ def test_bp_chart_valid():
     result = _bp_chart(rows)
     assert _is_valid_json(result)
     assert result != "{}"
+
+
+# ── _running_economy_chart ────────────────────────────────────────────────────
+
+def test_running_economy_chart_empty():
+    assert _running_economy_chart([]) == "{}"
+
+
+def test_running_economy_chart_too_few_rows():
+    rows = [
+        {"date": "2025-01-01", "pace_min_km": 5.5, "avg_hr": 140},
+        {"date": "2025-01-02", "pace_min_km": 5.4, "avg_hr": 138},
+    ]
+    assert _running_economy_chart(rows) == "{}"
+
+
+def test_running_economy_chart_valid():
+    rows = [
+        {"date": "2025-01-01", "pace_min_km": 5.5, "avg_hr": 145},
+        {"date": "2025-01-08", "pace_min_km": 5.45, "avg_hr": 142},
+        {"date": "2025-01-15", "pace_min_km": 5.5, "avg_hr": 140},
+        {"date": "2025-01-22", "pace_min_km": 5.48, "avg_hr": 138},
+    ]
+    result = _running_economy_chart(rows)
+    assert _is_valid_json(result)
+    assert result != "{}"
+
+
+def test_running_economy_chart_band_excludes_outlier_paces():
+    # One run far outside the pace band should be excluded, dropping below
+    # the 3-row minimum even though 4 rows were passed in.
+    rows = [
+        {"date": "2025-01-01", "pace_min_km": 5.5, "avg_hr": 145},
+        {"date": "2025-01-08", "pace_min_km": 5.5, "avg_hr": 142},
+        {"date": "2025-01-15", "pace_min_km": 9.0, "avg_hr": 160},
+    ]
+    assert _running_economy_chart(rows) == "{}"

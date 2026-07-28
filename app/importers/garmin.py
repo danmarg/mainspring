@@ -368,6 +368,85 @@ def _parse_intensity_minutes(conn, date_str: str, data: dict | list) -> int:
     return rows
 
 
+# running-type activity types worth checking for aerobic decoupling
+_RUNNING_TYPES = {"running", "trail_running", "treadmill_running", "track_running", "street_running"}
+_MIN_DECOUPLING_DURATION_S = 25 * 60
+
+
+def _parse_splits(data: dict) -> list[dict]:
+    """Defensive parse of Garmin's undocumented /activity/{id}/splits response.
+    Expected shape: {"lapDTOs": [{"distance": m, "duration": s, "averageHR": bpm}, ...]}.
+    Field names are from community reverse-engineering, not official docs —
+    the raw payload is stored via _store_raw so this is a one-look fix if a
+    real account returns a different shape."""
+    laps = data.get("lapDTOs") or data.get("laps") or []
+    out = []
+    for lap in laps:
+        out.append({
+            "distance_m": lap.get("distance"),
+            "duration_s": lap.get("duration") or lap.get("movingDuration"),
+            "avg_hr": lap.get("averageHR") or lap.get("avgHr"),
+        })
+    return out
+
+
+def _compute_decoupling(splits: list[dict]) -> float | None:
+    """Aerobic decoupling: % change in HR:pace ratio from the first half of a
+    run to the second half, using per-lap splits. Positive = HR drifted up
+    relative to pace (aerobic fatigue); near 0 = steady effort."""
+    valid = [
+        s for s in splits
+        if s.get("avg_hr") and s.get("duration_s") and s.get("distance_m")
+        and s["avg_hr"] > 0 and s["duration_s"] > 0 and s["distance_m"] > 0
+    ]
+    if len(valid) < 4:
+        return None
+
+    def _hr_pace_ratio(group: list[dict]) -> float:
+        total_duration = sum(s["duration_s"] for s in group)
+        total_distance = sum(s["distance_m"] for s in group)
+        avg_hr = sum(s["avg_hr"] * s["duration_s"] for s in group) / total_duration
+        pace_s_per_m = total_duration / total_distance
+        return avg_hr * pace_s_per_m
+
+    mid = len(valid) // 2
+    r1 = _hr_pace_ratio(valid[:mid])
+    r2 = _hr_pace_ratio(valid[mid:])
+    if r1 <= 0:
+        return None
+    return round((r2 - r1) / r1 * 100, 2)
+
+
+def _fetch_and_store_decoupling(
+    conn, client, activity_id: str, act_type: str | None, duration_s: int | None
+) -> None:
+    """Fetch lap splits and compute aerobic decoupling for a qualifying run.
+    Only runs once per activity — skipped if already computed, since splits
+    don't change on re-fetch within the rolling import window."""
+    if not act_type or act_type.lower() not in _RUNNING_TYPES:
+        return
+    if not duration_s or duration_s < _MIN_DECOUPLING_DURATION_S:
+        return
+    existing = conn.execute(
+        "SELECT decoupling_pct FROM garmin_activities WHERE activity_id=?", (activity_id,)
+    ).fetchone()
+    if existing and existing[0] is not None:
+        return
+
+    data = _safe(lambda: client.get_activity_splits(activity_id), f"get_activity_splits({activity_id})")
+    if not data:
+        return
+    _store_raw(conn, "get_activity_splits", data, None)
+    decoupling = _compute_decoupling(_parse_splits(data))
+    if decoupling is not None:
+        conn.execute(
+            "UPDATE garmin_activities SET decoupling_pct=? WHERE activity_id=?",
+            (decoupling, activity_id),
+        )
+    else:
+        log.debug("garmin: could not compute decoupling for activity %s (insufficient/malformed splits)", activity_id)
+
+
 def _upsert_activity(conn, activity: dict) -> bool:
     activity_id = str(activity.get("activityId", ""))
     if not activity_id:
@@ -554,6 +633,12 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
                        (activity.get("startTimeLocal") or "")[:10] or None)
             if _upsert_activity(conn, activity):
                 rows_upserted += 1
+                activity_type = activity.get("activityType", {})
+                type_key = activity_type.get("typeKey") if isinstance(activity_type, dict) else activity_type
+                duration_s = int(activity.get("duration") or activity.get("elapsedDuration") or 0) or None
+                _fetch_and_store_decoupling(
+                    conn, client, str(activity.get("activityId", "")), type_key, duration_s
+                )
 
     # suggested/scheduled workouts — monthly endpoint, call once per unique month in window
     year_months = sorted({(d.year, d.month) for d in dates})

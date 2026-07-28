@@ -275,11 +275,14 @@ def _body_battery_chart(rows: list[dict]) -> str:
 
 
 def _diverging_bar_chart(rows: list[dict], field: str, title: str,
-                         x_domain: list[str] | None = None) -> str:
-    """Bar chart with green bars above zero and red below — for HRV delta etc."""
+                         x_domain: list[str] | None = None, invert_color: bool = False) -> str:
+    """Bar chart with green bars above zero and red below — for HRV delta etc.
+    Pass invert_color=True when positive values are the unfavorable direction
+    (e.g. aerobic decoupling, where higher = more fatigue drift)."""
     if not rows:
         return "{}"
     x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
+    good_color, bad_color = ("#e05c5c", "#2ecc71") if invert_color else ("#2ecc71", "#e05c5c")
     chart = (
         alt.Chart(alt.Data(values=rows))
         .mark_bar()
@@ -289,8 +292,8 @@ def _diverging_bar_chart(rows: list[dict], field: str, title: str,
             y=alt.Y(f"{field}:Q", title=title),
             color=alt.condition(
                 alt.datum[field] >= 0,
-                alt.value("#2ecc71"),
-                alt.value("#e05c5c"),
+                alt.value(good_color),
+                alt.value(bad_color),
             ),
             tooltip=[alt.Tooltip("date:T", title="Date"),
                      alt.Tooltip(f"{field}:Q", title=title, format=".1f")],
@@ -682,6 +685,54 @@ def _bp_chart(rows: list[dict]) -> str:
     )
     return _dark(
         alt.layer(bands, lines, dots).properties(width="container", height=200)
+    ).to_json()
+
+
+def _running_economy_chart(rows: list[dict], band_pct: float = 0.07) -> str:
+    """HR trend at a consistent effort: filters runs to within band_pct of the
+    median pace, then plots avg HR over time with a linear trend line — same
+    pace, lower HR over time = improving running economy."""
+    if len(rows) < 3:
+        return "{}"
+    paces = sorted(r["pace_min_km"] for r in rows)
+    median_pace = paces[len(paces) // 2]
+    lo, hi = median_pace * (1 - band_pct), median_pace * (1 + band_pct)
+    band_rows = [r for r in rows if lo <= r["pace_min_km"] <= hi]
+    if len(band_rows) < 3:
+        return "{}"
+
+    xs = [datetime.fromisoformat(r["date"]).toordinal() for r in band_rows]
+    ys = [r["avg_hr"] for r in band_rows]
+    n = len(xs)
+    mean_x, mean_y = sum(xs) / n, sum(ys) / n
+    denom = sum((x - mean_x) ** 2 for x in xs) or 1
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denom
+    intercept = mean_y - slope * mean_x
+    trend_rows = [
+        {"date": r["date"], "trend_hr": slope * datetime.fromisoformat(r["date"]).toordinal() + intercept}
+        for r in band_rows
+    ]
+
+    base = alt.Chart(alt.Data(values=band_rows))
+    dots = base.mark_point(size=60, opacity=0.7, color="#4e9af1").encode(
+        x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+        y=alt.Y("avg_hr:Q", title="Avg HR (bpm)", scale=alt.Scale(zero=False)),
+        tooltip=[
+            alt.Tooltip("date:T", title="Date"),
+            alt.Tooltip("pace_min_km:Q", title="Pace (min/km)", format=".2f"),
+            alt.Tooltip("avg_hr:Q", title="Avg HR"),
+        ],
+    )
+    trend = alt.Chart(alt.Data(values=trend_rows)).mark_line(
+        color="#f4a261", strokeWidth=2, strokeDash=[4, 4]
+    ).encode(x="date:T", y="trend_hr:Q")
+
+    return _dark(
+        alt.layer(dots, trend).properties(
+            width="container", height=220,
+            title=f"Running economy — HR at ~{median_pace:.2f} min/km pace (±{int(band_pct * 100)}%)",
+        ),
+        title=True,
     ).to_json()
 
 
@@ -1329,6 +1380,12 @@ async def activities(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
+        decoupling_rows = _rows(conn, """
+            SELECT date, decoupling_pct FROM activities
+            WHERE date >= date('now', ?) AND decoupling_pct IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
     # Compute pace (min/km) and rolling 4-week avg in Python
     pace_rows = []
     for r in pace_raw:
@@ -1352,6 +1409,10 @@ async def activities(request: Request, days: str = "30",
         "volume_spec": _weekly_volume_chart(weekly_rows),
         "pace_spec": _pace_trend_chart(pace_rows),
         "hr_eff_spec": _hr_efficiency_chart(hr_eff_rows),
+        "econ_spec": _running_economy_chart(hr_eff_rows),
+        "decoupling_spec": _diverging_bar_chart(
+            decoupling_rows, "decoupling_pct", "Aerobic decoupling (%)", invert_color=True
+        ),
         "vo2max_spec": _sparse_line_chart(vo2max_rows, "vo2max", "VO2 Max (mL/kg/min)", color="#5cb85c"),
     })
 

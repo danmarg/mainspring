@@ -33,6 +33,16 @@
   </div>
 </div>
 
+<div class="chart-block">
+  <h3>Running economy <span style="color:#888;font-size:0.72rem">— HR at a consistent pace band · dashed = trend</span></h3>
+  <div class="vega-wrap" id="econ-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Aerobic decoupling <span style="color:#888;font-size:0.72rem">— HR:pace drift, first half vs second half of runs ≥25min · lower is better</span></h3>
+  <div class="vega-wrap" id="decoupling-chart"></div>
+</div>
+
 <div class="table-wrap">
   <table>
     <thead>
@@ -70,5 +80,7 @@ embed('volume-chart', {{ volume_spec|safe }});
 embed('pace-chart',      {{ pace_spec|safe }});
 embed('hr-eff-chart',   {{ hr_eff_spec|safe }});
 embed('vo2max-act-chart', {{ vo2max_spec|safe }});
+embed('econ-chart', {{ econ_spec|safe }});
+embed('decoupling-chart', {{ decoupling_spec|safe }});
 </script>
 {% endblock %}
