@@ -9,12 +9,18 @@ Rebuilds (in order):
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.db import HOME_TZ, DEFAULT_SOURCE_PRIORITY, resolve_metric, utc_now
 
 log = logging.getLogger(__name__)
+
+# raw_import_payloads is append-only and upsert_raw_payload() already dedupes
+# identical re-fetches, but genuine revisions (e.g. Garmin correcting a day's
+# data over several re-fetches before it exits the rolling window) still
+# accumulate. Prune anything older than this as a growth backstop.
+RAW_PAYLOAD_RETENTION_DAYS = 180
 
 # metrics that go into the wide daily_metrics table, in column order
 DAILY_METRIC_COLUMNS = [
@@ -401,15 +407,24 @@ def _insert_activity(conn, row: tuple, source: str, garmin_id: str | None, gh_id
     )
 
 
+def prune_raw_payloads(conn, retention_days: int = RAW_PAYLOAD_RETENTION_DAYS) -> int:
+    """Delete raw_import_payloads rows older than the retention window."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+    cur = conn.execute("DELETE FROM raw_import_payloads WHERE fetched_at < ?", (cutoff,))
+    return cur.rowcount
+
+
 # ── entry point ──────────────────────────────────────────────────────────────
 
 def run_normalization(conn, dates: set[str] | None = None) -> dict:
     tz_rows = rebuild_day_timezone(conn, dates)
     metric_rows = rebuild_daily_metrics(conn, dates)
     activity_rows = rebuild_activities(conn)
+    pruned_rows = prune_raw_payloads(conn)
     conn.commit()
     return {
         "day_timezone_rows": tz_rows,
         "daily_metric_dates": metric_rows,
         "activity_rows": activity_rows,
+        "pruned_raw_payload_rows": pruned_rows,
     }

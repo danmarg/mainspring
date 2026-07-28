@@ -227,6 +227,7 @@ MOCK_BODY_BATTERY = [{"date": "2025-01-01", "charged": 90, "drained": 15}]
 MOCK_SPO2 = {"averageSpO2": 96.5}
 MOCK_RESPIRATION = {"avgBreathingRate": 14.2}
 MOCK_INTENSITY = {"moderateIntensityMinutes": 20, "vigorousIntensityMinutes": 15}
+MOCK_HEART_RATES = {"heartRateValues": [[1735714800000, 58], [1735714920000, 60]]}
 MOCK_ACTIVITIES = [
     {
         "activityId": "999",
@@ -253,6 +254,7 @@ def _make_mock_client():
     client.get_spo2_data.return_value = MOCK_SPO2
     client.get_respiration_data.return_value = MOCK_RESPIRATION
     client.get_intensity_minutes_data.return_value = MOCK_INTENSITY
+    client.get_heart_rates.return_value = MOCK_HEART_RATES
     client.get_scheduled_workouts.return_value = [
         {
             "date": "2025-01-01",

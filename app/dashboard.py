@@ -72,6 +72,37 @@ def _scalar(conn, sql: str, params: tuple = ()):
     return row[0] if row else None
 
 
+def _import_status_summary() -> list[dict]:
+    """Most recent import_runs row per source, for the nav status strip."""
+    with db() as conn:
+        rows = _rows(conn, """
+            SELECT source, finished_at, started_at, status
+            FROM import_runs
+            WHERE id IN (SELECT MAX(id) FROM import_runs GROUP BY source)
+            ORDER BY source
+        """)
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows:
+        ts_str = r["finished_at"] or r["started_at"]
+        ago_min = None
+        if ts_str:
+            ts = datetime.fromisoformat(ts_str)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ago_min = int((now - ts).total_seconds() // 60)
+        out.append({
+            "source": r["source"],
+            "status": r["status"],
+            "ago_min": ago_min,
+            "stale": r["status"] == "error" or ago_min is None or ago_min > 90,
+        })
+    return out
+
+
+templates.env.globals["import_status"] = _import_status_summary
+
+
 # ── chart builders ────────────────────────────────────────────────────────────
 
 def _dark(chart: alt.Chart, title: bool = False) -> alt.Chart:
