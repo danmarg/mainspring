@@ -670,27 +670,3 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
 
     conn.commit()
     return {"skipped": False, "rows_upserted": rows_upserted, "dates": [d.isoformat() for d in dates]}
-
-
-def backfill_decoupling(conn, days: int = 90) -> int:
-    """One-off backfill: compute decoupling for existing activities that
-    predate this feature (decoupling_pct still NULL), without re-running the
-    full daily-metrics import. Reuses _fetch_and_store_decoupling, which
-    already no-ops for non-running/short/already-computed activities."""
-    if not _configured():
-        return 0
-    client = _client()
-
-    cutoff = (date.today() - timedelta(days=days)).isoformat()
-    rows = conn.execute(
-        "SELECT activity_id, type, duration_s FROM garmin_activities WHERE date >= ?",
-        (cutoff,),
-    ).fetchall()
-    for activity_id, act_type, duration_s in rows:
-        _fetch_and_store_decoupling(conn, client, activity_id, act_type, duration_s)
-    conn.commit()
-
-    return conn.execute(
-        "SELECT COUNT(*) FROM garmin_activities WHERE date >= ? AND decoupling_pct IS NOT NULL",
-        (cutoff,),
-    ).fetchone()[0]
