@@ -74,23 +74,28 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
         log.info("%s import run_id=%d finished: %s (%d rows)", source, run_id, status, rows)
 
         # Fire morning webhook when sleep_score lands for today for the first time.
-        # Checks the morning_webhooks table so retries work if the machine was killed
-        # before the webhook could fire (Fly auto-stop race condition).
+        # Claim the date via INSERT OR IGNORE (date is PRIMARY KEY) *before*
+        # firing — a plain SELECT-then-fire check races when garmin and
+        # google_health imports run in separate background threads close
+        # together, letting both pass the check and double-fire the webhook.
+        # Only the thread whose INSERT actually wins fires it; on webhook
+        # failure the claim is released so a later run retries (Fly auto-stop
+        # race condition — machine killed before the webhook could fire).
         if today in imported_dates:
             with db() as conn:
-                already_sent = conn.execute(
-                    "SELECT 1 FROM morning_webhooks WHERE date=?", (today,)
-                ).fetchone()
                 sleep_now = conn.execute(
                     "SELECT sleep_score FROM daily_metrics WHERE date=?", (today,)
                 ).fetchone()
-            if not already_sent and sleep_now and sleep_now[0] is not None:
-                if _fire_morning_webhook():
+            if sleep_now and sleep_now[0] is not None:
+                with db() as conn:
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO morning_webhooks(date, sent_at) VALUES (?,?)",
+                        (today, utc_now()),
+                    )
+                    claimed = cur.rowcount == 1
+                if claimed and not _fire_morning_webhook():
                     with db() as conn:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO morning_webhooks(date, sent_at) VALUES (?,?)",
-                            (today, utc_now()),
-                        )
+                        conn.execute("DELETE FROM morning_webhooks WHERE date=?", (today,))
 
     except Exception as exc:
         log.exception("%s import run_id=%d failed", source, run_id)
