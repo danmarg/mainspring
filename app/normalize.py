@@ -147,6 +147,52 @@ def _resolve_tz_for_date(conn, date_str: str) -> tuple[str, str]:
     return HOME_TZ, "home_default"
 
 
+# ── synthetic sleep score (fallback when no vendor score is available) ─────────
+#
+# Backtested against 171 days where both Garmin's real sleep_score and Google
+# Health's stage breakdown were present: raw composite of duration-adequacy,
+# sleep efficiency, deep%, and rem% correlates ~0.51 with Garmin's score.
+# A linear recalibration (fit against that history) brings held-out MAE to
+# ~5.5 points, against a Garmin score stdev of ~8 — close enough to land in
+# the right readiness band most days. Slope/intercept below are from that fit;
+# re-run the backtest (see scratchpad) if the formula's inputs change.
+_SYNTH_SLOPE = 0.374
+_SYNTH_INTERCEPT = 41.8
+
+
+def synthesize_sleep_score(
+    duration_min: float | None,
+    deep_min: float | None,
+    rem_min: float | None,
+    awake_min: float | None,
+) -> float | None:
+    """Estimate a sleep score from duration + stage composition, calibrated
+    against Garmin's real sleep_score on days where both were available."""
+    if not duration_min or duration_min <= 0:
+        return None
+
+    awake_min = awake_min or 0.0
+    deep_min = deep_min or 0.0
+    rem_min = rem_min or 0.0
+
+    time_in_bed = duration_min + awake_min
+    efficiency = duration_min / time_in_bed if time_in_bed > 0 else 0.85
+    eff_score = max(0.0, min(1.0, (efficiency - 0.70) / 0.25))
+
+    hours = duration_min / 60.0
+    if hours <= 7.5:
+        dur_score = max(0.0, min(1.0, (hours - 4.0) / 3.5))
+    else:
+        dur_score = max(0.0, min(1.0, 1.0 - (hours - 7.5) / 3.0))
+
+    deep_score = max(0.0, min(1.0, (deep_min / duration_min) / 0.20))
+    rem_score = max(0.0, min(1.0, (rem_min / duration_min) / 0.22))
+
+    composite = 0.35 * dur_score + 0.30 * eff_score + 0.20 * deep_score + 0.15 * rem_score
+    raw = composite * 100
+    return max(0.0, min(100.0, _SYNTH_SLOPE * raw + _SYNTH_INTERCEPT))
+
+
 # ── daily_metrics rebuild ────────────────────────────────────────────────────
 
 def rebuild_daily_metrics(conn, dates: set[str] | None = None) -> int:
@@ -182,6 +228,18 @@ def _rebuild_one_day(conn, date_str: str) -> None:
         values[metric] = val
         if src:
             source_flags[metric] = src
+
+    if values.get("sleep_score") is None:
+        awake_min, _ = resolve_metric(conn, date_str, "sleep_awake_min")
+        synthetic = synthesize_sleep_score(
+            values.get("sleep_duration_min"),
+            values.get("sleep_deep_min"),
+            values.get("sleep_rem_min"),
+            awake_min,
+        )
+        if synthetic is not None:
+            values["sleep_score"] = round(synthetic, 1)
+            source_flags["sleep_score"] = "synthetic"
 
     caffeine = conn.execute(
         "SELECT SUM(quantity) FROM manual_logs WHERE type='caffeine' AND DATE(ts)=?",

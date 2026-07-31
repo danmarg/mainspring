@@ -514,6 +514,7 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
         ("DEEP",  "sleep_deep_min"),
         ("REM",   "sleep_rem_min"),
         ("LIGHT", "sleep_light_min"),
+        ("AWAKE", "sleep_awake_min"),
     ]
     for stage_key, metric in stage_map:
         val = stage_totals.get(stage_key)
