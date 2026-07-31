@@ -140,6 +140,57 @@ def test_daily_metrics_fallback_when_preferred_absent(tmp_db):
     assert row[0] == 60.0
 
 
+def test_daily_metrics_synthesizes_sleep_score_when_no_vendor_score(tmp_db):
+    now = utc_now()
+    # google_health-only day: stage breakdown but no vendor sleep_score
+    upsert_raw_metric(tmp_db, "2025-01-01", "google_health", "sleep_duration_min", 420.0, now)
+    upsert_raw_metric(tmp_db, "2025-01-01", "google_health", "sleep_deep_min", 90.0, now)
+    upsert_raw_metric(tmp_db, "2025-01-01", "google_health", "sleep_rem_min", 80.0, now)
+    upsert_raw_metric(tmp_db, "2025-01-01", "google_health", "sleep_awake_min", 10.0, now)
+    tmp_db.commit()
+
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+
+    row = tmp_db.execute(
+        "SELECT sleep_score, source_flags_json FROM daily_metrics WHERE date='2025-01-01'"
+    ).fetchone()
+    assert row[0] is not None
+    assert 0 <= row[0] <= 100
+    assert json.loads(row[1])["sleep_score"] == "synthetic"
+
+
+def test_daily_metrics_prefers_real_sleep_score_over_synthetic(tmp_db):
+    now = utc_now()
+    upsert_raw_metric(tmp_db, "2025-01-01", "garmin", "sleep_score", 78.0, now)
+    upsert_raw_metric(tmp_db, "2025-01-01", "google_health", "sleep_duration_min", 200.0, now)
+    upsert_raw_metric(tmp_db, "2025-01-01", "google_health", "sleep_deep_min", 5.0, now)
+    tmp_db.commit()
+
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+
+    row = tmp_db.execute(
+        "SELECT sleep_score, source_flags_json FROM daily_metrics WHERE date='2025-01-01'"
+    ).fetchone()
+    assert row[0] == 78.0
+    assert json.loads(row[1])["sleep_score"] == "garmin"
+
+
+def test_daily_metrics_no_sleep_score_when_no_sleep_data_at_all(tmp_db):
+    now = utc_now()
+    upsert_raw_metric(tmp_db, "2025-01-01", "garmin", "hrv", 55.0, now)
+    tmp_db.commit()
+
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+
+    row = tmp_db.execute(
+        "SELECT sleep_score FROM daily_metrics WHERE date='2025-01-01'"
+    ).fetchone()
+    assert row[0] is None
+
+
 def test_daily_metrics_aggregates_manual_logs(tmp_db):
     now = utc_now()
     tmp_db.execute(

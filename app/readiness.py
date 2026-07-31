@@ -13,7 +13,11 @@ HRV / 7-day baseline (40%)
 
 Sleep score (30%)
   Passed through as-is from Garmin/Fitbit sleep staging algorithms, which
-  are themselves calibrated against polysomnography.
+  are themselves calibrated against polysomnography. When no vendor score
+  is available for a day (e.g. Google Health-only data), normalize.py
+  synthesizes one from duration/efficiency/deep%/rem%, calibrated against
+  171 days of overlapping Garmin+Google Health data (~5.5 MAE, see
+  synthesize_sleep_score in app/normalize.py).
 
 Resting HR vs baseline (20%)
   Elevated morning resting HR is an established marker of incomplete recovery
