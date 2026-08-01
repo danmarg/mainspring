@@ -534,6 +534,34 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
     ).to_json()
 
 
+def _live_curve_json(wake_hour: float | None, sleep_score: float | None,
+                     caffeine_doses: list[tuple[float, float]] | None = None,
+                     activity_boosts: list[tuple[float, float]] | None = None) -> str:
+    """Raw alertness curve (hours-since-wake, alertness) for the client-side
+    live status widget, which recomputes 'good window to train' / bedtime
+    text every minute without a page reload."""
+    if wake_hour is None:
+        return "[]"
+    FORECAST_HOURS = 18
+    curve = alertness_curve(wake_hour, sleep_score or 75.0, FORECAST_HOURS,
+                            caffeine_doses=caffeine_doses, activity_boosts=activity_boosts)
+    return json.dumps([{"h": i / 4.0, "a": r["alertness"]} for i, r in enumerate(curve)])
+
+
+def _sleep_debt_minutes(recent_sleep_rows: list[dict], target_min: float,
+                        lookback_nights: int = 3, cap_total_min: float = 180.0) -> float:
+    """
+    Sum of (target - actual) sleep duration over the most recent lookback_nights
+    nights with data. Capped at cap_total_min (3h default) so a long gap in data
+    or an extended bad stretch doesn't produce an absurd bedtime recommendation —
+    practical sleep-debt guidance treats debt beyond a couple nights as something
+    to repay gradually rather than in one sitting anyway.
+    """
+    deficits = [max(0.0, target_min - r["sleep_duration_min"])
+                for r in recent_sleep_rows[-lookback_nights:]]
+    return min(sum(deficits), cap_total_min)
+
+
 def _activity_bar(rows: list[dict], field: str, y_title: str) -> str:
     if not rows:
         return "{}"
@@ -973,6 +1001,26 @@ async def overview(request: Request,
         ).fetchone()
         calorie_target = float(calorie_target_row[0]) if calorie_target_row else None
 
+        # Sleep debt — recent nights' shortfall vs target, for the bedtime recommendation
+        sleep_target_row = conn.execute(
+            "SELECT value FROM training_goals WHERE metric='sleep_target_hours'"
+        ).fetchone()
+        sleep_target_hours = float(sleep_target_row[0]) if sleep_target_row else 8.0
+        sleep_target_min = sleep_target_hours * 60.0
+
+        recent_sleep_rows = _rows(conn, """
+            SELECT date, sleep_duration_min FROM daily_metrics
+            WHERE date <= ? AND date > date(?, '-4 days')
+              AND sleep_duration_min IS NOT NULL
+            ORDER BY date
+        """, (metrics_date, metrics_date))
+
+    # Sleep debt over the last 3 nights, repaid at up to 1h/night so a large
+    # deficit spreads over several nights rather than producing an absurd bedtime.
+    sleep_debt_min = _sleep_debt_minutes(recent_sleep_rows, sleep_target_min)
+    repay_min = min(sleep_debt_min, 60.0)
+    recommended_sleep_hours = (sleep_target_min + repay_min) / 60.0
+
     # Build caffeine doses list in local hours for the energy curve
     caffeine_doses: list[tuple[float, float]] = []
     for cl in caffeine_logs:
@@ -1032,6 +1080,9 @@ async def overview(request: Request,
         "calorie_target": calorie_target,
         "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None),
         "wake_hour": wake_hour,
+        "live_curve_json": _live_curve_json(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None),
+        "recommended_sleep_hours": round(recommended_sleep_hours, 2),
+        "sleep_debt_min": round(sleep_debt_min),
     })
 
 
