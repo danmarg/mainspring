@@ -133,6 +133,14 @@
   {% endif %}
 </div>
 
+{# ── Live status ──────────────────────────────────────────────────────────── #}
+{% if energy_spec != '{}' %}
+<div class="chart-block" id="live-status-card">
+  <h3>Right now <span id="live-updated" style="color:var(--text-muted);font-size:0.7rem"></span></h3>
+  <p id="live-rec-text" style="margin:0.35rem 0 0;font-size:0.95rem">—</p>
+</div>
+{% endif %}
+
 {# ── Energy forecast ──────────────────────────────────────────────────────── #}
 {% if energy_spec != '{}' %}
 <div class="chart-block">
@@ -174,6 +182,107 @@
   }
 
   embed('energy-chart', spec);
+})();
+</script>
+{% endif %}
+
+{% if live_curve_json and live_curve_json != '[]' %}
+<script>
+(function() {
+  var curve = {{ live_curve_json|safe }};   // [{h: hours-since-wake, a: alertness}] at 15-min steps
+  var wakeHour = {{ wake_hour | tojson }};
+  var recommendedSleepHours = {{ recommended_sleep_hours | tojson }};
+  var sleepDebtMin = {{ sleep_debt_min | tojson }};
+
+  function fmtDuration(hoursFloat) {
+    var totalMin = Math.round(hoursFloat * 60);
+    var h = Math.floor(totalMin / 60), m = totalMin % 60;
+    return h + 'h' + (m > 0 ? (m < 10 ? '0' : '') + m + 'm' : '');
+  }
+
+  function fmtClock(hourFloat) {
+    var h = ((hourFloat % 24) + 24) % 24;
+    var hh = Math.floor(h);
+    var mm = Math.round((h - hh) * 60);
+    if (mm === 60) { mm = 0; hh = (hh + 1) % 24; }
+    var period = hh < 12 ? 'am' : 'pm';
+    var h12 = hh % 12 === 0 ? 12 : hh % 12;
+    return h12 + ':' + (mm < 10 ? '0' : '') + mm + period;
+  }
+
+  function alertnessAt(hw) {
+    // linear interpolation between the 15-min samples
+    if (hw <= curve[0].h) return curve[0].a;
+    if (hw >= curve[curve.length - 1].h) return curve[curve.length - 1].a;
+    for (var i = 0; i < curve.length - 1; i++) {
+      if (curve[i].h <= hw && hw <= curve[i + 1].h) {
+        var frac = (hw - curve[i].h) / (curve[i + 1].h - curve[i].h);
+        return curve[i].a + frac * (curve[i + 1].a - curve[i].a);
+      }
+    }
+    return curve[curve.length - 1].a;
+  }
+
+  function goodWindows(threshold) {
+    // contiguous [start, end] ranges (hours-since-wake) where alertness >= threshold
+    var windows = [];
+    var start = null;
+    for (var i = 0; i < curve.length; i++) {
+      if (curve[i].a >= threshold) {
+        if (start === null) start = curve[i].h;
+      } else if (start !== null) {
+        windows.push([start, curve[i].h]);
+        start = null;
+      }
+    }
+    if (start !== null) windows.push([start, curve[curve.length - 1].h]);
+    return windows;
+  }
+
+  function render() {
+    var now = new Date();
+    var localHour = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
+    var nowHw = ((localHour - wakeHour) % 24 + 24) % 24;
+
+    var current = Math.round(alertnessAt(nowHw));
+    var trendDelta = alertnessAt(nowHw) - alertnessAt(Math.max(0, nowHw - 0.5));
+    var trend = trendDelta > 1 ? 'rising' : (trendDelta < -1 ? 'falling' : 'steady');
+
+    var peak = curve[0];
+    for (var i = 0; i < curve.length; i++) if (curve[i].a > peak.a) peak = curve[i];
+    var threshold = peak.a * 0.85;
+    var windows = goodWindows(threshold);
+
+    var windowText;
+    var current_win = null, next_win = null;
+    for (var i = 0; i < windows.length; i++) {
+      if (windows[i][0] <= nowHw && nowHw <= windows[i][1]) { current_win = windows[i]; break; }
+      if (windows[i][0] > nowHw) { next_win = windows[i]; break; }
+    }
+    if (current_win) {
+      windowText = 'Good window to train — until ' + fmtClock(wakeHour + current_win[1]) + '.';
+    } else if (next_win) {
+      windowText = 'Next good window to train: ' + fmtClock(wakeHour + next_win[0]) + '–' + fmtClock(wakeHour + next_win[1]) + '.';
+    } else {
+      windowText = "Past today's peak (" + fmtClock(wakeHour + peak.h) + ") — low window, light activity or rest is a better fit.";
+    }
+
+    // Bedtime = wake time minus tonight's recommended sleep duration, which is the
+    // per-night target plus a capped catch-up on any recent sleep debt (server-computed).
+    var bedtime = fmtClock(wakeHour + (24 - recommendedSleepHours));
+    var bedtimeText = 'Aim for bed by ~' + bedtime + ' (' + fmtDuration(recommendedSleepHours) + ')';
+    bedtimeText += sleepDebtMin > 15
+      ? ' — catching up on ' + fmtDuration(sleepDebtMin / 60) + ' of sleep debt from the last few nights.'
+      : '.';
+
+    document.getElementById('live-rec-text').textContent =
+      'Alertness ' + current + '/100 (' + trend + '). ' + windowText + ' ' + bedtimeText;
+    document.getElementById('live-updated').textContent =
+      'updated ' + now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  }
+
+  render();
+  setInterval(render, 60000);
 })();
 </script>
 {% endif %}
