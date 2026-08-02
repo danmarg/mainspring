@@ -61,6 +61,14 @@ def _days_clause(days: str) -> str:
     return mapping.get(str(days), "-30 days")
 
 
+def _x_domain(days: str) -> list[str]:
+    """[start, today] ISO date bounds so charts' x-axis always extends to today,
+    even when the most recent data point (e.g. delayed sync) is a day or more old."""
+    days_int = int(days) if str(days).isdigit() else 30
+    today = date.today()
+    return [(today - timedelta(days=days_int)).isoformat(), today.isoformat()]
+
+
 def _rows(conn, sql: str, params: tuple = ()) -> list[dict]:
     cur = conn.execute(sql, params)
     cols = [d[0] for d in cur.description]
@@ -132,17 +140,18 @@ def _sparkline(rows: list[dict], field: str, color: str = "#4e9af1") -> str:
 
 def _trend_chart(rows: list[dict], field: str, avg_field: str, title: str,
                  color: str = "#4e9af1", avg_color: str = "#f4a261",
-                 height: int = 200) -> str:
+                 height: int = 200, x_domain: list[str] | None = None) -> str:
     if not rows:
         return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     base = alt.Chart(alt.Data(values=rows))
     line = base.mark_line(color=color, strokeWidth=1.5).encode(
-        x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+        x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
         y=alt.Y(f"{field}:Q", title=title, scale=alt.Scale(zero=False)),
         tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip(f"{field}:Q", title=title)],
     )
     avg = base.mark_line(color=avg_color, strokeDash=[4, 4], opacity=0.85, strokeWidth=1.5).encode(
-        x="date:T",
+        x=alt.X("date:T", scale=x_scale),
         y=f"{avg_field}:Q",
         tooltip=[alt.Tooltip(f"{avg_field}:Q", title="7d avg")],
     )
@@ -151,14 +160,16 @@ def _trend_chart(rows: list[dict], field: str, avg_field: str, title: str,
     ).to_json()
 
 
-def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
+def _sleep_chart(rows_score: list[dict], rows_stages: list[dict],
+                 x_domain: list[str] | None = None) -> str:
     if not rows_score:
         return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     score_chart = (
         alt.Chart(alt.Data(values=rows_score))
         .mark_line(color="#7ec8e3", strokeWidth=1.5)
         .encode(
-            x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+            x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
             y=alt.Y("sleep_score:Q", title="Sleep score", scale=alt.Scale(domain=[0, 100])),
             tooltip=["date:T", "sleep_score:Q"],
         )
@@ -169,7 +180,7 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
             alt.Chart(alt.Data(values=rows_stages))
             .mark_area()
             .encode(
-                x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+                x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
                 y=alt.Y("minutes:Q", title="Stage (min)", stack="zero"),
                 color=alt.Color("stage:N", scale=alt.Scale(
                     domain=["Deep", "REM", "Light"],
@@ -193,10 +204,11 @@ def _sleep_chart(rows_score: list[dict], rows_stages: list[dict]) -> str:
     return json.dumps(spec)
 
 
-def _zone_load_chart(rows: list[dict]) -> str:
+def _zone_load_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
     """Stacked area: monthly zone load trend (aerobic low/high, anaerobic)."""
     if not rows:
         return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     # Unpivot to long form
     long = []
     for r in rows:
@@ -213,7 +225,7 @@ def _zone_load_chart(rows: list[dict]) -> str:
         alt.Chart(alt.Data(values=long))
         .mark_area(opacity=0.8)
         .encode(
-            x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+            x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
             y=alt.Y("load:Q", title="Monthly zone load", stack="zero"),
             color=alt.Color("zone:N", scale=alt.Scale(
                 domain=["Aerobic low", "Aerobic high", "Anaerobic"],
@@ -226,10 +238,11 @@ def _zone_load_chart(rows: list[dict]) -> str:
     return _dark(chart).to_json()
 
 
-def _hr_chart(rows: list[dict]) -> str:
+def _hr_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
     """Dual line: resting HR (blue) + daily max HR from activities (red) on one chart."""
     if not rows:
         return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     rhr_rows = [r for r in rows if r.get("resting_hr") is not None]
     max_rows = [r for r in rows if r.get("max_hr") is not None]
     if not rhr_rows and not max_rows:
@@ -238,17 +251,17 @@ def _hr_chart(rows: list[dict]) -> str:
     if rhr_rows:
         base_rhr = alt.Chart(alt.Data(values=rhr_rows))
         layers.append(base_rhr.mark_line(color="#4e9af1", strokeWidth=1.5).encode(
-            x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+            x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
             y=alt.Y("resting_hr:Q", title="HR (bpm)", scale=alt.Scale(zero=False)),
             tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("resting_hr:Q", title="Resting HR")],
         ))
         layers.append(base_rhr.mark_line(color="#4e9af1", strokeDash=[4, 4], opacity=0.6, strokeWidth=1.2).encode(
-            x="date:T", y="rhr_7d_avg:Q",
+            x=alt.X("date:T", scale=x_scale), y="rhr_7d_avg:Q",
         ))
     if max_rows:
         base_max = alt.Chart(alt.Data(values=max_rows))
         layers.append(base_max.mark_line(color="#e05c5c", strokeWidth=1.5, opacity=0.7).encode(
-            x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+            x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
             y=alt.Y("max_hr:Q", scale=alt.Scale(zero=False)),
             tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("max_hr:Q", title="Max HR (activity)")],
         ))
@@ -257,14 +270,15 @@ def _hr_chart(rows: list[dict]) -> str:
     ).to_json()
 
 
-def _body_battery_chart(rows: list[dict]) -> str:
+def _body_battery_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
     if not rows:
         return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     chart = (
         alt.Chart(alt.Data(values=rows))
         .mark_area(opacity=0.6, color="#f4a261")
         .encode(
-            x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+            x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
             y=alt.Y("body_battery_low:Q", title="Body battery", scale=alt.Scale(domain=[0, 100])),
             y2="body_battery_high:Q",
             tooltip=["date:T", "body_battery_high:Q", "body_battery_low:Q"],
@@ -409,10 +423,11 @@ def _hrv_delta_heatmap(rows: list[dict]) -> str:
     return _heatmap_to_json(chart)
 
 
-def _pmc_chart(rows: list[dict]) -> str:
+def _pmc_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
     """Performance Management Chart: CTL (fitness), ATL (fatigue), TSB (form) bars."""
     if not rows:
         return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     # Compute TSB = CTL - ATL in Python
     for r in rows:
         if r.get("ctl") is not None and r.get("atl") is not None:
@@ -433,7 +448,7 @@ def _pmc_chart(rows: list[dict]) -> str:
             alt.Chart(alt.Data(values=tsb_rows))
             .mark_bar(opacity=0.4)
             .encode(
-                x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+                x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
                 y=alt.Y("tsb:Q", title="Load / TSB", scale=alt.Scale(zero=True)),
                 color=alt.condition(
                     alt.datum.tsb >= 0,
@@ -450,7 +465,7 @@ def _pmc_chart(rows: list[dict]) -> str:
             alt.Chart(alt.Data(values=ctl_rows))
             .mark_line(color="#4e9af1", strokeWidth=2)
             .encode(
-                x="date:T",
+                x=alt.X("date:T", scale=x_scale),
                 y=alt.Y("ctl:Q", scale=alt.Scale(zero=True)),
                 tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("ctl:Q", title="CTL (fitness)")],
             )
@@ -460,7 +475,7 @@ def _pmc_chart(rows: list[dict]) -> str:
             alt.Chart(alt.Data(values=atl_rows))
             .mark_line(color="#f4a261", strokeWidth=2)
             .encode(
-                x="date:T",
+                x=alt.X("date:T", scale=x_scale),
                 y=alt.Y("atl:Q", scale=alt.Scale(zero=True)),
                 tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("atl:Q", title="ATL (fatigue)")],
             )
@@ -649,17 +664,19 @@ def _macro_dow_chart(rows: list[dict]) -> str:
 
 
 def _sparse_line_chart(rows: list[dict], field: str, title: str,
-                       color: str = "#4e9af1", ref_bands: list | None = None) -> str:
+                       color: str = "#4e9af1", ref_bands: list | None = None,
+                       x_domain: list[str] | None = None) -> str:
     """Dots + connecting line for infrequently sampled metrics (weight, BP, VO2max)."""
     if not rows:
         return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     base = alt.Chart(alt.Data(values=rows))
     line = base.mark_line(color=color, opacity=0.4, strokeWidth=1).encode(
-        x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+        x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
         y=alt.Y(f"{field}:Q", title=title, scale=alt.Scale(zero=False)),
     )
     dots = base.mark_point(color=color, size=60, opacity=0.9).encode(
-        x="date:T",
+        x=alt.X("date:T", scale=x_scale),
         y=f"{field}:Q",
         tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip(f"{field}:Q", title=title, format=".1f")],
     )
@@ -677,10 +694,11 @@ def _sparse_line_chart(rows: list[dict], field: str, title: str,
     ).to_json()
 
 
-def _bp_chart(rows: list[dict]) -> str:
+def _bp_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
     """Dual line: systolic + diastolic with normal-range reference band."""
     if not rows:
         return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     long = []
     for r in rows:
         if r.get("bp_systolic"):
@@ -700,14 +718,14 @@ def _bp_chart(rows: list[dict]) -> str:
     )
     base = alt.Chart(alt.Data(values=long))
     lines = base.mark_line(strokeWidth=1.5, opacity=0.5).encode(
-        x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+        x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
         y=alt.Y("mmhg:Q", title="mmHg", scale=alt.Scale(domain=[50, 160])),
         color=alt.Color("reading:N", scale=alt.Scale(
             domain=["Systolic", "Diastolic"], range=["#e05c5c", "#4e9af1"]
         )),
     )
     dots = base.mark_point(size=60, opacity=0.9).encode(
-        x="date:T", y="mmhg:Q",
+        x=alt.X("date:T", scale=x_scale), y="mmhg:Q",
         color=alt.Color("reading:N", legend=None),
         tooltip=["date:T", "reading:N", alt.Tooltip("mmhg:Q", title="mmHg")],
     )
@@ -764,13 +782,14 @@ def _running_economy_chart(rows: list[dict], band_pct: float = 0.07) -> str:
     ).to_json()
 
 
-def _pace_trend_chart(rows: list[dict]) -> str:
+def _pace_trend_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
     """Running pace (min/km) over time with 4-week rolling avg."""
     if not rows:
         return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     base = alt.Chart(alt.Data(values=rows))
     dots = base.mark_point(size=40, opacity=0.6, color="#4e9af1").encode(
-        x=alt.X("date:T", title=None, axis=alt.Axis(tickCount="day", format="%b %d")),
+        x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
         y=alt.Y("pace_min_km:Q", title="Pace (min/km)", scale=alt.Scale(zero=False),
                 axis=alt.Axis(labelExpr="floor(datum.value) + ':' + (datum.value % 1 * 60 < 10 ? '0' : '') + floor(datum.value % 1 * 60)")),
         tooltip=[
@@ -780,7 +799,7 @@ def _pace_trend_chart(rows: list[dict]) -> str:
         ],
     )
     avg = base.mark_line(color="#f4a261", strokeWidth=2, strokeDash=[4, 4]).encode(
-        x="date:T",
+        x=alt.X("date:T", scale=x_scale),
         y="pace_4w_avg:Q",
     )
     return _dark(
@@ -1158,13 +1177,15 @@ async def trends(request: Request, days: str = "30",
             "max_hr": max_hr_by_date.get(d),
         })
 
+    x_domain = _x_domain(days)
+
     return templates.TemplateResponse(request, "trends.html", {
         "days": days,
-        "hrv_spec": _trend_chart(hrv_rows, "hrv", "hrv_7d_avg", "HRV (ms)"),
-        "load_spec": _zone_load_chart(load_rows),
-        "pmc_spec": _pmc_chart(pmc_rows),
-        "battery_spec": _body_battery_chart(battery_rows),
-        "hr_spec": _hr_chart(hr_rows),
+        "hrv_spec": _trend_chart(hrv_rows, "hrv", "hrv_7d_avg", "HRV (ms)", x_domain=x_domain),
+        "load_spec": _zone_load_chart(load_rows, x_domain=x_domain),
+        "pmc_spec": _pmc_chart(pmc_rows, x_domain=x_domain),
+        "battery_spec": _body_battery_chart(battery_rows, x_domain=x_domain),
+        "hr_spec": _hr_chart(hr_rows, x_domain=x_domain),
     })
 
 
@@ -1215,11 +1236,7 @@ async def behavior(request: Request, days: str = "30",
         else:
             r["hrv_delta"] = None
 
-    days_int = int(days) if str(days).isdigit() else 30
-    x_domain = [
-        (date.today() - timedelta(days=days_int)).isoformat(),
-        date.today().isoformat(),
-    ]
+    x_domain = _x_domain(days)
 
     hrv_delta_rows = [r for r in rows if r.get("hrv_delta") is not None]
 
@@ -1230,7 +1247,7 @@ async def behavior(request: Request, days: str = "30",
         "caffeine_spec": _daily_bar_chart(rows, "caffeine_mg", "Caffeine (mg)", color="#7b4fa6", x_domain=x_domain),
         "caffeine_dow_spec": _dow_avg_chart(_compute_dow_avgs(rows, "caffeine_mg"), "Avg mg", "#7b4fa6"),
         "hrv_delta_spec": _diverging_bar_chart(hrv_delta_rows, "hrv_delta", "HRV delta (ms)", x_domain=x_domain),
-        "sleep_spec": _sleep_chart(score_rows, stage_rows),
+        "sleep_spec": _sleep_chart(score_rows, stage_rows, x_domain=x_domain),
     })
 
 
@@ -1453,18 +1470,20 @@ async def activities(request: Request, days: str = "30",
     # HR efficiency: runs with both avg_hr and pace
     hr_eff_rows = [r for r in pace_rows if r.get("avg_hr")]
 
+    x_domain = _x_domain(days)
+
     return templates.TemplateResponse(request, "activities.html", {
         "days": days,
         "table_rows": table_rows,
         "count_spec": _activity_bar(count_rows, "count", "Activities"),
         "volume_spec": _weekly_volume_chart(weekly_rows),
-        "pace_spec": _pace_trend_chart(pace_rows),
+        "pace_spec": _pace_trend_chart(pace_rows, x_domain=x_domain),
         "hr_eff_spec": _hr_efficiency_chart(hr_eff_rows),
         "econ_spec": _running_economy_chart(hr_eff_rows),
         "decoupling_spec": _diverging_bar_chart(
-            decoupling_rows, "decoupling_pct", "Aerobic decoupling (%)", invert_color=True
+            decoupling_rows, "decoupling_pct", "Aerobic decoupling (%)", invert_color=True, x_domain=x_domain
         ),
-        "vo2max_spec": _sparse_line_chart(vo2max_rows, "vo2max", "VO2 Max (mL/kg/min)", color="#5cb85c"),
+        "vo2max_spec": _sparse_line_chart(vo2max_rows, "vo2max", "VO2 Max (mL/kg/min)", color="#5cb85c", x_domain=x_domain),
     })
 
 
@@ -1498,9 +1517,11 @@ async def vitals(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
+    x_domain = _x_domain(days)
+
     return templates.TemplateResponse(request, "vitals.html", {
         "days": days,
-        "weight_spec": _sparse_line_chart(weight_rows, "weight_kg", "Weight (kg)", color="#f4a261"),
-        "spo2_spec": _sparse_line_chart(spo2_rows, "spo2_avg", "SpO2 (%)", color="#7ec8e3"),
-        "bp_spec": _bp_chart(bp_rows),
+        "weight_spec": _sparse_line_chart(weight_rows, "weight_kg", "Weight (kg)", color="#f4a261", x_domain=x_domain),
+        "spo2_spec": _sparse_line_chart(spo2_rows, "spo2_avg", "SpO2 (%)", color="#7ec8e3", x_domain=x_domain),
+        "bp_spec": _bp_chart(bp_rows, x_domain=x_domain),
     })
