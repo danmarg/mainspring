@@ -1,13 +1,14 @@
 import logging
 import os
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.db import db, utc_now
+from app.db import HOME_TZ, db, utc_now
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin")
@@ -27,6 +28,25 @@ def _require_token(env_var: str):
 
 _import_auth = _require_token("ADMIN_TOKEN")
 _export_auth = _require_token("EXPORT_TOKEN")
+
+MORNING_WEBHOOK_EARLIEST_HOUR = int(os.getenv("MORNING_WEBHOOK_EARLIEST_HOUR", "5"))
+
+
+def _is_morning_locally(conn, today: str) -> bool:
+    """True once it's past MORNING_WEBHOOK_EARLIEST_HOUR in today's local (health-day) tz.
+
+    Garmin finalizes a sleep_score as soon as it detects any wake — including a
+    brief middle-of-the-night wake-up — so "sleep_score landed" alone fires too
+    early. Gate on local wall-clock time instead.
+    """
+    row = conn.execute("SELECT tz FROM day_timezone WHERE date=?", (today,)).fetchone()
+    tz_name = row[0] if row else HOME_TZ
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo(HOME_TZ)
+    local_now = datetime.now(timezone.utc).astimezone(tz)
+    return local_now.hour >= MORNING_WEBHOOK_EARLIEST_HOUR
 
 
 def _fire_morning_webhook() -> bool:
@@ -73,7 +93,9 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
             )
         log.info("%s import run_id=%d finished: %s (%d rows)", source, run_id, status, rows)
 
-        # Fire morning webhook when sleep_score lands for today for the first time.
+        # Fire morning webhook once sleep_score has landed for today AND it's
+        # actually morning locally (see _is_morning_locally — a brief nighttime
+        # wake can make Garmin finalize sleep_score hours before real wake-up).
         # Claim the date via INSERT OR IGNORE (date is PRIMARY KEY) *before*
         # firing — a plain SELECT-then-fire check races when garmin and
         # google_health imports run in separate background threads close
@@ -86,7 +108,8 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
                 sleep_now = conn.execute(
                     "SELECT sleep_score FROM daily_metrics WHERE date=?", (today,)
                 ).fetchone()
-            if sleep_now and sleep_now[0] is not None:
+                is_morning = _is_morning_locally(conn, today)
+            if sleep_now and sleep_now[0] is not None and is_morning:
                 with db() as conn:
                     cur = conn.execute(
                         "INSERT OR IGNORE INTO morning_webhooks(date, sent_at) VALUES (?,?)",
