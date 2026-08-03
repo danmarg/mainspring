@@ -14,7 +14,9 @@ import app.db as db_module
 from app.db import init_db, utc_now
 from app.importers.garmin import (
     _compute_decoupling,
+    _parse_blood_pressure,
     _parse_body_battery,
+    _parse_body_composition,
     _parse_hrv,
     _parse_sleep,
     _parse_splits,
@@ -165,6 +167,63 @@ def test_parse_training_status_vo2max(tmp_db):
     assert ctl[0] == 520.0
 
 
+def test_parse_body_composition_kg(tmp_db):
+    data = {"dateWeightList": [{"weight": 72.5}]}
+    rows = _parse_body_composition(tmp_db, "2025-01-01", data)
+    assert rows == 1
+    row = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='weight_kg'"
+    ).fetchone()
+    assert row[0] == 72.5
+
+
+def test_parse_body_composition_grams(tmp_db):
+    data = {"dateWeightList": [{"weight": 72500}]}
+    rows = _parse_body_composition(tmp_db, "2025-01-01", data)
+    assert rows == 1
+    row = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='weight_kg'"
+    ).fetchone()
+    assert row[0] == 72.5
+
+
+def test_parse_body_composition_empty(tmp_db):
+    assert _parse_body_composition(tmp_db, "2025-01-01", {}) == 0
+
+
+def test_parse_blood_pressure_flat(tmp_db):
+    data = {"systolic": 118, "diastolic": 76, "pulse": 62}
+    rows = _parse_blood_pressure(tmp_db, "2025-01-01", data)
+    assert rows == 3
+    row = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='bp_systolic'"
+    ).fetchone()
+    assert row[0] == 118.0
+
+
+def test_parse_blood_pressure_summaries(tmp_db):
+    data = {
+        "measurementSummaries": [
+            {
+                "systolicSummary": {"average": 120},
+                "diastolicSummary": {"average": 80},
+                "pulseSummary": {"average": 65},
+            }
+        ]
+    }
+    rows = _parse_blood_pressure(tmp_db, "2025-01-01", data)
+    assert rows == 3
+    dia = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='bp_diastolic'"
+    ).fetchone()
+    assert dia[0] == 80.0
+
+
+def test_parse_blood_pressure_partial_is_dropped(tmp_db):
+    data = {"systolic": 118}
+    assert _parse_blood_pressure(tmp_db, "2025-01-01", data) == 0
+
+
 def test_upsert_activity(tmp_db):
     activity = {
         "activityId": "123456789",
@@ -230,6 +289,8 @@ MOCK_SPO2 = {"averageSpO2": 96.5}
 MOCK_RESPIRATION = {"avgBreathingRate": 14.2}
 MOCK_INTENSITY = {"moderateIntensityMinutes": 20, "vigorousIntensityMinutes": 15}
 MOCK_HEART_RATES = {"heartRateValues": [[1735714800000, 58], [1735714920000, 60]]}
+MOCK_WEIGH_INS = {"dateWeightList": [{"weight": 74.2}]}
+MOCK_BLOOD_PRESSURE = {"systolic": 122, "diastolic": 78, "pulse": 60}
 MOCK_ACTIVITIES = [
     {
         "activityId": "999",
@@ -257,6 +318,8 @@ def _make_mock_client():
     client.get_respiration_data.return_value = MOCK_RESPIRATION
     client.get_intensity_minutes_data.return_value = MOCK_INTENSITY
     client.get_heart_rates.return_value = MOCK_HEART_RATES
+    client.get_daily_weigh_ins.return_value = MOCK_WEIGH_INS
+    client.get_blood_pressure.return_value = MOCK_BLOOD_PRESSURE
     client.get_activity_splits.return_value = {
         "lapDTOs": [
             {"distance": 1000.0, "duration": 300, "averageHR": 135},

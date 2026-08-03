@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-A self-hosted personal health data service deployed to Fly.io. It ingests biometrics from Garmin and Fitbit (HRV, sleep, stress, training readiness, activities), accepts manual nutrition/caffeine/alcohol logs via Claude (MCP), and enables lag-correlation analysis between behavior and recovery metrics.
+A self-hosted personal health data service deployed to Fly.io. It ingests biometrics from Garmin and Fitbit (HRV, sleep, stress, training readiness, activities, weight, blood pressure), accepts manual nutrition/caffeine/alcohol logs via Claude (MCP), and enables lag-correlation analysis between behavior and recovery metrics.
 
 **Scope of "provider-independent":** this owns *retention and analysis* — the full history in a format we control, plus correlations the vendor apps won't do. It does **not** own *collection*: data still originates on Garmin/Fitbit devices and flows through their (partly unofficial) cloud APIs, so upstream API breakage is the top operational risk. Two mitigations are baked into the design: capture the untouched upstream payload durably before parsing (`raw_import_payloads`), and back up + test-restore early.
 

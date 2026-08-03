@@ -409,3 +409,67 @@ def test_blood_pressure_in_daily_metrics(tmp_db):
     assert row[0] == 120
     assert row[1] == 80
     assert row[2] == 65
+
+
+def test_weight_falls_back_to_garmin_when_no_manual_log(tmp_db):
+    now = utc_now()
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "weight_kg", 74.2, now)
+    tmp_db.commit()
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+    row = tmp_db.execute(
+        "SELECT weight_kg, source_flags_json FROM daily_metrics WHERE date='2025-06-01'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 74.2
+    assert json.loads(row[1])["weight_kg"] == "garmin"
+
+
+def test_manual_weight_overrides_garmin(tmp_db):
+    now = utc_now()
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "weight_kg", 74.2, now)
+    tmp_db.execute(
+        "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        ("2025-06-01T09:00:00", "weight", "78.5kg", 78.5, "kg", now),
+    )
+    tmp_db.commit()
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+    row = tmp_db.execute(
+        "SELECT weight_kg, source_flags_json FROM daily_metrics WHERE date='2025-06-01'"
+    ).fetchone()
+    assert row[0] == 78.5
+    assert json.loads(row[1])["weight_kg"] == "manual"
+
+
+def test_bp_falls_back_to_garmin_when_no_manual_log(tmp_db):
+    now = utc_now()
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "bp_systolic", 118.0, now)
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "bp_diastolic", 76.0, now)
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "bp_pulse", 62.0, now)
+    tmp_db.commit()
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+    row = tmp_db.execute(
+        "SELECT bp_systolic, bp_diastolic, bp_pulse, source_flags_json "
+        "FROM daily_metrics WHERE date='2025-06-01'"
+    ).fetchone()
+    assert row[0] == 118.0
+    assert row[1] == 76.0
+    assert row[2] == 62.0
+    assert json.loads(row[3])["bp"] == "garmin"
+
+
+def test_bp_partial_garmin_data_is_not_used(tmp_db):
+    now = utc_now()
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "bp_systolic", 118.0, now)
+    tmp_db.commit()
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+    row = tmp_db.execute(
+        "SELECT bp_systolic, bp_diastolic, bp_pulse FROM daily_metrics WHERE date='2025-06-01'"
+    ).fetchone()
+    assert row[0] is None
+    assert row[1] is None
+    assert row[2] is None
