@@ -258,6 +258,30 @@ Datasette (raw SQL over all tables) is available at `/datasette`, gated by the s
 
 ---
 
+## Which metrics come from which platform
+
+Both importers write into the same `raw_daily_metrics` table, so most biometrics are available regardless of source — but a few are platform-specific. This matters for `source_config`/`set_source_preference` (there's nothing to choose between if only one source provides a metric) and for readiness scoring (Garmin-only signals silently drop out of the composite score if you're not wearing a Garmin — see [Configuration](#configuration)).
+
+| Metric | Garmin | Google Health |
+|---|:---:|:---:|
+| HRV | ✅ | ✅ |
+| Resting heart rate | ✅ | ✅ |
+| Sleep score | ✅ (native) | ✅ (synthesized from stages if not provided) |
+| Sleep duration / stages (deep, REM, light, awake) | ✅ | ✅ |
+| Steps, active zone minutes, calories | ✅ | ✅ |
+| SpO2, breathing rate (respiration) | ✅ | ✅ |
+| VO2max | ✅ | ✅ |
+| **Training readiness** (Garmin's own vendor score) | ✅ | ❌ |
+| **Acute/chronic training load (ATL/CTL) → TSB and ACWR** | ✅ | ❌ |
+| **Body Battery** (high/low) | ✅ | ❌ |
+| **Stress score** (avg/max) | ✅ | ❌ |
+| **Suggested workout** | ✅ | ❌ |
+| Blood pressure | ✅ (read + write-back to Garmin Connect) | ❌ |
+
+Garmin is the only source for training-load-derived signals (TSB, ACWR, `training_readiness`) because Google Health/Health Connect has no equivalent API — there's no on-device Banister impulse-response model to read. The composite `readiness` score (see [`get_workout_context`](#query-tools)) degrades gracefully without them: it renormalizes across whatever's available (HRV, sleep, resting HR), it just won't include the two training-load components. If you only have a Garmin-compatible device, none of this matters — Garmin alone covers everything in this table.
+
+---
+
 ## Datasette / SQL exploration
 
 Datasette is available at `/datasette` (authenticate with `DATASETTE_TOKEN`). It gives you a full SQL interface over every table — useful for ad-hoc correlation queries that go beyond what the dashboard and MCP tools expose.
