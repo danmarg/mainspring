@@ -25,6 +25,8 @@ from app.importers.garmin import (
     _parse_training_readiness,
     _parse_training_status,
     _upsert_activity,
+    push_blood_pressure,
+    push_weight,
     run_import,
 )
 
@@ -433,3 +435,50 @@ def test_run_import_with_mock_client(tmp_db, monkeypatch):
         "SELECT type FROM garmin_activities WHERE activity_id='999'"
     ).fetchone()
     assert activity is not None and activity[0] == "running"
+
+
+# ── write-back (push_weight / push_blood_pressure) ──────────────────────────
+
+def test_push_weight_not_configured(monkeypatch):
+    monkeypatch.delenv("GARMIN_EMAIL", raising=False)
+    monkeypatch.delenv("GARMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("GARMINTOKENS", raising=False)
+    assert push_weight(80.0) is False
+
+
+def test_push_weight_success(monkeypatch):
+    monkeypatch.setenv("GARMINTOKENS", "fake-token-store-value-that-is-long-enough-xxxxxxxxx")
+    mock_client = MagicMock()
+    with patch("app.importers.garmin._client", return_value=mock_client):
+        assert push_weight(80.0, ts="2025-06-01T09:00:00+00:00") is True
+    mock_client.add_weigh_in.assert_called_once()
+    _, kwargs = mock_client.add_weigh_in.call_args
+    assert kwargs["weight"] == 80.0
+    assert kwargs["unitKey"] == "kg"
+
+
+def test_push_weight_failure_is_swallowed(monkeypatch):
+    monkeypatch.setenv("GARMINTOKENS", "fake-token-store-value-that-is-long-enough-xxxxxxxxx")
+    mock_client = MagicMock()
+    mock_client.add_weigh_in.side_effect = RuntimeError("boom")
+    with patch("app.importers.garmin._client", return_value=mock_client):
+        assert push_weight(80.0) is False
+
+
+def test_push_blood_pressure_not_configured(monkeypatch):
+    monkeypatch.delenv("GARMIN_EMAIL", raising=False)
+    monkeypatch.delenv("GARMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("GARMINTOKENS", raising=False)
+    assert push_blood_pressure(120, 80, 65) is False
+
+
+def test_push_blood_pressure_success(monkeypatch):
+    monkeypatch.setenv("GARMINTOKENS", "fake-token-store-value-that-is-long-enough-xxxxxxxxx")
+    mock_client = MagicMock()
+    with patch("app.importers.garmin._client", return_value=mock_client):
+        assert push_blood_pressure(120, 80, 65, ts="2025-06-01T08:00:00+00:00") is True
+    mock_client.set_blood_pressure.assert_called_once()
+    _, kwargs = mock_client.set_blood_pressure.call_args
+    assert kwargs["systolic"] == 120
+    assert kwargs["diastolic"] == 80
+    assert kwargs["pulse"] == 65

@@ -405,7 +405,9 @@ def log_note(description: str, ts: Optional[str] = None) -> str:
 
 @mcp.tool()
 def log_weight(kg: float, ts: Optional[str] = None) -> str:
-    """Log a weight measurement in kilograms. ts is UTC ISO-8601 (defaults to now)."""
+    """Log a weight measurement in kilograms. ts is UTC ISO-8601 (defaults to now).
+    Also pushed to Garmin Connect if Garmin credentials are configured
+    (Google Health has no write API yet for this as of Q2 2026)."""
     event_ts = _ts_or_now(ts)
     with db() as conn:
         conn.execute(
@@ -413,7 +415,10 @@ def log_weight(kg: float, ts: Optional[str] = None) -> str:
             (event_ts, "weight", f"{kg}kg", kg, "kg", utc_now()),
         )
     _renormalize_date(event_ts)
-    return f"Logged weight at {event_ts}: {kg}kg"
+    from app.importers.garmin import push_weight
+    pushed = push_weight(kg, event_ts)
+    suffix = " (synced to Garmin)" if pushed else ""
+    return f"Logged weight at {event_ts}: {kg}kg{suffix}"
 
 
 @mcp.tool()
@@ -424,7 +429,10 @@ def log_blood_pressure(
     ts: Optional[str] = None,
 ) -> str:
     """Log a blood pressure reading in mmHg. pulse is beats per minute (optional).
-    ts is UTC ISO-8601 (defaults to now)."""
+    ts is UTC ISO-8601 (defaults to now). Also pushed to Garmin Connect if
+    Garmin credentials are configured and pulse is provided — Garmin's write
+    endpoint requires it (Google Health has no write API yet for this as of
+    Q2 2026)."""
     event_ts = _ts_or_now(ts)
     desc = f"{systolic}/{diastolic}" + (f" pulse {pulse}" if pulse else "")
     with db() as conn:
@@ -439,7 +447,12 @@ def log_blood_pressure(
             ),
         )
     _renormalize_date(event_ts)
-    return f"Logged BP at {event_ts}: {desc}"
+    pushed = False
+    if pulse is not None:
+        from app.importers.garmin import push_blood_pressure
+        pushed = push_blood_pressure(systolic, diastolic, pulse, event_ts)
+    suffix = " (synced to Garmin)" if pushed else ""
+    return f"Logged BP at {event_ts}: {desc}{suffix}"
 
 
 @mcp.tool()
