@@ -2,24 +2,46 @@
 Readiness score and energy curve — shared between dashboard and MCP server.
 
 ━━━ Readiness score ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Weighted composite of four signals (weights in compute_readiness):
+Weighted composite of six signals (weights in compute_readiness):
 
-HRV / 7-day baseline (40%)
+HRV / 7-day baseline (35%)
   The ratio of today's HRV to its own 7-day rolling mean is a better fatigue
   signal than the raw value, because individual baselines vary so much.
   Reference: Plews, D.J. et al. (2012). "Heart rate variability in elite
   triathletes, is variation in variability the key to effective training?
   A case comparison." Int J Sports Physiol Perform, 7(4), 327-336.
 
-Sleep score (30%)
-  Passed through as-is from Garmin/Fitbit sleep staging algorithms, which
-  are themselves calibrated against polysomnography. When no vendor score
-  is available for a day (e.g. Google Health-only data), normalize.py
-  synthesizes one from duration/efficiency/deep%/rem%, calibrated against
-  171 days of overlapping Garmin+Google Health data (~5.5 MAE, see
+  Folded into this component: the day-to-day *variability* of HRV, measured
+  as the standard deviation of ln(RMSSD) across the same trailing 7 nights.
+  A rising CV is itself a marker of autonomic stress/overreaching independent
+  of the mean — two athletes with the same 7-day average HRV can be in very
+  different states depending on how noisy the nightly values are. Applied as
+  a penalty on top of the ratio score once CV exceeds a typical healthy
+  range (~8%), capped so it can't zero out the component on its own.
+  Reference: Plews, D.J. et al. (2013). "Evaluating training adaptation with
+  heart-rate measures: a methods comparison." Int J Sports Physiol Perform,
+  8(6), 688-691.
+  Reference: Buchheit, M. (2014). "Monitoring training status with HR
+  measures: do all roads lead to Rome?" Front Physiol, 5, 73.
+
+Sleep debt (25%)
+  Rather than reading last night's score in isolation, this is an
+  exponentially-weighted average of sleep scores over the trailing ~10
+  nights (half-life 2.5 nights), so a run of poor nights still weighs on
+  today's readiness even after a single good one — cumulative sleep debt
+  dissipates gradually rather than resetting to zero at each good night.
+  Reference: Fullagar, H.H.K. et al. (2015). "Sleep and athletic
+  performance: the effects of sleep loss on exercise performance, and
+  physiological and cognitive responses to exercise." Sports Med, 45(2),
+  161-186.
+  Per-night scores are passed as-is from Garmin/Fitbit sleep staging
+  algorithms, calibrated against polysomnography. When no vendor score is
+  available for a day, normalize.py synthesizes one from
+  duration/efficiency/deep%/rem%, calibrated against 171 days of
+  overlapping Garmin+Google Health data (~5.5 MAE, see
   synthesize_sleep_score in app/normalize.py).
 
-Resting HR vs baseline (20%)
+Resting HR vs baseline (15%)
   Elevated morning resting HR is an established marker of incomplete recovery
   and autonomic stress. Inverted from the HRV ratio so high = bad.
   Reference: Coote, J.H. (2010). "Recovery of heart rate following intense
@@ -30,6 +52,15 @@ Training Stress Balance / form (10%)
   negative TSB = accumulated fatigue. Garmin provides CTL/ATL directly.
   Reference: Banister, E.W. (1991). "Modeling elite athletic performance."
   Physiological Testing of Elite Athletes, 403-424.
+
+Acute:Chronic Workload Ratio (15%)
+  ATL/CTL ratio (the same two Garmin-provided numbers behind TSB, read as a
+  ratio instead of a difference). Sweet spot 0.8-1.3; below it risks
+  detraining, above it is the most replicated injury-risk signal in the
+  load-monitoring literature, penalized more steeply than the low side.
+  Reference: Gabbett, T.J. (2016). "The training-injury prevention paradox:
+  should athletes be training smarter and harder?" Br J Sports Med, 50(5),
+  273-280.
 
 ━━━ Energy / alertness curve ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Two-process model: alertness(t) = f(C(t), S(t)) where:
@@ -84,13 +115,61 @@ import sqlite3
 from datetime import date
 
 
+def _ln_rmssd_cv(daily_hrv_values: list[float]) -> float | None:
+    """
+    Day-to-day HRV variability: SD of ln-transformed daily RMSSD values across
+    a trailing window, expressed as a fraction (0.08 = 8%). ln-transforming
+    first normalizes RMSSD's right-skewed distribution so the SD approximates
+    a coefficient of variation (Plews et al. 2013; Buchheit 2014).
+
+    Needs >=4 nights to be meaningful; returns None otherwise.
+    """
+    values = [v for v in daily_hrv_values if v and v > 0]
+    if len(values) < 4:
+        return None
+    logs = [math.log(v) for v in values]
+    mean = sum(logs) / len(logs)
+    variance = sum((x - mean) ** 2 for x in logs) / len(logs)
+    return math.sqrt(variance)
+
+
+def _sleep_debt_score(nights: list[tuple[str, float]], half_life_days: float = 2.5) -> float | None:
+    """
+    Exponentially-weighted average of sleep scores over recent nights, most
+    recent night weighted heaviest. A run of poor nights still drags this
+    down even after one good night, unlike reading last night's score alone
+    (Fullagar et al. 2015 on cumulative sleep debt).
+
+    Args:
+        nights: list of (date_str, score) sorted ascending by date (oldest first).
+        half_life_days: days for a night's influence to decay by half.
+    """
+    scored = [(d, s) for d, s in nights if s is not None]
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0])
+    most_recent = date.fromisoformat(scored[-1][0])
+
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for d_str, score in scored:
+        days_ago = (most_recent - date.fromisoformat(d_str)).days
+        weight = 0.5 ** (days_ago / half_life_days)
+        weighted_sum += score * weight
+        total_weight += weight
+
+    return weighted_sum / total_weight if total_weight > 0 else None
+
+
 def compute_readiness(
     hrv: float | None,
     hrv_7d: float | None,
-    sleep_score: float | None,
+    hrv_cv: float | None,
+    sleep_debt_score: float | None,
     rhr: float | None,
     rhr_7d: float | None,
-    tsb: float | None,
+    atl: float | None,
+    ctl: float | None,
 ) -> dict:
     """
     Compute a composite readiness score 0-100.
@@ -103,30 +182,41 @@ def compute_readiness(
     """
     components: list[dict] = []
 
-    # HRV vs 7-day rolling mean (weight 0.40)
-    # Plews et al. 2012: current/rolling-mean ratio is the key signal
+    # HRV vs 7-day rolling mean, with a variability penalty (weight 0.35)
+    # Plews et al. 2012: current/rolling-mean ratio is the key signal.
+    # Plews et al. 2013 / Buchheit 2014: elevated night-to-night CV is an
+    # independent overreaching signal, so it discounts the ratio score.
     if hrv is not None and hrv_7d and hrv_7d > 0:
         ratio = hrv / hrv_7d
         # 50 at baseline, +/- 2.5 points per percent deviation; capped 0-100
         hrv_score = min(100.0, max(0.0, 50.0 + (ratio - 1.0) * 250.0))
         sign = "+" if ratio >= 1 else ""
+        detail = f"{hrv:.0f}ms vs {hrv_7d:.0f}ms avg ({sign}{(ratio-1)*100:.0f}%)"
+
+        if hrv_cv is not None:
+            # Healthy trailing-week CV is roughly <=8%; penalize above that,
+            # ramping to a 30pt cap by ~15% (capped so CV alone can't zero the score).
+            cv_penalty = min(30.0, max(0.0, (hrv_cv - 0.08) / (0.15 - 0.08) * 30.0))
+            hrv_score = max(0.0, hrv_score - cv_penalty)
+            detail += f", CV {hrv_cv*100:.0f}%"
+
         components.append({
             "name": "HRV",
             "score": hrv_score,
-            "weight": 0.40,
-            "detail": f"{hrv:.0f}ms vs {hrv_7d:.0f}ms avg ({sign}{(ratio-1)*100:.0f}%)",
+            "weight": 0.35,
+            "detail": detail,
         })
 
-    # Sleep score (weight 0.30)
-    if sleep_score is not None:
+    # Sleep debt: EWMA over trailing nights (weight 0.25)
+    if sleep_debt_score is not None:
         components.append({
             "name": "Sleep",
-            "score": float(sleep_score),
-            "weight": 0.30,
-            "detail": f"Score {sleep_score:.0f}/100",
+            "score": float(sleep_debt_score),
+            "weight": 0.25,
+            "detail": f"Debt-adjusted {sleep_debt_score:.0f}/100",
         })
 
-    # RHR vs 7-day rolling mean, inverted (weight 0.20)
+    # RHR vs 7-day rolling mean, inverted (weight 0.15)
     if rhr is not None and rhr_7d and rhr_7d > 0:
         ratio = rhr / rhr_7d
         # 50 at baseline; elevated RHR (ratio > 1) drives score down
@@ -134,12 +224,13 @@ def compute_readiness(
         components.append({
             "name": "Resting HR",
             "score": rhr_score,
-            "weight": 0.20,
+            "weight": 0.15,
             "detail": f"{rhr:.0f}bpm vs {rhr_7d:.0f}bpm avg",
         })
 
     # Training Stress Balance / form (weight 0.10 when available)
-    if tsb is not None:
+    if atl is not None and ctl is not None:
+        tsb = ctl - atl
         # 50 at TSB=0; +2pts per unit of TSB (100 at +25, 0 at -25)
         tsb_score = min(100.0, max(0.0, 50.0 + tsb * 2.0))
         sign = "+" if tsb >= 0 else ""
@@ -148,6 +239,24 @@ def compute_readiness(
             "score": tsb_score,
             "weight": 0.10,
             "detail": f"TSB {sign}{tsb:.0f}",
+        })
+
+    # Acute:Chronic Workload Ratio (weight 0.15 when available)
+    # Gabbett 2016: sweet spot 0.8-1.3; penalize high side more steeply
+    # than low side, matching the asymmetric injury-risk curve.
+    if atl is not None and ctl is not None and ctl > 0:
+        acwr = atl / ctl
+        if 0.8 <= acwr <= 1.3:
+            acwr_score = 100.0
+        elif acwr < 0.8:
+            acwr_score = max(0.0, 100.0 - (0.8 - acwr) * 150.0)
+        else:
+            acwr_score = max(0.0, 100.0 - (acwr - 1.3) * 220.0)
+        components.append({
+            "name": "ACWR",
+            "score": acwr_score,
+            "weight": 0.15,
+            "detail": f"ATL/CTL {acwr:.2f}",
         })
 
     if not components:
@@ -185,15 +294,25 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
     if row:
         hrv, sleep_score, rhr = row
 
-    avg = conn.execute(
-        """SELECT AVG(hrv), AVG(resting_hr) FROM daily_metrics
+    trailing = conn.execute(
+        """SELECT hrv, resting_hr FROM daily_metrics
            WHERE date >= date(?, '-7 days') AND date < ?""",
         (date_str, date_str),
-    ).fetchone()
-    hrv_7d = avg[0] if avg else None
-    rhr_7d = avg[1] if avg else None
+    ).fetchall()
+    hrv_values_7d = [r[0] for r in trailing if r[0] is not None]
+    rhr_values_7d = [r[1] for r in trailing if r[1] is not None]
+    hrv_7d = sum(hrv_values_7d) / len(hrv_values_7d) if hrv_values_7d else None
+    rhr_7d = sum(rhr_values_7d) / len(rhr_values_7d) if rhr_values_7d else None
+    hrv_cv = _ln_rmssd_cv(hrv_values_7d + ([hrv] if hrv is not None else []))
 
-    tsb_row = conn.execute(
+    sleep_rows = conn.execute(
+        """SELECT date, sleep_score FROM daily_metrics
+           WHERE date <= ? AND date > date(?, '-10 days') AND sleep_score IS NOT NULL""",
+        (date_str, date_str),
+    ).fetchall()
+    sleep_debt = _sleep_debt_score(sleep_rows) if sleep_rows else sleep_score
+
+    load_row = conn.execute(
         """SELECT
                MAX(CASE WHEN metric='ctl' THEN value END),
                MAX(CASE WHEN metric='atl' THEN value END)
@@ -201,11 +320,10 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
            WHERE date=? AND metric IN ('ctl', 'atl')""",
         (date_str,),
     ).fetchone()
-    tsb = None
-    if tsb_row and tsb_row[0] is not None and tsb_row[1] is not None:
-        tsb = tsb_row[0] - tsb_row[1]
+    ctl = load_row[0] if load_row else None
+    atl = load_row[1] if load_row else None
 
-    return compute_readiness(hrv, hrv_7d, sleep_score, rhr, rhr_7d, tsb)
+    return compute_readiness(hrv, hrv_7d, hrv_cv, sleep_debt, rhr, rhr_7d, atl, ctl)
 
 
 def alertness_curve(

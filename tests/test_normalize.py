@@ -369,10 +369,11 @@ def test_weight_in_daily_metrics(tmp_db):
 
 
 def test_training_load_in_daily_metrics(tmp_db):
+    """Garmin writes acute/chronic load as raw metrics 'atl'/'ctl' — normalize.py
+    must map those into the daily_metrics columns and derive the ratio (ACWR)."""
     now = utc_now()
-    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "acute_training_load", 320.0, now)
-    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "chronic_training_load", 290.0, now)
-    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "training_load_ratio", 1.10, now)
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "atl", 320.0, now)
+    upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "ctl", 290.0, now)
     tmp_db.commit()
     rebuild_daily_metrics(tmp_db)
     tmp_db.commit()
@@ -383,7 +384,23 @@ def test_training_load_in_daily_metrics(tmp_db):
     assert row is not None
     assert row[0] == 320.0
     assert row[1] == 290.0
-    assert abs(row[2] - 1.10) < 0.001
+    assert abs(row[2] - (320.0 / 290.0)) < 0.001
+
+
+def test_training_load_ratio_none_without_both_atl_and_ctl(tmp_db):
+    now = utc_now()
+    upsert_raw_metric(tmp_db, "2025-06-02", "garmin", "atl", 320.0, now)
+    tmp_db.commit()
+    rebuild_daily_metrics(tmp_db)
+    tmp_db.commit()
+    row = tmp_db.execute(
+        "SELECT acute_training_load, chronic_training_load, training_load_ratio "
+        "FROM daily_metrics WHERE date='2025-06-02'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 320.0
+    assert row[1] is None
+    assert row[2] is None
 
 
 def test_blood_pressure_in_daily_metrics(tmp_db):

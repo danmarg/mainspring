@@ -248,6 +248,8 @@ def test_get_suggested_workout_returns_with_context():
     assert result["workout_type"] == "recovery"
     assert result["training_context"]["training_readiness"] == 68.0
     assert result["training_context"]["acute_training_load"] == 280.0
+    assert "readiness" in result["training_context"]
+    assert "label" in result["training_context"]["readiness"]
 
 
 # ── source config ─────────────────────────────────────────────────────────────
@@ -433,3 +435,5 @@ def test_get_workout_context():
     # training_readiness lives inside "today"
     assert result["today"]["training_readiness"] is not None
     assert isinstance(result["today"]["hrv"], (int, float))
+    assert "readiness" in result["today"]
+    assert result["today"]["readiness"]["score"] is not None

@@ -316,7 +316,11 @@ def get_daily_metrics(
 @mcp.tool()
 def get_suggested_workout(date: Optional[str] = None) -> dict | None:
     """Return Garmin's suggested workout for a given date (YYYY-MM-DD, defaults to today),
-    plus the training-load context (readiness, acute/chronic load) behind it."""
+    plus the training-load context behind it: Garmin's own training_readiness alongside
+    this service's own composite readiness score (HRV incl. day-to-day variability,
+    debt-adjusted sleep, resting HR, TSB, and ACWR — see app/readiness.py)."""
+    from app.readiness import readiness_from_db
+
     d = _date_or_today(date)
     with db() as conn:
         sw = conn.execute(
@@ -332,16 +336,18 @@ def get_suggested_workout(date: Optional[str] = None) -> dict | None:
             (d,),
         ).fetchone()
 
+        readiness = readiness_from_db(conn, d)
+
     if not sw:
         return None
 
-    context = {}
+    context = {"readiness": readiness}
     if metrics:
-        context = {
+        context.update({
             "training_readiness": metrics[0],
             "hrv": metrics[1],
             "stress_avg": metrics[2],
-        }
+        })
         for key, val in zip(
             ("acute_training_load", "chronic_training_load", "training_load_ratio"),
             metrics[3:],
@@ -628,6 +634,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     aerobic efficiency trend, Garmin's suggested workout, recent activities, and
     personalized insights from historical correlations."""
     from app.analysis import compute_correlations
+    from app.readiness import readiness_from_db
     from datetime import date as date_cls, timedelta
 
     d = _date_or_today(date)
@@ -716,6 +723,8 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
         except Exception:
             correlations = []
 
+        readiness = readiness_from_db(conn, d)
+
     # ── today ────────────────────────────────────────────────────────────────
     today: dict = {}
     if today_row:
@@ -758,6 +767,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
                 "slight_overreaching" if ratio < 1.5 else
                 "overreaching"
             )
+    today["readiness"] = readiness
 
     # ── yesterday ────────────────────────────────────────────────────────────
     yesterday_behavior: dict = {}
@@ -908,6 +918,10 @@ planning, and recommendations. The server never fetches weather or sends message
 
 1. Call `get_workout_context()` — one call returns everything needed:
    - today's HRV, sleep, stress, body battery, training readiness
+   - `readiness`: this service's own composite score (0-100, label Primed/Ready/
+     Moderate/Low/Rest) blending HRV ratio + day-to-day HRV variability, debt-adjusted
+     sleep (trailing ~10 nights, not just last night), resting HR, TSB, and ACWR —
+     independent of Garmin's own training_readiness, useful as a cross-check
    - HRV trend (improving/stable/declining over 7 days)
    - TSB (Training Stress Balance = CTL − ATL; positive = fresh, negative = fatigued/building)
    - load_status derived from ATL/CTL ratio
@@ -942,6 +956,7 @@ planning, and recommendations. The server never fetches weather or sends message
 | training_load_ratio | 0.8–1.3 | 1.3–1.5 | >1.5 overreaching |
 | sleep_score | >75 | 60–75 | <60 compounds other signals |
 | training_readiness | >70 | 50–70 | <50 favour recovery |
+| readiness.score | ≥65 (Ready/Primed) | 50–65 (Moderate) | <50 → Low/Rest, favour recovery |
 | body_battery_high | >70 | 40–70 | <40 suggests poor recovery |
 
 TSB interpretation: think of it as "form". Positive = rested/sharp (good for racing or
