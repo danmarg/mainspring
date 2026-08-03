@@ -59,6 +59,54 @@ def _safe(fn, label: str) -> Any | None:
         return None
 
 
+def _as_utc_iso(ts: str | None) -> str:
+    """Normalize a possibly-naive ISO timestamp to an explicit UTC offset,
+    since garminconnect's write endpoints interpret a naive timestamp as
+    local server time, not UTC."""
+    if not ts:
+        return datetime.now(timezone.utc).isoformat()
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def push_weight(kg: float, ts: str | None = None) -> bool:
+    """Write a weigh-in to Garmin Connect (e.g. from a manual MCP log_weight
+    call), so it shows up alongside device-synced weigh-ins. Best-effort:
+    returns False (without raising) if Garmin isn't configured or the push
+    fails, so callers can log locally regardless of Garmin's availability."""
+    if not _configured():
+        return False
+    try:
+        client = _client()
+        client.add_weigh_in(weight=kg, unitKey="kg", timestamp=_as_utc_iso(ts))
+        return True
+    except Exception as exc:
+        log.warning("garmin push_weight failed: %s", exc)
+        return False
+
+
+def push_blood_pressure(
+    systolic: int, diastolic: int, pulse: int, ts: str | None = None, notes: str = ""
+) -> bool:
+    """Write a blood pressure reading to Garmin Connect. Best-effort, same
+    contract as push_weight. Garmin's set_blood_pressure requires pulse, so
+    callers without a pulse reading should skip calling this."""
+    if not _configured():
+        return False
+    try:
+        client = _client()
+        client.set_blood_pressure(
+            systolic=systolic, diastolic=diastolic, pulse=pulse,
+            timestamp=_as_utc_iso(ts), notes=notes,
+        )
+        return True
+    except Exception as exc:
+        log.warning("garmin push_blood_pressure failed: %s", exc)
+        return False
+
+
 def _store_raw(conn, endpoint: str, data: Any, date_str: str | None = None) -> None:
     upsert_raw_payload(
         conn,
