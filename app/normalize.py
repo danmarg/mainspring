@@ -40,9 +40,6 @@ DAILY_METRIC_COLUMNS = [
     "breathing_rate",
     "vo2max",
     "steps",
-    "acute_training_load",
-    "chronic_training_load",
-    "training_load_ratio",
 ]
 
 # ── timezone resolution ─────────────────────────────────────────────────────
@@ -228,6 +225,23 @@ def _rebuild_one_day(conn, date_str: str) -> None:
         values[metric] = val
         if src:
             source_flags[metric] = src
+
+    # Acute/chronic training load: Garmin writes these as raw metrics "atl"/"ctl"
+    # (dailyTrainingLoadAcute/Chronic), not under the daily_metrics column names.
+    # training_load_ratio (ACWR) isn't provided directly — derive it from the two.
+    atl_val, atl_src = resolve_metric(conn, date_str, "atl")
+    ctl_val, ctl_src = resolve_metric(conn, date_str, "ctl")
+    values["acute_training_load"] = atl_val
+    values["chronic_training_load"] = ctl_val
+    if atl_src:
+        source_flags["acute_training_load"] = atl_src
+    if ctl_src:
+        source_flags["chronic_training_load"] = ctl_src
+    if atl_val is not None and ctl_val is not None and ctl_val > 0:
+        values["training_load_ratio"] = round(atl_val / ctl_val, 3)
+        source_flags["training_load_ratio"] = "derived"
+    else:
+        values["training_load_ratio"] = None
 
     if values.get("sleep_score") is None:
         awake_min, _ = resolve_metric(conn, date_str, "sleep_awake_min")
