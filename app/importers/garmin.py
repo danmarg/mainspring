@@ -368,6 +368,74 @@ def _parse_intensity_minutes(conn, date_str: str, data: dict | list) -> int:
     return rows
 
 
+def _parse_body_composition(conn, date_str: str, data: dict) -> int:
+    """Extract same-day weigh-in weight from get_daily_weigh_ins(ds).
+    Response shape (confirmed via garminconnect's own delete_weigh_ins, which
+    reads dateWeightList[].samplePk): {"dateWeightList": [{"weight": ..., ...}]}.
+    The API's weight units aren't documented; Garmin's raw values are grams,
+    so branch on magnitude rather than assume, to avoid a silent 1000x error."""
+    now = utc_now()
+    entries = data.get("dateWeightList") or []
+    if not entries:
+        return 0
+    try:
+        raw = entries[0].get("weight")
+        if raw is None:
+            return 0
+        raw = float(raw)
+    except (TypeError, ValueError):
+        return 0
+    kg = raw / 1000.0 if raw > 500 else raw
+    upsert_raw_metric(conn, date_str, SOURCE, "weight_kg", kg, now)
+    return 1
+
+
+def _parse_blood_pressure(conn, date_str: str, data: dict) -> int:
+    """Extract systolic/diastolic/pulse from get_blood_pressure(ds).
+    No consumer of this endpoint exists elsewhere in the installed
+    garminconnect library to confirm the response shape, so this is
+    defensive against several plausible key layouts; the raw payload is
+    stored via _store_raw so this is a one-look fix if a real account
+    returns something else. Written as all-three-or-nothing since a
+    partial reading isn't a meaningful measurement."""
+    now = utc_now()
+    summaries = data.get("measurementSummaries") or []
+    summary = summaries[0] if summaries else data
+
+    def _pick(key: str, summary_key: str) -> float | None:
+        val = summary.get(key)
+        if val is None:
+            nested = summary.get(summary_key)
+            if isinstance(nested, dict):
+                val = nested.get("average")
+        return val
+
+    systolic = _pick("systolic", "systolicSummary")
+    diastolic = _pick("diastolic", "diastolicSummary")
+    pulse = _pick("pulse", "pulseSummary")
+
+    if systolic is None or diastolic is None or pulse is None:
+        measurements = summary.get("measurements") or []
+        if measurements:
+            m = measurements[0]
+            systolic = systolic if systolic is not None else m.get("systolic")
+            diastolic = diastolic if diastolic is not None else m.get("diastolic")
+            pulse = pulse if pulse is not None else m.get("pulse")
+
+    if systolic is None or diastolic is None or pulse is None:
+        return 0
+
+    try:
+        systolic, diastolic, pulse = float(systolic), float(diastolic), float(pulse)
+    except (TypeError, ValueError):
+        return 0
+
+    upsert_raw_metric(conn, date_str, SOURCE, "bp_systolic", systolic, now)
+    upsert_raw_metric(conn, date_str, SOURCE, "bp_diastolic", diastolic, now)
+    upsert_raw_metric(conn, date_str, SOURCE, "bp_pulse", pulse, now)
+    return 3
+
+
 # running-type activity types worth checking for aerobic decoupling
 _RUNNING_TYPES = {"running", "trail_running", "treadmill_running", "track_running", "street_running"}
 _MIN_DECOUPLING_DURATION_S = 25 * 60
@@ -603,6 +671,18 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
         if data:
             _store_raw(conn, "get_intensity_minutes_data", data, ds)
             rows_upserted += _parse_intensity_minutes(conn, ds, data)
+
+        # weigh-ins (weight, from a synced smart scale)
+        data = _safe(lambda: client.get_daily_weigh_ins(ds), f"get_daily_weigh_ins({ds})")
+        if data:
+            _store_raw(conn, "get_daily_weigh_ins", data, ds)
+            rows_upserted += _parse_body_composition(conn, ds, data)
+
+        # blood pressure (from a synced BP monitor)
+        data = _safe(lambda: client.get_blood_pressure(ds), f"get_blood_pressure({ds})")
+        if data:
+            _store_raw(conn, "get_blood_pressure", data, ds)
+            rows_upserted += _parse_blood_pressure(conn, ds, data)
 
     # ── range endpoints ─────────────────────────────────────────────────────
 

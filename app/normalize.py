@@ -261,6 +261,12 @@ def _rebuild_one_day(conn, date_str: str) -> None:
         (date_str,),
     ).fetchone()
     weight_kg = weight_row[0] if weight_row else None
+    if weight_kg is None:
+        weight_kg, weight_src = resolve_metric(conn, date_str, "weight_kg")
+        if weight_src:
+            source_flags["weight_kg"] = weight_src
+    else:
+        source_flags["weight_kg"] = "manual"
 
     rpe_row = conn.execute(
         "SELECT quantity FROM manual_logs WHERE type='rpe' AND DATE(ts)=? ORDER BY ts DESC LIMIT 1",
@@ -282,6 +288,17 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             bp_pulse = bp.get("pulse")
         except Exception:
             pass
+    if bp_systolic is None:
+        # all-three-or-nothing: a device reading is one measurement event,
+        # so don't mix a manual systolic with a device diastolic/pulse.
+        bp_sys_val, bp_src = resolve_metric(conn, date_str, "bp_systolic")
+        bp_dia_val, _ = resolve_metric(conn, date_str, "bp_diastolic")
+        bp_pulse_val, _ = resolve_metric(conn, date_str, "bp_pulse")
+        if bp_sys_val is not None and bp_dia_val is not None and bp_pulse_val is not None:
+            bp_systolic, bp_diastolic, bp_pulse = bp_sys_val, bp_dia_val, bp_pulse_val
+            source_flags["bp"] = bp_src
+    else:
+        source_flags["bp"] = "manual"
 
     conn.execute(
         """
