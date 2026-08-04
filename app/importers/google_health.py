@@ -301,6 +301,13 @@ def _fetch_and_store_hrv(conn, target_dates: set, tokens: dict, max_pages: int =
             )
             rows += 1
 
+        # Commit each page rather than holding one long transaction across up to
+        # 500 pages (backfills) — otherwise the write lock stays held for however
+        # long that pagination takes, and every other writer (MCP logging tools,
+        # a concurrently-scheduled Garmin import) silently blocks on it for up to
+        # busy_timeout (5min) instead of proceeding.
+        conn.commit()
+
         if past_window:
             break
         page_token = data.get("nextPageToken")
@@ -684,6 +691,12 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
             if hr_data:
                 upsert_raw_payload(conn, SOURCE, "heart_rate_intraday", json.dumps(hr_data), ds)
                 rows_upserted += _parse_intraday_hr(conn, hr_data)
+
+        # Commit per day rather than holding one open write transaction across
+        # the whole chunk (each day is several sequential blocking HTTP calls —
+        # a backfill chunk can take minutes). See _fetch_and_store_hrv for the
+        # same reasoning applied to its own page loop below.
+        conn.commit()
 
     # Intraday HRV (RMSSD): heart-rate-variability doesn't support date filters, so we
     # page newest-first, writing to DB as each page arrives (no in-memory accumulation).
