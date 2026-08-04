@@ -1581,6 +1581,12 @@ async def vitals(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
+        skin_temp_rows = _rows(conn, """
+            SELECT date, skin_temp_deviation FROM daily_metrics
+            WHERE date >= date('now', ?) AND skin_temp_deviation IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
         score_rows = _rows(conn, """
             SELECT date, sleep_score FROM daily_metrics
             WHERE date >= date('now', ?) AND sleep_score IS NOT NULL ORDER BY date
@@ -1611,5 +1617,7 @@ async def vitals(request: Request, days: str = "30",
         "spo2_spec": _sparse_line_chart(spo2_rows, "spo2_avg", "SpO2 (%)", color="#7ec8e3", x_domain=x_domain),
         "breathing_spec": _sparse_line_chart(
             breathing_rows, "breathing_rate", "Breathing rate (br/min)", color="#5cb85c", x_domain=x_domain),
+        "skin_temp_spec": _diverging_bar_chart(
+            skin_temp_rows, "skin_temp_deviation", "Skin temp deviation (°C)", invert_color=True, x_domain=x_domain),
         "bp_spec": _bp_chart(bp_rows, x_domain=x_domain),
     })
