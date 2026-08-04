@@ -11,7 +11,9 @@ from app.readiness import (
     _circular_sd_hours,
     _ln_rmssd_cv,
     _sleep_debt_score,
+    compute_illness_risk,
     compute_readiness,
+    illness_risk_from_db,
     readiness_from_db,
     sleep_regularity,
     sleep_regularity_from_db,
@@ -241,6 +243,96 @@ def test_readiness_from_db_uses_trailing_sleep_debt_and_acwr():
     # Last night was 90 but preceded by a week of 50s — debt-adjusted score should
     # land well below the raw last-night value.
     assert sleep_component["score"] < 90.0
+
+
+# ── compute_illness_risk ────────────────────────────────────────────────────
+
+def _day(d, rhr=50.0, rhr_base=50.0, hrv=60.0, hrv_base=60.0, skin_temp=0.0):
+    return {
+        "date": d, "rhr": rhr, "rhr_baseline": rhr_base,
+        "hrv": hrv, "hrv_baseline": hrv_base, "skin_temp_deviation": skin_temp,
+    }
+
+
+def test_compute_illness_risk_green_when_all_near_baseline():
+    result = compute_illness_risk([_day("2026-01-01")])
+    assert result["level"] == "green"
+    assert result["signals"] == []
+
+
+def test_compute_illness_risk_yellow_for_single_signal():
+    result = compute_illness_risk([_day("2026-01-01", rhr=54.0)])  # +4bpm
+    assert result["level"] == "yellow"
+    assert len(result["signals"]) == 1
+
+
+def test_compute_illness_risk_red_requires_two_signals_same_day():
+    result = compute_illness_risk([_day("2026-01-01", rhr=54.0, hrv=50.0)])  # +4bpm, 83% baseline
+    assert result["level"] == "red"
+    assert len(result["signals"]) == 2
+
+
+def test_compute_illness_risk_red_for_cascade_across_days():
+    """RHR elevated day 1, skin temp elevated day 2, HRV suppressed day 3 — none
+    concordant on a single day, but the trailing window should still catch it."""
+    days = [
+        _day("2026-01-01", rhr=54.0),
+        _day("2026-01-02", skin_temp=0.5),
+        _day("2026-01-03", hrv=50.0),
+    ]
+    result = compute_illness_risk(days)
+    assert result["level"] == "red"
+    assert len(result["signals"]) == 3
+
+
+def test_compute_illness_risk_no_data_when_no_baselines():
+    days = [{"date": "2026-01-01", "rhr": None, "rhr_baseline": None,
+             "hrv": None, "hrv_baseline": None, "skin_temp_deviation": None}]
+    result = compute_illness_risk(days)
+    assert result["level"] is None
+
+
+def test_compute_illness_risk_hard_training_day_not_flagged_by_rhr_alone():
+    """A single elevated RHR from hard training shouldn't read as 'possible
+    illness' on its own — that's exactly why red requires 2+ concordant signals."""
+    result = compute_illness_risk([_day("2026-01-01", rhr=54.0)])
+    assert result["level"] != "red"
+
+
+# ── illness_risk_from_db integration ────────────────────────────────────────
+
+def test_illness_risk_from_db_flags_cascade_within_window():
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    for d in ["2025-06-01", "2025-06-02", "2025-06-03", "2025-06-04",
+              "2025-06-05", "2025-06-06", "2025-06-07"]:
+        conn.execute(
+            "INSERT INTO daily_metrics(date, resting_hr, hrv, source_flags_json) VALUES (?,?,?,?)",
+            (d, 50.0, 60.0, "{}"),
+        )
+    # Trailing 3-day window: RHR up on day 1, skin temp up on day 2, HRV down on day 3.
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, hrv, skin_temp_deviation, source_flags_json) "
+        "VALUES (?,?,?,?,?)", ("2025-06-08", 54.0, 60.0, None, "{}"))
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, hrv, skin_temp_deviation, source_flags_json) "
+        "VALUES (?,?,?,?,?)", ("2025-06-09", 50.0, 60.0, 0.5, "{}"))
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, hrv, skin_temp_deviation, source_flags_json) "
+        "VALUES (?,?,?,?,?)", ("2025-06-10", 50.0, 50.0, None, "{}"))
+    conn.commit()
+
+    result = illness_risk_from_db(conn, "2025-06-10")
+    conn.close()
+
+    assert result["level"] == "red"
+    assert len(result["signals"]) == 3
+
+
+def test_illness_risk_from_db_no_data_returns_none_level():
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    result = illness_risk_from_db(conn, "2025-06-10")
+    conn.close()
+    assert result["level"] is None
 
 
 # ── sleep regularity ──────────────────────────────────────────────────────────

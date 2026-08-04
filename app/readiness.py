@@ -365,6 +365,143 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
     return compute_readiness(hrv, hrv_7d, hrv_cv, sleep_debt, rhr, rhr_7d, atl, ctl)
 
 
+# ── illness / physiological-stress risk ──────────────────────────────────────
+#
+# Heuristic, not a validated diagnostic score — no consumer vendor (Garmin,
+# Oura, WHOOP) has published peer-reviewed validation of their composite
+# illness-risk weighting, and neither has this. What the literature does
+# support:
+#
+#   - Multi-signal beats any single signal. A systematic review of wearable-
+#     based SARS-CoV-2 detection found resting HR, HRV, and respiratory rate
+#     each carry independent signal, while skin temperature alone was the
+#     least reliable metric in isolation — it adds value only in combination.
+#     Reference: Kamišalić, A. et al. (2022). "The role of wearable devices
+#     in detecting SARS-CoV-2: A systematic review." IJERPH / PMC9020803.
+#
+#   - The signals don't move together — they cascade over a few days rather
+#     than all shifting on the same day (RHR first, skin temp next, HRV
+#     later, symptoms after). That pattern is well-documented in consumer
+#     wearable illness-detection write-ups but not itself peer-reviewed, so
+#     it's treated here as a design constraint rather than a cited finding:
+#     requiring same-day concordance across all three signals would miss it,
+#     so this looks for signals crossing threshold at any point within a
+#     trailing window instead of on a single day.
+#
+# Each signal is evaluated against the athlete's own trailing baseline (same
+# 7-day HRV/RHR baselines as compute_readiness, methodology-matched via the
+# source_flags_json checks) rather than an absolute threshold, since normal
+# ranges vary hugely between people.
+
+def compute_illness_risk(
+    days: list[dict],
+) -> dict:
+    """
+    days: list of {date, rhr, rhr_baseline, hrv, hrv_baseline, skin_temp_deviation},
+    most recent last. Missing values are fine (per-field None).
+
+    Returns {level: "green"|"yellow"|"red"|None, label, color, detail, signals}
+    where signals is a list of the individual triggers found in the window.
+    """
+    RHR_DELTA_BPM = 3.0       # bpm above baseline
+    HRV_RATIO = 0.90          # fraction of baseline
+    SKIN_TEMP_C = 0.3         # degrees C above personal baseline
+
+    triggers: dict[str, dict] = {}  # signal name -> first/strongest trigger found
+
+    for day in days:
+        d = day.get("date")
+
+        rhr, rhr_base = day.get("rhr"), day.get("rhr_baseline")
+        if rhr is not None and rhr_base:
+            delta = rhr - rhr_base
+            if delta >= RHR_DELTA_BPM and "Resting HR" not in triggers:
+                triggers["Resting HR"] = {"date": d, "detail": f"+{delta:.0f}bpm vs baseline ({d})"}
+
+        hrv, hrv_base = day.get("hrv"), day.get("hrv_baseline")
+        if hrv is not None and hrv_base:
+            ratio = hrv / hrv_base
+            if ratio <= HRV_RATIO and "HRV" not in triggers:
+                triggers["HRV"] = {"date": d, "detail": f"{ratio*100:.0f}% of baseline ({d})"}
+
+        skin_temp = day.get("skin_temp_deviation")
+        if skin_temp is not None and skin_temp >= SKIN_TEMP_C:
+            if "Skin temp" not in triggers:
+                triggers["Skin temp"] = {"date": d, "detail": f"+{skin_temp:.1f}°C vs baseline ({d})"}
+
+    signals = [t["detail"] for t in triggers.values()]
+    n = len(triggers)
+
+    have_any_data = any(
+        day.get("rhr_baseline") or day.get("hrv_baseline") or day.get("skin_temp_deviation") is not None
+        for day in days
+    )
+    if not have_any_data:
+        return {"level": None, "label": "No data", "color": "#888", "detail": "", "signals": []}
+
+    if n >= 2:
+        level, label, color = "red", "Possible stress/illness signal", "#e74c3c"
+    elif n == 1:
+        level, label, color = "yellow", "Mild deviation", "#f39c12"
+    else:
+        level, label, color = "green", "Normal range", "#2ecc71"
+
+    detail = "; ".join(signals) if signals else "RHR, HRV, and skin temp all within normal range."
+    return {"level": level, "label": label, "color": color, "detail": detail, "signals": signals}
+
+
+def illness_risk_from_db(conn: sqlite3.Connection, date_str: str | None = None, window_days: int = 3) -> dict:
+    """Trailing-window illness/stress risk (see compute_illness_risk). Baseline is
+    a single 7-day trailing average anchored on the window's most recent date —
+    it doesn't need to move day-to-day since it represents "normal for you", not
+    a rolling comparison point."""
+    if date_str is None:
+        date_str = date.today().isoformat()
+
+    window_rows = conn.execute(
+        """SELECT date, resting_hr, hrv, skin_temp_deviation, source_flags_json
+           FROM daily_metrics
+           WHERE date <= ? AND date > date(?, ?)
+           ORDER BY date""",
+        (date_str, date_str, f"-{window_days} days"),
+    ).fetchall()
+    if not window_rows:
+        return {"level": None, "label": "No data", "color": "#888", "detail": "", "signals": []}
+
+    today_flags = window_rows[-1][4]
+    today_rhr_computed = _is_computed_rhr_flag(today_flags)
+    today_hrv_all_day = _is_all_day_hrv_flag(today_flags)
+
+    baseline_rows = conn.execute(
+        """SELECT hrv, resting_hr, source_flags_json FROM daily_metrics
+           WHERE date >= date(?, '-7 days') AND date < ?""",
+        (date_str, date_str),
+    ).fetchall()
+    hrv_values = [
+        r[0] for r in baseline_rows
+        if r[0] is not None and _is_all_day_hrv_flag(r[2]) == today_hrv_all_day
+    ]
+    rhr_values = [
+        r[1] for r in baseline_rows
+        if r[1] is not None and _is_computed_rhr_flag(r[2]) == today_rhr_computed
+    ]
+    hrv_baseline = sum(hrv_values) / len(hrv_values) if hrv_values else None
+    rhr_baseline = sum(rhr_values) / len(rhr_values) if rhr_values else None
+
+    days = [
+        {
+            "date": r[0],
+            "rhr": r[1],
+            "rhr_baseline": rhr_baseline,
+            "hrv": r[2],
+            "hrv_baseline": hrv_baseline,
+            "skin_temp_deviation": r[3],
+        }
+        for r in window_rows
+    ]
+    return compute_illness_risk(days)
+
+
 # ── sleep regularity ─────────────────────────────────────────────────────────
 #
 # Night-to-night consistency of bed/wake times, independent of duration or
@@ -429,13 +566,9 @@ def sleep_regularity(nights: list[tuple[float, float]]) -> dict:
     }
 
 
-def sleep_regularity_from_db(conn: sqlite3.Connection, date_str: str | None = None, window_days: int = 14) -> dict:
+def _wake_hours_from_db(conn: sqlite3.Connection, date_str: str, window_days: int) -> dict[str, float]:
     """sleep_wake_hour only lives in raw_daily_metrics (not the daily_metrics wide
-    table), so resolve it per-date with the usual garmin-first source priority,
-    then pair with daily_metrics.sleep_duration_min (already source-resolved)."""
-    if date_str is None:
-        date_str = date.today().isoformat()
-
+    table), so resolve it per-date with the usual garmin-first source priority."""
     wake_rows = conn.execute(
         """SELECT date,
                MIN(CASE WHEN source='garmin' THEN value END) AS garmin_val,
@@ -445,7 +578,38 @@ def sleep_regularity_from_db(conn: sqlite3.Connection, date_str: str | None = No
            GROUP BY date""",
         (date_str, date_str, f"-{window_days} days"),
     ).fetchall()
-    wake_by_date = {r[0]: r[1] if r[1] is not None else r[2] for r in wake_rows}
+    return {r[0]: r[1] if r[1] is not None else r[2] for r in wake_rows}
+
+
+def _circular_mean_hours(hours: list[float]) -> float | None:
+    if not hours:
+        return None
+    angles = [h / 24 * 2 * math.pi for h in hours]
+    sin_sum = sum(math.sin(a) for a in angles)
+    cos_sum = sum(math.cos(a) for a in angles)
+    if sin_sum == 0 and cos_sum == 0:
+        return None
+    return (math.atan2(sin_sum, cos_sum) / (2 * math.pi) * 24) % 24
+
+
+def average_wake_hour_from_db(conn: sqlite3.Connection, date_str: str | None = None, window_days: int = 7) -> float | None:
+    """
+    Trailing circular-mean wake hour, for anchoring bedtime recommendations on a
+    typical wake time rather than a single (possibly anomalous — early alarm, travel,
+    bad night) day's actual wake. Falls back to None if no recent data, letting the
+    caller fall back to today's actual wake_hour.
+    """
+    if date_str is None:
+        date_str = date.today().isoformat()
+    wake_by_date = _wake_hours_from_db(conn, date_str, window_days)
+    return _circular_mean_hours([h for h in wake_by_date.values() if h is not None])
+
+
+def sleep_regularity_from_db(conn: sqlite3.Connection, date_str: str | None = None, window_days: int = 14) -> dict:
+    if date_str is None:
+        date_str = date.today().isoformat()
+
+    wake_by_date = _wake_hours_from_db(conn, date_str, window_days)
     if not wake_by_date:
         return sleep_regularity([])
 

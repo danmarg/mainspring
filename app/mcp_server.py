@@ -330,8 +330,10 @@ def get_suggested_workout(date: Optional[str] = None) -> dict | None:
     """Return Garmin's suggested workout for a given date (YYYY-MM-DD, defaults to today),
     plus the training-load context behind it: Garmin's own training_readiness alongside
     this service's own composite readiness score (HRV incl. day-to-day variability,
-    debt-adjusted sleep, resting HR, TSB, and ACWR — see app/readiness.py)."""
-    from app.readiness import readiness_from_db
+    debt-adjusted sleep, resting HR, TSB, and ACWR — see app/readiness.py), plus a
+    trailing-window illness/physiological-stress signal (RHR/HRV/skin-temp
+    concordance — heuristic, not a diagnosis)."""
+    from app.readiness import illness_risk_from_db, readiness_from_db
 
     d = _date_or_today(date)
     with db() as conn:
@@ -349,11 +351,12 @@ def get_suggested_workout(date: Optional[str] = None) -> dict | None:
         ).fetchone()
 
         readiness = readiness_from_db(conn, d)
+        illness_risk = illness_risk_from_db(conn, d)
 
     if not sw:
         return None
 
-    context = {"readiness": readiness}
+    context = {"readiness": readiness, "illness_risk": illness_risk}
     if metrics:
         context.update({
             "training_readiness": metrics[0],
@@ -689,10 +692,12 @@ def delete_training_event(event_id: int) -> str:
 def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict:
     """Rich context for workout planning: today's metrics, HRV trend, TSB (form),
     training load status, week progress vs targets, next goal event, yesterday's RPE,
-    aerobic efficiency trend, Garmin's suggested workout, recent activities, and
-    personalized insights from historical correlations."""
+    aerobic efficiency trend, Garmin's suggested workout, recent activities,
+    personalized insights from historical correlations, and a trailing-window
+    illness/physiological-stress signal (RHR/HRV/skin-temp concordance —
+    heuristic, not a diagnosis)."""
     from app.analysis import compute_correlations
-    from app.readiness import readiness_from_db, sleep_regularity_from_db
+    from app.readiness import illness_risk_from_db, readiness_from_db, sleep_regularity_from_db
     from datetime import date as date_cls, timedelta
 
     d = _date_or_today(date)
@@ -797,6 +802,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
 
         readiness = readiness_from_db(conn, d)
         sleep_regularity = sleep_regularity_from_db(conn, d)
+        illness_risk = illness_risk_from_db(conn, d)
 
     # ── today ────────────────────────────────────────────────────────────────
     today: dict = {}
@@ -849,6 +855,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             )
     today["readiness"] = readiness
     today["sleep_regularity"] = sleep_regularity
+    today["illness_risk"] = illness_risk
     today["hr_zones"] = [
         {"zone": r[0], "min_bpm": r[1], "max_bpm": r[2]} for r in hr_zone_rows
     ]
