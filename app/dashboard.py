@@ -1636,6 +1636,12 @@ async def vitals(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
+        hydration_rows = _rows(conn, """
+            SELECT date, hydration_ml FROM daily_metrics
+            WHERE date >= date('now', ?) AND hydration_ml IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
         score_rows = _rows(conn, """
             SELECT date, sleep_score FROM daily_metrics
             WHERE date >= date('now', ?) AND sleep_score IS NOT NULL ORDER BY date
@@ -1668,5 +1674,7 @@ async def vitals(request: Request, days: str = "30",
             breathing_rows, "breathing_rate", "Breathing rate (br/min)", color="#5cb85c", x_domain=x_domain),
         "skin_temp_spec": _diverging_bar_chart(
             skin_temp_rows, "skin_temp_deviation", "Skin temp deviation (°C)", invert_color=True, x_domain=x_domain),
+        "hydration_spec": _daily_bar_chart(
+            hydration_rows, "hydration_ml", "Hydration (mL)", color="#1a6b9e", x_domain=x_domain),
         "bp_spec": _bp_chart(bp_rows, x_domain=x_domain),
     })
