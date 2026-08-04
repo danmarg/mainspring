@@ -846,6 +846,13 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
             _store_raw(conn, "get_hydration_data", data, ds)
             rows_upserted += _parse_hydration(conn, ds, data)
 
+        # Commit per day rather than holding one open write transaction across the
+        # whole run — each day is a dozen-plus sequential blocking HTTP calls, so a
+        # backfill chunk can take minutes. A long-held write lock means any other
+        # writer (MCP logging tools, a concurrently-scheduled Google Health import)
+        # silently blocks on it for up to busy_timeout (5min) rather than proceeding.
+        conn.commit()
+
     # ── range endpoints ─────────────────────────────────────────────────────
 
     # lactate threshold / cycling FTP — point-in-time snapshots (Garmin recomputes
@@ -894,6 +901,7 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
                 _fetch_and_store_decoupling(
                     conn, client, str(activity.get("activityId", "")), type_key, duration_s
                 )
+        conn.commit()  # activities can trigger a per-activity decoupling fetch each
 
     # suggested/scheduled workouts — monthly endpoint, call once per unique month in window
     year_months = sorted({(d.year, d.month) for d in dates})
