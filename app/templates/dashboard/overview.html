@@ -47,6 +47,17 @@
     No data yet for today — import will update this after your morning sync.
   </p>
   {% endif %}
+
+  {% if illness_risk.level in ('yellow', 'red') %}
+  <div style="margin-top:0.9rem;padding-top:0.8rem;border-top:1px solid var(--border)">
+    <span class="readiness-label" style="background:{{ illness_risk.color }}20;color:{{ illness_risk.color }}">
+      {{ illness_risk.label }}
+    </span>
+    <span style="color:var(--text-muted);font-size:0.78rem;margin-left:0.5rem">
+      {{ illness_risk.detail }} — trailing 3 days vs. your baseline, not a diagnosis.
+    </span>
+  </div>
+  {% endif %}
 </div>
 
 {# ── Next goal event ──────────────────────────────────────────────────────── #}
@@ -185,6 +196,7 @@
 (function() {
   var curve = {{ live_curve_json|safe }};   // [{h: hours-since-wake, a: alertness}] at 15-min steps
   var wakeHour = {{ wake_hour | tojson }};
+  var bedtimeWakeHour = {{ bedtime_wake_hour | tojson }};
   var recommendedSleepHours = {{ recommended_sleep_hours | tojson }};
   var sleepDebtMin = {{ sleep_debt_min | tojson }};
 
@@ -261,9 +273,11 @@
       windowText = "Past today's peak (" + fmtClock(wakeHour + peak.h) + ") — low window, light activity or rest is a better fit.";
     }
 
-    // Bedtime = wake time minus tonight's recommended sleep duration, which is the
-    // per-night target plus a capped catch-up on any recent sleep debt (server-computed).
-    var bedtime = fmtClock(wakeHour + (24 - recommendedSleepHours));
+    // Bedtime = trailing average wake time minus tonight's recommended sleep duration
+    // (target plus a capped catch-up on recent debt, server-computed). Anchored on the
+    // trailing average rather than today's actual wake so one early/late morning doesn't
+    // swing the recommendation.
+    var bedtime = fmtClock(bedtimeWakeHour + (24 - recommendedSleepHours));
     var bedtimeText = 'Aim for bed by ~' + bedtime + ' (' + fmtDuration(recommendedSleepHours) + ')';
     bedtimeText += sleepDebtMin > 15
       ? ' — catching up on ' + fmtDuration(sleepDebtMin / 60) + ' of sleep debt from the last few nights.'

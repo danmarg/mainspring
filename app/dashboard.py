@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.db import db, DEFAULT_SOURCE_PRIORITY
-from app.readiness import alertness_curve, readiness_from_db, sleep_regularity_from_db
+from app.readiness import alertness_curve, average_wake_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard")
@@ -998,6 +998,9 @@ async def overview(request: Request,
         # Readiness (shared module — same formula MCP server uses)
         readiness = readiness_from_db(conn, metrics_date)
 
+        # Illness/stress risk — trailing-window RHR/HRV/skin-temp concordance check
+        illness_risk = illness_risk_from_db(conn, metrics_date)
+
         # Biometric stat cards and energy curve use metrics_date (most recent with data)
         today_row = conn.execute(
             """SELECT hrv, sleep_score, resting_hr, body_battery_high,
@@ -1017,6 +1020,12 @@ async def overview(request: Request,
             (metrics_date,),
         ).fetchone()
         wake_hour: float | None = wake_row[0] if wake_row else None
+
+        # Trailing average wake time, for anchoring the bedtime recommendation instead
+        # of today's single (possibly anomalous) wake — see average_wake_hour_from_db.
+        bedtime_wake_hour = average_wake_hour_from_db(conn, metrics_date)
+        if bedtime_wake_hour is None:
+            bedtime_wake_hour = wake_hour
 
         # UTC bounds for today's local date — used for all manual_logs queries so that
         # logs made late in the evening (after UTC midnight) land on the right local day.
@@ -1157,6 +1166,7 @@ async def overview(request: Request,
         "today": today,
         "metrics_date": metrics_date,
         "readiness": readiness,
+        "illness_risk": illness_risk,
         "today_info": today_info,
         "next_event": next_event,
         "today_calories": today_calories,
@@ -1168,6 +1178,7 @@ async def overview(request: Request,
         "calorie_target": calorie_target,
         "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None),
         "wake_hour": wake_hour,
+        "bedtime_wake_hour": bedtime_wake_hour,
         "live_curve_json": _live_curve_json(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None),
         "recommended_sleep_hours": round(recommended_sleep_hours, 2),
         "sleep_debt_min": round(sleep_debt_min),
