@@ -2,10 +2,10 @@
 MCP server — data layer only.
 
 Tools:
-  log_meal       log_caffeine    log_alcohol
+  log_meal       log_caffeine    log_alcohol    log_hydration   log_soreness
   amend_log      delete_log
   get_logs       get_daily_metrics
-  get_suggested_workout
+  get_suggested_workout   get_workout_context
   get_source_config   set_source_preference
 
 Mounted at /mcp by main.py. Auth is handled by OAuth 2.1 via FastMCP's
@@ -253,8 +253,9 @@ def get_daily_metrics(
     end_date: str,
 ) -> list[dict]:
     """Return normalized daily health metrics between start_date and end_date (YYYY-MM-DD).
-    Includes HRV, sleep, stress, body battery, training readiness, training load,
-    weight, blood pressure, caffeine, and alcohol."""
+    Includes HRV, sleep (incl. sleep-specific respiration and skin temperature deviation),
+    stress, body battery, training readiness, training load, hydration, lactate threshold,
+    FTP, recovery time, weight, blood pressure, caffeine, and alcohol."""
     with db() as conn:
         rows = conn.execute(
             """
@@ -269,6 +270,9 @@ def get_daily_metrics(
                    caffeine_mg, alcohol_units, calories_estimated,
                    weight_kg, bp_systolic, bp_diastolic, bp_pulse,
                    rpe,
+                   skin_temp_deviation, hydration_ml, max_hr,
+                   lactate_threshold_hr, lactate_threshold_pace_min_per_km, ftp_watts,
+                   sleep_breathing_rate, recovery_hours,
                    source_flags_json
             FROM daily_metrics
             WHERE date BETWEEN ? AND ?
@@ -307,7 +311,15 @@ def get_daily_metrics(
             "bp_diastolic": r[25],
             "bp_pulse": r[26],
             "rpe": r[27],
-            "sources": json.loads(r[28]) if r[28] else {},
+            "skin_temp_deviation": r[28],
+            "hydration_ml": r[29],
+            "max_hr": r[30],
+            "lactate_threshold_hr": r[31],
+            "lactate_threshold_pace_min_per_km": r[32],
+            "ftp_watts": r[33],
+            "sleep_breathing_rate": r[34],
+            "recovery_hours": r[35],
+            "sources": json.loads(r[36]) if r[36] else {},
         }
         for r in rows
     ]
@@ -459,6 +471,48 @@ def log_blood_pressure(
         pushed = push_blood_pressure(systolic, diastolic, pulse, event_ts)
     suffix = " (synced to Garmin)" if pushed else ""
     return f"Logged BP at {event_ts}: {desc}{suffix}"
+
+
+@mcp.tool()
+def log_hydration(ml: float, ts: Optional[str] = None) -> str:
+    """Log fluid intake in milliliters. ts is UTC ISO-8601 (defaults to now).
+    Also pushed to Garmin Connect if Garmin credentials are configured
+    (Google Health/Health Connect has no write API for this)."""
+    event_ts = _ts_or_now(ts)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
+            (event_ts, "hydration", f"{ml}ml", ml, "ml", utc_now()),
+        )
+    _renormalize_date(event_ts)
+    from app.importers.garmin import push_hydration
+    pushed = push_hydration(ml, event_ts)
+    suffix = " (synced to Garmin)" if pushed else ""
+    return f"Logged hydration at {event_ts}: {ml}ml{suffix}"
+
+
+@mcp.tool()
+def log_soreness(
+    body_part: str,
+    severity: int,
+    notes: Optional[str] = None,
+    date: Optional[str] = None,
+) -> str:
+    """Log soreness or a minor injury (severity 1-10) for a body part, e.g.
+    log_soreness('left calf', 6, 'tight since yesterday's run'). date defaults to
+    today (YYYY-MM-DD). Feeds workout planning — persistent or worsening soreness
+    should favour recovery/modification over pushing through."""
+    if not 1 <= severity <= 10:
+        return "Error: severity must be between 1 and 10"
+    event_date = date or _date_or_today(None)
+    event_ts = f"{event_date}T12:00:00+00:00"
+    desc = f"{body_part}: {severity}/10" + (f" — {notes}" if notes else "")
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
+            (event_ts, "soreness", desc, float(severity), body_part, utc_now()),
+        )
+    return f"Logged soreness for {event_date}: {desc}"
 
 
 @mcp.tool()
@@ -634,7 +688,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     aerobic efficiency trend, Garmin's suggested workout, recent activities, and
     personalized insights from historical correlations."""
     from app.analysis import compute_correlations
-    from app.readiness import readiness_from_db
+    from app.readiness import readiness_from_db, sleep_regularity_from_db
     from datetime import date as date_cls, timedelta
 
     d = _date_or_today(date)
@@ -648,11 +702,25 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             SELECT hrv, sleep_score, sleep_duration_min, body_battery_high,
                    stress_avg, training_readiness,
                    acute_training_load, chronic_training_load, training_load_ratio,
-                   weight_kg, resting_hr
+                   weight_kg, resting_hr,
+                   recovery_hours, sleep_breathing_rate, skin_temp_deviation,
+                   hydration_ml, lactate_threshold_hr, lactate_threshold_pace_min_per_km,
+                   ftp_watts
             FROM daily_metrics WHERE date=?
             """,
             (d,),
         ).fetchone()
+
+        hr_zone_rows = conn.execute(
+            "SELECT zone, min_bpm, max_bpm FROM hr_zones WHERE date=? ORDER BY zone",
+            (d,),
+        ).fetchall()
+
+        recent_soreness_rows = conn.execute(
+            "SELECT DATE(ts), unit, quantity, description FROM manual_logs "
+            "WHERE type='soreness' AND DATE(ts) > ? AND DATE(ts) <= ? ORDER BY ts DESC",
+            ((today_obj - timedelta(days=3)).isoformat(), d),
+        ).fetchall()
 
         hrv_rows = conn.execute(
             "SELECT date, hrv FROM daily_metrics WHERE date <= ? AND hrv IS NOT NULL "
@@ -724,6 +792,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             correlations = []
 
         readiness = readiness_from_db(conn, d)
+        sleep_regularity = sleep_regularity_from_db(conn, d)
 
     # ── today ────────────────────────────────────────────────────────────────
     today: dict = {}
@@ -743,6 +812,13 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             "training_load_ratio": ratio,
             "weight_kg": today_row[9],
             "resting_hr": today_row[10],
+            "recovery_hours": today_row[11],
+            "sleep_breathing_rate": today_row[12],
+            "skin_temp_deviation": today_row[13],
+            "hydration_ml": today_row[14],
+            "lactate_threshold_hr": today_row[15],
+            "lactate_threshold_pace_min_per_km": today_row[16],
+            "ftp_watts": today_row[17],
         }
 
         if ctl is not None and atl is not None:
@@ -768,6 +844,15 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
                 "overreaching"
             )
     today["readiness"] = readiness
+    today["sleep_regularity"] = sleep_regularity
+    today["hr_zones"] = [
+        {"zone": r[0], "min_bpm": r[1], "max_bpm": r[2]} for r in hr_zone_rows
+    ]
+
+    recent_soreness = [
+        {"date": r[0], "body_part": r[1], "severity": r[2], "notes": r[3]}
+        for r in recent_soreness_rows
+    ]
 
     # ── yesterday ────────────────────────────────────────────────────────────
     yesterday_behavior: dict = {}
@@ -889,6 +974,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
         "garmin_suggestion": garmin_suggestion,
         "personalized_insights": insights,
         "recent_activities": recent_activities,
+        "recent_soreness": recent_soreness,
     }
 
 
@@ -932,6 +1018,12 @@ planning, and recommendations. The server never fetches weather or sends message
    - Garmin's suggested workout for today
    - personalized insights from historical correlations
    - last 7 activities
+   - `hr_zones`: personalized 5-zone bands derived from today's max_hr (%HRmax model)
+   - `recovery_hours`, `sleep_breathing_rate`, `skin_temp_deviation`, `hydration_ml`,
+     `lactate_threshold_hr`/`_pace`, `ftp_watts` — see the metric table below
+   - `sleep_regularity`: night-to-night bed/wake-time consistency over 14 nights
+     (independent of duration/score; erratic timing alone predicts worse recovery)
+   - `recent_soreness`: soreness/injury logs from the last 3 days
 
 2. Use `get_correlations()` periodically (weekly / when patterns are unclear) to surface
    which behaviours most affect recovery. Results feed the insights in `get_workout_context`.
@@ -943,7 +1035,9 @@ planning, and recommendations. The server never fetches weather or sends message
    d. next_event weeks_away: taper starts ~2–3 weeks out; peak week ~4–6 weeks out
    e. aerobic_efficiency trend: improving = adaptation working; declining = too much stress
    f. yesterday_rpe: 8–10 → likely need easy day regardless of other signals
-   g. Garmin suggestion as a secondary input, not the primary driver
+   g. recent_soreness: an active entry for the muscle group in question outweighs
+      good numbers elsewhere — modify or substitute, don't push through it
+   h. Garmin suggestion as a secondary input, not the primary driver
 
 ---
 
@@ -958,6 +1052,9 @@ planning, and recommendations. The server never fetches weather or sends message
 | training_readiness | >70 | 50–70 | <50 favour recovery |
 | readiness.score | ≥65 (Ready/Primed) | 50–65 (Moderate) | <50 → Low/Rest, favour recovery |
 | body_battery_high | >70 | 40–70 | <40 suggests poor recovery |
+| sleep_regularity.score | >80 | 50–80 | <50 → bed/wake times swinging 2h+, a recovery drag on its own |
+| recovery_hours | 0 (ready now) | a few hours left | still elapsing → favour easy/rest until it hits 0 |
+| skin_temp_deviation | near 0°C | ±0.3°C | >0.5°C above baseline → possible illness, treat other signals cautiously |
 
 TSB interpretation: think of it as "form". Positive = rested/sharp (good for racing or
 hard efforts). Negative = accumulated fatigue (fine during a build block, bad near a race).
@@ -975,6 +1072,8 @@ A TSB of -30 with a marathon in 2 weeks = needs to taper urgently.
 | `log_weight` | kg; normalizer surfaces into daily_metrics and correlations |
 | `log_blood_pressure` | systolic/diastolic/pulse in mmHg |
 | `log_rpe` | 1–10 after a workout; feeds next-day correlation insights |
+| `log_hydration` | fluid intake in ml; also pushed to Garmin Connect |
+| `log_soreness` | body_part + severity 1–10; surfaces in `recent_soreness` for 3 days |
 | `log_note` | anything else — sleep quality, illness, stress events |
 | `amend_log` / `delete_log` | corrections; use get_logs to find the id |
 

@@ -48,12 +48,37 @@ def _drop_legacy_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# Columns added to daily_metrics after the table's initial CREATE TABLE IF NOT EXISTS.
+# executescript is a no-op for a column added to a CREATE TABLE statement once the table
+# already exists, so new columns must be ALTER'd in explicitly (SQLite has no
+# "ADD COLUMN IF NOT EXISTS", hence the manual existence check).
+_ADDED_DAILY_METRICS_COLUMNS = [
+    ("skin_temp_deviation", "REAL"),
+    ("hydration_ml", "REAL"),
+    ("max_hr", "REAL"),
+    ("lactate_threshold_hr", "REAL"),
+    ("lactate_threshold_pace_min_per_km", "REAL"),
+    ("ftp_watts", "REAL"),
+    ("sleep_breathing_rate", "REAL"),
+    ("recovery_hours", "REAL"),
+]
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(daily_metrics)")}
+    for col, col_type in _ADDED_DAILY_METRICS_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE daily_metrics ADD COLUMN {col} {col_type}")
+    conn.commit()
+
+
 def init_db(path: Path | None = None) -> None:
-    """Apply schema.sql idempotently, then clean up any legacy columns."""
+    """Apply schema.sql idempotently, then reconcile any columns added since."""
     with get_connection(path or DB_PATH) as conn:
         conn.executescript(SCHEMA_PATH.read_text())
         conn.commit()
         _drop_legacy_columns(conn)
+        _add_missing_columns(conn)
 
 
 def utc_now() -> str:

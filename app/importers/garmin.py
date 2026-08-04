@@ -107,6 +107,20 @@ def push_blood_pressure(
         return False
 
 
+def push_hydration(ml: float, ts: str | None = None) -> bool:
+    """Write a hydration reading to Garmin Connect (e.g. from a manual MCP
+    log_hydration call). Best-effort, same contract as push_weight."""
+    if not _configured():
+        return False
+    try:
+        client = _client()
+        client.add_hydration_data(value_in_ml=ml, timestamp=_as_utc_iso(ts))
+        return True
+    except Exception as exc:
+        log.warning("garmin push_hydration failed: %s", exc)
+        return False
+
+
 def _store_raw(conn, endpoint: str, data: Any, date_str: str | None = None) -> None:
     upsert_raw_payload(
         conn,
@@ -128,6 +142,10 @@ def _parse_stats(conn, date_str: str, data: dict) -> int:
         "activeKilocalories": "active_calories",
         "floorsAscended": "floors_ascended",
         "floorsDescended": "floors_descended",
+        # Day's observed peak HR, used as a rolling proxy for max_hr (HR-zone calc)
+        # rather than a fixed profile setting — it drifts with fitness/effort, same
+        # tradeoff sports scientists accept with field-test-derived max HR generally.
+        "maxHeartRate": "max_hr",
     }
     for api_key, metric in mapping.items():
         val = data.get(api_key)
@@ -188,6 +206,38 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
                 upsert_raw_metric(conn, date_str, SOURCE, metric_name,
                                   float(raw_val) * scale, now)
                 rows += 1
+
+        # Sleep-specific respiration, distinct from the all-day average that
+        # _parse_respiration writes to "breathing_rate" — this one only covers the
+        # sleep window and is the more useful trend for illness/recovery disruption.
+        sleep_resp = score_obj.get("avgSleepRespirationValue") or score_obj.get("averageRespirationValue")
+        if sleep_resp is not None:
+            upsert_raw_metric(conn, date_str, SOURCE, "sleep_breathing_rate", float(sleep_resp), now)
+            rows += 1
+
+        # Skin temperature deviation (deg C from personal baseline) — only present
+        # for compatible devices (Venu 3, epix Pro, fenix 7 Pro and newer). Field
+        # names are best-effort against an undocumented endpoint; check
+        # raw_import_payloads.get_sleep_data if this never populates.
+        skin_temp_list = data.get("skinTempDataDTOList") or score_obj.get("skinTempDataDTOList")
+        if skin_temp_list:
+            readings = [
+                r.get("skinTempCelsius") or r.get("deviation") or r.get("celsius")
+                for r in skin_temp_list if isinstance(r, dict)
+            ]
+            readings = [r for r in readings if r is not None]
+            if readings:
+                avg_deviation = sum(readings) / len(readings)
+                # Sanity guard: skin_temp_deviation means degrees from personal
+                # baseline (expected within a couple degrees C either way). If the
+                # field actually held an absolute skin temperature (~30-35C) rather
+                # than a delta — plausible given the field-name uncertainty above —
+                # writing it as-is would read as a wild illness signal every day.
+                # Skip rather than risk that; check raw_import_payloads to fix the
+                # field mapping if this is silently never populating.
+                if abs(avg_deviation) < 10:
+                    upsert_raw_metric(conn, date_str, SOURCE, "skin_temp_deviation", float(avg_deviation), now)
+                    rows += 1
     return rows
 
 
@@ -292,6 +342,15 @@ def _parse_training_readiness(conn, date_str: str, data: list | dict) -> int:
         if score is not None:
             upsert_raw_metric(conn, date_str, SOURCE, "training_readiness", float(score), now)
             rows += 1
+        # Recovery time is one of the named factors behind the readiness score
+        # (alongside sleep/HRV/training-load history) and rides along in the same
+        # response item; field name is best-effort (undocumented API) — check
+        # raw_import_payloads.get_training_readiness if this doesn't populate.
+        recovery = item.get("recoveryTime") or item.get("recoveryTimeHours")
+        if recovery is not None:
+            upsert_raw_metric(conn, date_str, SOURCE, "recovery_hours", float(recovery), now)
+            rows += 1
+        if score is not None:
             break
     return rows
 
@@ -399,6 +458,55 @@ def _parse_respiration(conn, date_str: str, data: dict | list) -> int:
         upsert_raw_metric(conn, date_str, SOURCE, "breathing_rate", float(val), now)
         rows += 1
     return rows
+
+
+def _parse_hydration(conn, date_str: str, data: dict) -> int:
+    """add_hydration_data's write body uses key 'valueInML'; get_hydration_data
+    is presumed symmetric (unverified — undocumented endpoint)."""
+    now = utc_now()
+    val = data.get("valueInML") or data.get("totalValueInML")
+    if val is not None:
+        upsert_raw_metric(conn, date_str, SOURCE, "hydration_ml", float(val), now)
+        return 1
+    return 0
+
+
+def _parse_lactate_threshold(conn, date_str: str, data: dict) -> int:
+    """get_lactate_threshold(latest=True) returns a confirmed shape (see library
+    source): {"speed_and_heart_rate": {"speed": m/s, "heartRate": bpm, ...}, "power": {...}}.
+    This is a point-in-time snapshot (Garmin updates it occasionally, not daily),
+    so it's written once per import run at the most recent date, not per-day."""
+    now = utc_now()
+    rows = 0
+    shr = data.get("speed_and_heart_rate") or {}
+    hr = shr.get("heartRate")
+    if hr is not None:
+        upsert_raw_metric(conn, date_str, SOURCE, "lactate_threshold_hr", float(hr), now)
+        rows += 1
+    speed = shr.get("speed")
+    if speed:
+        pace_min_per_km = 1000 / speed / 60
+        upsert_raw_metric(conn, date_str, SOURCE, "lactate_threshold_pace_min_per_km",
+                          round(pace_min_per_km, 2), now)
+        rows += 1
+    return rows
+
+
+def _parse_ftp(conn, date_str: str, data: dict | list) -> int:
+    """get_cycling_ftp() shape is unconfirmed (no source docstring detail beyond
+    dict|list); tries the field names used by its sibling lactate-threshold power
+    endpoint plus generic fallbacks. Snapshot, written once per run like LT above."""
+    now = utc_now()
+    entry = data[0] if isinstance(data, list) and data else data if isinstance(data, dict) else {}
+    val = (
+        entry.get("functionalThresholdPower")
+        or entry.get("value")
+        or entry.get("ftp")
+    )
+    if val is not None:
+        upsert_raw_metric(conn, date_str, SOURCE, "ftp_watts", float(val), now)
+        return 1
+    return 0
 
 
 def _parse_intensity_minutes(conn, date_str: str, data: dict | list) -> int:
@@ -732,7 +840,26 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
             _store_raw(conn, "get_blood_pressure", data, ds)
             rows_upserted += _parse_blood_pressure(conn, ds, data)
 
+        # hydration
+        data = _safe(lambda: client.get_hydration_data(ds), f"get_hydration_data({ds})")
+        if data:
+            _store_raw(conn, "get_hydration_data", data, ds)
+            rows_upserted += _parse_hydration(conn, ds, data)
+
     # ── range endpoints ─────────────────────────────────────────────────────
+
+    # lactate threshold / cycling FTP — point-in-time snapshots (Garmin recomputes
+    # these occasionally, not daily), so fetched once per run and stored at the
+    # most recent date in the window rather than per-day.
+    data = _safe(lambda: client.get_lactate_threshold(latest=True), "get_lactate_threshold")
+    if data:
+        _store_raw(conn, "get_lactate_threshold", data, end_str)
+        rows_upserted += _parse_lactate_threshold(conn, end_str, data)
+
+    data = _safe(lambda: client.get_cycling_ftp(), "get_cycling_ftp")
+    if data:
+        _store_raw(conn, "get_cycling_ftp", data, end_str)
+        rows_upserted += _parse_ftp(conn, end_str, data)
 
     # body battery (returns a list across the range)
     data = _safe(

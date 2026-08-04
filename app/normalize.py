@@ -9,7 +9,7 @@ Rebuilds (in order):
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.db import HOME_TZ, DEFAULT_SOURCE_PRIORITY, resolve_metric, utc_now
@@ -40,6 +40,14 @@ DAILY_METRIC_COLUMNS = [
     "breathing_rate",
     "vo2max",
     "steps",
+    "skin_temp_deviation",
+    "hydration_ml",
+    "max_hr",
+    "lactate_threshold_hr",
+    "lactate_threshold_pace_min_per_km",
+    "ftp_watts",
+    "sleep_breathing_rate",
+    "recovery_hours",
 ]
 
 # ── timezone resolution ─────────────────────────────────────────────────────
@@ -190,6 +198,150 @@ def synthesize_sleep_score(
     return max(0.0, min(100.0, _SYNTH_SLOPE * raw + _SYNTH_INTERCEPT))
 
 
+# ── resting HR from raw intraday samples (source-agnostic) ──────────────────
+#
+# Vendors don't agree on what "resting heart rate" means: Garmin computes an
+# overnight minimum, while Google Health/Health Connect's dailyRestingHeartRate
+# is closer to waking RHR and reads ~10bpm higher for the same person on the
+# same night — so picking whichever source is "canonical" per source_config
+# still produces a day-to-day discontinuity if the canonical source ever
+# changes, or an apples-to-oranges comparison across a Garmin-then-Fitbit
+# history. Raw 1-min HR samples in intraday_hr don't have that problem — both
+# importers write the same kind of measurement — so compute RHR ourselves as
+# the mean of the lowest 5% of samples in the overnight window, instead of
+# trusting either vendor's own summarization.
+RESTING_HR_MIN_SAMPLES = 60  # ~1h of 1-min samples; below this, distrust the estimate
+
+
+def _overnight_utc_bounds(date_str: str) -> tuple[str, str]:
+    """UTC bounds for previous-evening-8pm through this-morning-10am, local HOME_TZ.
+    Shared by the RHR and HRV intraday-recompute helpers below."""
+    try:
+        tz = ZoneInfo(HOME_TZ)
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+
+    d = date.fromisoformat(date_str)
+    window_start = datetime(d.year, d.month, d.day, 20, 0, tzinfo=tz) - timedelta(days=1)
+    window_end = datetime(d.year, d.month, d.day, 10, 0, tzinfo=tz)
+    return (
+        window_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        window_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+def _resting_hr_from_intraday(conn, date_str: str) -> tuple[float | None, str | None]:
+    """Falls back to (None, None) — most historical dates won't have intraday HR,
+    since both importers only pull it for the last ~2 days on rolling runs."""
+    utc_start, utc_end = _overnight_utc_bounds(date_str)
+
+    # Pick whichever source has the most coverage in the window, not just the
+    # first source in DEFAULT_SOURCE_PRIORITY to clear the sample threshold —
+    # a full night is ~300-400 1-min buckets, and an hour spent at a desk
+    # shouldn't win over a full night's data from a lower-priority source.
+    best: tuple[str, list[float]] | None = None
+    for source in DEFAULT_SOURCE_PRIORITY:
+        rows = conn.execute(
+            "SELECT bpm FROM intraday_hr WHERE source=? AND ts >= ? AND ts < ? ORDER BY bpm",
+            (source, utc_start, utc_end),
+        ).fetchall()
+        bpms = [r[0] for r in rows]
+        if len(bpms) >= RESTING_HR_MIN_SAMPLES and (best is None or len(bpms) > len(best[1])):
+            best = (source, bpms)
+
+    if best is None:
+        return None, None
+
+    source, bpms = best
+    lowest_n = max(1, len(bpms) // 20)  # lowest 5%
+    avg = sum(bpms[:lowest_n]) / lowest_n
+    return round(avg, 1), f"{source}_intraday"
+
+
+# ── HRV from raw intraday samples (Google Health's daily rollup is all-day) ──
+#
+# Garmin's "hrv" is already overnight-only (hrvSummary.lastNight — see
+# _parse_hrv in garmin.py), but Google Health/Health Connect's
+# daily-heart-rate-variability rollup is a 24h aggregate, not sleep-window-only.
+# Google Health separately provides real per-sample overnight RMSSD via
+# _fetch_and_store_hrv into intraday_hrv, so when Google Health's daily rollup
+# is what resolve_metric picked, recompute from those samples instead — same
+# fix as _resting_hr_from_intraday, applied to whichever side actually needs it
+# (Garmin's own figure is left untouched; it's already correct).
+HRV_MIN_SAMPLES = 20  # ~100min at Google's ~5min sample spacing
+
+
+def _hrv_overnight_from_intraday(conn, date_str: str, source: str) -> float | None:
+    utc_start, utc_end = _overnight_utc_bounds(date_str)
+    rows = conn.execute(
+        "SELECT rmssd FROM intraday_hrv WHERE source=? AND ts >= ? AND ts < ?",
+        (source, utc_start, utc_end),
+    ).fetchall()
+    values = [r[0] for r in rows]
+    if len(values) < HRV_MIN_SAMPLES:
+        return None
+    return round(sum(values) / len(values), 1)
+
+
+# ── HR zones (derived from max_hr, source-agnostic) ─────────────────────────
+#
+# Standard 5-zone %HRmax model (Zone 1 recovery through Zone 5 max/VO2max),
+# rather than any single vendor's proprietary zone-boundary endpoint — this
+# works from a max_hr value regardless of which source produced it.
+_HR_ZONE_BANDS = [
+    (1, 0.50, 0.60),
+    (2, 0.60, 0.70),
+    (3, 0.70, 0.80),
+    (4, 0.80, 0.90),
+    (5, 0.90, 1.00),
+]
+
+
+def compute_hr_zones(max_hr: float) -> list[dict]:
+    return [
+        {"zone": zone, "min_bpm": round(max_hr * lo), "max_bpm": round(max_hr * hi)}
+        for zone, lo, hi in _HR_ZONE_BANDS
+    ]
+
+
+MAX_HR_ROLLING_WINDOW_DAYS = 90
+
+
+def _rolling_max_hr(conn, date_str: str) -> float | None:
+    """max_hr is the day's *observed* peak (see _parse_stats in garmin.py) — on a
+    rest day that's ~100-115bpm, not a meaningful ceiling for zone bands. Roll
+    forward the highest observed value over a trailing window instead, same
+    principle as field-test-derived max HR: it should only ever ratchet up
+    within the window, not reflect a single easy day."""
+    row = conn.execute(
+        """SELECT MAX(max_hr) FROM daily_metrics
+           WHERE date <= ? AND date > date(?, ?) AND max_hr IS NOT NULL""",
+        (date_str, date_str, f"-{MAX_HR_ROLLING_WINDOW_DAYS} days"),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _rebuild_hr_zones(conn, date_str: str, todays_max_hr: float | None) -> None:
+    # _rebuild_hr_zones runs before today's own row is committed to daily_metrics,
+    # so the rolling query can't see it yet — fold it in explicitly so a new high
+    # observed today still ratchets the zones up immediately, not next run.
+    rolling = _rolling_max_hr(conn, date_str)
+    candidates = [v for v in (rolling, todays_max_hr) if v]
+    max_hr = max(candidates) if candidates else None
+    if not max_hr or max_hr <= 0:
+        return
+    for band in compute_hr_zones(max_hr):
+        conn.execute(
+            """
+            INSERT INTO hr_zones(date, source, zone, min_bpm, max_bpm)
+            VALUES (?, 'derived', ?, ?, ?)
+            ON CONFLICT(date, source, zone) DO UPDATE SET
+                min_bpm=excluded.min_bpm, max_bpm=excluded.max_bpm
+            """,
+            (date_str, band["zone"], band["min_bpm"], band["max_bpm"]),
+        )
+
+
 # ── daily_metrics rebuild ────────────────────────────────────────────────────
 
 def rebuild_daily_metrics(conn, dates: set[str] | None = None) -> int:
@@ -226,6 +378,23 @@ def _rebuild_one_day(conn, date_str: str) -> None:
         if src:
             source_flags[metric] = src
 
+    # Prefer resting_hr computed from raw intraday samples over either vendor's own
+    # summarization (see _resting_hr_from_intraday) — falls back to whatever
+    # resolve_metric already found above when too few intraday samples exist.
+    computed_rhr, computed_rhr_src = _resting_hr_from_intraday(conn, date_str)
+    if computed_rhr is not None:
+        values["resting_hr"] = computed_rhr
+        source_flags["resting_hr"] = computed_rhr_src
+
+    # If Google Health's all-day HRV rollup is what got picked above, recompute
+    # from overnight-only intraday samples instead (see _hrv_overnight_from_intraday).
+    # Garmin's own hrv is already overnight-only and left as resolved.
+    if source_flags.get("hrv") == "google_health":
+        overnight_hrv = _hrv_overnight_from_intraday(conn, date_str, "google_health")
+        if overnight_hrv is not None:
+            values["hrv"] = overnight_hrv
+            source_flags["hrv"] = "google_health_intraday"
+
     # Acute/chronic training load: Garmin writes these as raw metrics "atl"/"ctl"
     # (dailyTrainingLoadAcute/Chronic), not under the daily_metrics column names.
     # training_load_ratio (ACWR) isn't provided directly — derive it from the two.
@@ -242,6 +411,8 @@ def _rebuild_one_day(conn, date_str: str) -> None:
         source_flags["training_load_ratio"] = "derived"
     else:
         values["training_load_ratio"] = None
+
+    _rebuild_hr_zones(conn, date_str, values.get("max_hr"))
 
     if values.get("sleep_score") is None:
         awake_min, _ = resolve_metric(conn, date_str, "sleep_awake_min")
@@ -269,6 +440,24 @@ def _rebuild_one_day(conn, date_str: str) -> None:
         "SELECT SUM(estimated_calories) FROM manual_logs WHERE type='meal' AND DATE(ts)=?",
         (date_str,),
     ).fetchone()[0]
+
+    # Manual hydration logs are pushed back to Garmin Connect (push_hydration), so
+    # Garmin's own total will include them again on the next import. Take the max
+    # of the two rather than either summing (double-counts once the re-import
+    # lands) or overriding (throws away Garmin's total once it does): before
+    # push-back the manual value is the larger/more current one and wins; after
+    # push-back Garmin's total already includes it and is >= the manual sum.
+    manual_hydration = conn.execute(
+        "SELECT SUM(quantity) FROM manual_logs WHERE type='hydration' AND DATE(ts)=?",
+        (date_str,),
+    ).fetchone()[0]
+    if manual_hydration is not None:
+        raw_hydration = values.get("hydration_ml")
+        if raw_hydration is None or manual_hydration > raw_hydration:
+            values["hydration_ml"] = manual_hydration
+            source_flags["hydration_ml"] = "manual"
+        # else: raw value already reflects (or exceeds) the manual log; keep it
+        # and its existing source flag
 
     weight_row = conn.execute(
         "SELECT quantity FROM manual_logs WHERE type='weight' AND DATE(ts)=? ORDER BY ts DESC LIMIT 1",
@@ -329,8 +518,11 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             caffeine_mg, alcohol_units, calories_estimated,
             weight_kg, bp_systolic, bp_diastolic, bp_pulse,
             rpe,
+            skin_temp_deviation, hydration_ml, max_hr,
+            lactate_threshold_hr, lactate_threshold_pace_min_per_km, ftp_watts,
+            sleep_breathing_rate, recovery_hours,
             source_flags_json
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(date) DO UPDATE SET
             resting_hr=excluded.resting_hr,
             hrv=excluded.hrv,
@@ -359,6 +551,14 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             bp_diastolic=excluded.bp_diastolic,
             bp_pulse=excluded.bp_pulse,
             rpe=excluded.rpe,
+            skin_temp_deviation=excluded.skin_temp_deviation,
+            hydration_ml=excluded.hydration_ml,
+            max_hr=excluded.max_hr,
+            lactate_threshold_hr=excluded.lactate_threshold_hr,
+            lactate_threshold_pace_min_per_km=excluded.lactate_threshold_pace_min_per_km,
+            ftp_watts=excluded.ftp_watts,
+            sleep_breathing_rate=excluded.sleep_breathing_rate,
+            recovery_hours=excluded.recovery_hours,
             source_flags_json=excluded.source_flags_json
         """,
         (
@@ -390,6 +590,14 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             bp_diastolic,
             bp_pulse,
             rpe,
+            values.get("skin_temp_deviation"),
+            values.get("hydration_ml"),
+            values.get("max_hr"),
+            values.get("lactate_threshold_hr"),
+            values.get("lactate_threshold_pace_min_per_km"),
+            values.get("ftp_watts"),
+            values.get("sleep_breathing_rate"),
+            values.get("recovery_hours"),
             json.dumps(source_flags),
         ),
     )
