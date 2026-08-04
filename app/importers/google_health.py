@@ -28,6 +28,7 @@ SOURCE = "google_health"
 WINDOW_DAYS = 7
 API_BASE = "https://health.googleapis.com/v4"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
+HTTP_TIMEOUT = 30
 
 _EXERCISE_TYPE_MAP = {
     "running": "running",
@@ -103,7 +104,7 @@ def _refresh(conn, tokens: dict) -> dict:
         TOKEN_URL, data=body,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
         data = json.loads(resp.read())
 
     expires_at = (
@@ -133,7 +134,7 @@ def _post(conn, path: str, body: dict, tokens: dict) -> Any | None:
             },
         )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
             if e.code == 401 and attempt == 0:
@@ -171,7 +172,7 @@ def _get(conn, path: str, params: dict, tokens: dict) -> Any | None:
             headers={"Authorization": f"Bearer {tokens['access_token']}"},
         )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
             if e.code == 401 and attempt == 0:
