@@ -26,11 +26,6 @@
 </div>
 
 <div class="chart-block">
-  <h3>Sleep — score &amp; stages</h3>
-  <div class="vega-wrap" id="sleep-chart"></div>
-</div>
-
-<div class="chart-block">
   <h3>HRV — deviation from 7-day average
     <span style="color:var(--text-muted);font-size:0.72rem"> · <span style="color:#2ecc71">▲ above baseline</span> · <span style="color:#e05c5c">▼ below</span></span>
   </h3>
@@ -44,7 +39,6 @@ embed('alcohol-chart',      {{ alcohol_spec|safe }});
 embed('alcohol-dow-chart',  {{ alcohol_dow_spec|safe }});
 embed('caffeine-chart',     {{ caffeine_spec|safe }});
 embed('caffeine-dow-chart', {{ caffeine_dow_spec|safe }});
-embed('sleep-chart',        {{ sleep_spec|safe }});
 embed('hrv-delta-chart',    {{ hrv_delta_spec|safe }});
 </script>
 {% endblock %}

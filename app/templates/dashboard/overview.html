@@ -49,20 +49,41 @@
   {% endif %}
 </div>
 
-{# ── Info strip ───────────────────────────────────────────────────────────── #}
+{# ── Next goal event ──────────────────────────────────────────────────────── #}
+{% if next_event %}
+<div class="behavior-summary">
+  Next goal: <span>{{ next_event.description }}</span> — {{ next_event.date }}
+  ({{ next_event.days_away }} day{{ 's' if next_event.days_away != 1 }} away)
+  {% if next_event.goal %} · target: {{ next_event.goal }}{% endif %}
+</div>
+{% endif %}
+
+{# ── Live status ──────────────────────────────────────────────────────────── #}
+{% if energy_spec != '{}' %}
+<div class="chart-block" id="live-status-card">
+  <h3>Right now <span id="live-updated" style="color:var(--text-muted);font-size:0.7rem"></span></h3>
+  <p id="live-rec-text" style="margin:0.35rem 0 0;font-size:0.95rem">—</p>
+</div>
+{% endif %}
+
+{# ── Energy forecast ──────────────────────────────────────────────────────── #}
+{% if energy_spec != '{}' %}
+<div class="chart-block">
+  <h3>Alertness forecast
+    <span style="color:var(--text-muted);font-size:0.72rem">
+    · <span style="color:#f4a261">┊ now</span>
+    · <span style="color:#2ecc71">▲ peak</span>
+    </span>
+  </h3>
+  <div class="vega-wrap" id="energy-chart"></div>
+</div>
+{% endif %}
+
+{# ── Info strip — only signals not already broken out in the readiness drivers above ── #}
 {% if today_info %}
 <div class="info-strip">
-  {% if today_info.hrv is not none %}
-  <span class="info-chip"><span class="chip-label">HRV</span> {{ today_info.hrv | round | int }}ms</span>
-  {% endif %}
-  {% if today_info.sleep_score is not none %}
-  <span class="info-chip"><span class="chip-label">Sleep</span> {{ today_info.sleep_score | round | int }}</span>
-  {% endif %}
   {% if today_info.sleep_h is not none %}
   <span class="info-chip"><span class="chip-label">Sleep time</span> {{ today_info.sleep_h }}h</span>
-  {% endif %}
-  {% if today_info.rhr is not none %}
-  <span class="info-chip"><span class="chip-label">RHR</span> {{ today_info.rhr | round | int }}bpm</span>
   {% endif %}
   {% if today_info.body_battery is not none %}
   <span class="info-chip"><span class="chip-label">Battery</span> {{ today_info.body_battery | round | int }}</span>
@@ -114,47 +135,20 @@
     {% if today_carbs is not none %}
     <div class="nbar-row">
       <span class="nbar-label">Carbs</span>
-      <div class="nbar-track">
-        <div class="nbar-fill carbs-fill" style="width:100%"></div>
-      </div>
+      <span></span>
       <span class="nbar-val">{{ today_carbs | round | int }}g</span>
     </div>
     {% endif %}
     {% if today_fat is not none %}
     <div class="nbar-row">
       <span class="nbar-label">Fat</span>
-      <div class="nbar-track">
-        <div class="nbar-fill fat-fill" style="width:100%"></div>
-      </div>
+      <span></span>
       <span class="nbar-val">{{ today_fat | round | int }}g</span>
     </div>
     {% endif %}
   </div>
   {% endif %}
 </div>
-
-{# ── Live status ──────────────────────────────────────────────────────────── #}
-{% if energy_spec != '{}' %}
-<div class="chart-block" id="live-status-card">
-  <h3>Right now <span id="live-updated" style="color:var(--text-muted);font-size:0.7rem"></span></h3>
-  <p id="live-rec-text" style="margin:0.35rem 0 0;font-size:0.95rem">—</p>
-</div>
-{% endif %}
-
-{# ── Energy forecast ──────────────────────────────────────────────────────── #}
-{% if energy_spec != '{}' %}
-<div class="chart-block">
-  <h3>Alertness forecast
-    <span style="color:var(--text-muted);font-size:0.72rem">
-    · <span style="color:#f4a261">┊ now</span>
-    · <span style="color:#2ecc71">▲ peak</span>
-    </span>
-  </h3>
-  <div class="vega-wrap" id="energy-chart"></div>
-</div>
-{% endif %}
-
-
 {% endblock %}
 
 {% block scripts %}

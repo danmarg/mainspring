@@ -5,6 +5,29 @@
 {% block content %}
 <h1>Activities</h1>
 
+{% if hr_zones or thresholds %}
+<div class="card-grid">
+  {% for z in hr_zones %}
+  <div class="card">
+    <div class="label">HR Zone {{ z.zone }}</div>
+    <div class="value" style="font-size:1.3rem">{{ z.min_bpm | round | int }}–{{ z.max_bpm | round | int }}<span class="unit">bpm</span></div>
+  </div>
+  {% endfor %}
+  {% if thresholds and thresholds.lactate_threshold_hr %}
+  <div class="card">
+    <div class="label">Lactate threshold</div>
+    <div class="value" style="font-size:1.3rem">{{ thresholds.lactate_threshold_hr | round | int }}<span class="unit">bpm</span></div>
+    {% if thresholds.lactate_threshold_pace %}<div class="delta">{{ thresholds.lactate_threshold_pace }}</div>{% endif %}
+  </div>
+  {% endif %}
+  {% if thresholds and thresholds.ftp_watts %}
+  <div class="card">
+    <div class="label">FTP</div>
+    <div class="value" style="font-size:1.3rem">{{ thresholds.ftp_watts | round | int }}<span class="unit">W</span></div>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
 
 <div class="two-col">
   <div class="chart-block">

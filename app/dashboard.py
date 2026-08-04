@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.db import db, DEFAULT_SOURCE_PRIORITY
-from app.readiness import alertness_curve, readiness_from_db
+from app.readiness import alertness_curve, readiness_from_db, sleep_regularity_from_db
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard")
@@ -695,16 +695,18 @@ def _sparse_line_chart(rows: list[dict], field: str, title: str,
 
 
 def _bp_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
-    """Dual line: systolic + diastolic with normal-range reference band."""
+    """Systolic + diastolic + pulse, with a normal-range reference band for BP."""
     if not rows:
         return "{}"
     x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     long = []
     for r in rows:
         if r.get("bp_systolic"):
-            long.append({"date": r["date"], "reading": "Systolic", "mmhg": r["bp_systolic"]})
+            long.append({"date": r["date"], "reading": "Systolic", "value": r["bp_systolic"]})
         if r.get("bp_diastolic"):
-            long.append({"date": r["date"], "reading": "Diastolic", "mmhg": r["bp_diastolic"]})
+            long.append({"date": r["date"], "reading": "Diastolic", "value": r["bp_diastolic"]})
+        if r.get("bp_pulse"):
+            long.append({"date": r["date"], "reading": "Pulse", "value": r["bp_pulse"]})
     if not long:
         return "{}"
     ref_data = [
@@ -719,15 +721,15 @@ def _bp_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
     base = alt.Chart(alt.Data(values=long))
     lines = base.mark_line(strokeWidth=1.5, opacity=0.5).encode(
         x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
-        y=alt.Y("mmhg:Q", title="mmHg", scale=alt.Scale(domain=[50, 160])),
+        y=alt.Y("value:Q", title="mmHg / bpm", scale=alt.Scale(domain=[50, 160])),
         color=alt.Color("reading:N", scale=alt.Scale(
-            domain=["Systolic", "Diastolic"], range=["#e05c5c", "#4e9af1"]
+            domain=["Systolic", "Diastolic", "Pulse"], range=["#e05c5c", "#4e9af1", "#f4a261"]
         )),
     )
     dots = base.mark_point(size=60, opacity=0.9).encode(
-        x=alt.X("date:T", scale=x_scale), y="mmhg:Q",
+        x=alt.X("date:T", scale=x_scale), y="value:Q",
         color=alt.Color("reading:N", legend=None),
-        tooltip=["date:T", "reading:N", alt.Tooltip("mmhg:Q", title="mmHg")],
+        tooltip=["date:T", "reading:N", alt.Tooltip("value:Q", title="Value")],
     )
     return _dark(
         alt.layer(bands, lines, dots).properties(width="container", height=200)
@@ -1034,6 +1036,23 @@ async def overview(request: Request,
             ORDER BY date
         """, (metrics_date, metrics_date))
 
+        next_event_row = conn.execute(
+            "SELECT date, type, description, goal_description FROM training_events "
+            "WHERE status='upcoming' AND date >= ? ORDER BY date LIMIT 1",
+            (today,),
+        ).fetchone()
+
+    next_event = None
+    if next_event_row:
+        days_away = (date.fromisoformat(next_event_row[0]) - date.fromisoformat(today)).days
+        next_event = {
+            "date": next_event_row[0],
+            "type": next_event_row[1],
+            "description": next_event_row[2],
+            "goal": next_event_row[3],
+            "days_away": days_away,
+        }
+
     # Sleep debt over the last 3 nights, repaid at up to 1h/night so a large
     # deficit spreads over several nights rather than producing an absurd bedtime.
     sleep_debt_min = _sleep_debt_minutes(recent_sleep_rows, sleep_target_min)
@@ -1090,6 +1109,7 @@ async def overview(request: Request,
         "metrics_date": metrics_date,
         "readiness": readiness,
         "today_info": today_info,
+        "next_event": next_event,
         "today_calories": today_calories,
         "today_protein": today_macros.get("protein_g"),
         "today_carbs": today_macros.get("carbs_g"),
@@ -1163,6 +1183,24 @@ async def trends(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
+        all_load_rows_acwr = _rows(conn, """
+            SELECT date, training_load_ratio FROM daily_metrics
+            WHERE date >= date('now', ?) AND training_load_ratio IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
+        steps_rows = _rows(conn, """
+            SELECT date, steps FROM daily_metrics
+            WHERE date >= date('now', ?) AND steps IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
+        azm_rows = _rows(conn, """
+            SELECT date, active_zone_minutes FROM daily_metrics
+            WHERE date >= date('now', ?) AND active_zone_minutes IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
     # Merge rhr + max_hr by date for combined HR chart
     max_hr_by_date = {r["date"]: r["max_hr"] for r in max_hr_rows}
     hr_rows = []
@@ -1179,13 +1217,22 @@ async def trends(request: Request, days: str = "30",
 
     x_domain = _x_domain(days)
 
+    acwr_rows = [{"date": r["date"], "training_load_ratio": r["training_load_ratio"]}
+                 for r in all_load_rows_acwr]
+
     return templates.TemplateResponse(request, "trends.html", {
         "days": days,
         "hrv_spec": _trend_chart(hrv_rows, "hrv", "hrv_7d_avg", "HRV (ms)", x_domain=x_domain),
         "load_spec": _zone_load_chart(load_rows, x_domain=x_domain),
         "pmc_spec": _pmc_chart(pmc_rows, x_domain=x_domain),
+        "acwr_spec": _sparse_line_chart(
+            acwr_rows, "training_load_ratio", "ACWR (ATL/CTL)", color="#f4a261",
+            ref_bands=[(0.8, 1.3, "sweet spot")], x_domain=x_domain,
+        ),
         "battery_spec": _body_battery_chart(battery_rows, x_domain=x_domain),
         "hr_spec": _hr_chart(hr_rows, x_domain=x_domain),
+        "steps_spec": _daily_bar_chart(steps_rows, "steps", "Steps", color="#4e9af1", x_domain=x_domain),
+        "azm_spec": _daily_bar_chart(azm_rows, "active_zone_minutes", "Active zone min", color="#5cb85c", x_domain=x_domain),
     })
 
 
@@ -1212,24 +1259,6 @@ async def behavior(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
-        score_rows = _rows(conn, """
-            SELECT date, sleep_score FROM daily_metrics
-            WHERE date >= date('now', ?) AND sleep_score IS NOT NULL ORDER BY date
-        """, (clause,))
-
-        stage_rows_raw = _rows(conn, """
-            SELECT date, sleep_deep_min, sleep_rem_min, sleep_light_min FROM daily_metrics
-            WHERE date >= date('now', ?)
-              AND (sleep_deep_min IS NOT NULL OR sleep_rem_min IS NOT NULL OR sleep_light_min IS NOT NULL)
-            ORDER BY date
-        """, (clause,))
-
-    stage_rows = []
-    for r in stage_rows_raw:
-        for stage, col in [("Deep", "sleep_deep_min"), ("REM", "sleep_rem_min"), ("Light", "sleep_light_min")]:
-            if r.get(col) is not None:
-                stage_rows.append({"date": r["date"], "stage": stage, "minutes": r[col]})
-
     for r in rows:
         if r.get("hrv") is not None and r.get("hrv_7d_avg") is not None:
             r["hrv_delta"] = round(r["hrv"] - r["hrv_7d_avg"], 1)
@@ -1247,7 +1276,6 @@ async def behavior(request: Request, days: str = "30",
         "caffeine_spec": _daily_bar_chart(rows, "caffeine_mg", "Caffeine (mg)", color="#7b4fa6", x_domain=x_domain),
         "caffeine_dow_spec": _dow_avg_chart(_compute_dow_avgs(rows, "caffeine_mg"), "Avg mg", "#7b4fa6"),
         "hrv_delta_spec": _diverging_bar_chart(hrv_delta_rows, "hrv_delta", "HRV delta (ms)", x_domain=x_domain),
-        "sleep_spec": _sleep_chart(score_rows, stage_rows, x_domain=x_domain),
     })
 
 
@@ -1454,6 +1482,23 @@ async def activities(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
+        # Personalized HR zones + training thresholds are point-in-time values
+        # (recomputed from the latest max_hr / test), not daily time series —
+        # pull the most recent non-null reading of each rather than charting them.
+        zones_date = _scalar(conn, "SELECT MAX(date) FROM hr_zones")
+        hr_zones = _rows(conn,
+            "SELECT zone, min_bpm, max_bpm FROM hr_zones WHERE date=? ORDER BY zone",
+            (zones_date,)) if zones_date else []
+
+        thresholds_row = conn.execute("""
+            SELECT lactate_threshold_hr, lactate_threshold_pace_min_per_km, ftp_watts
+            FROM daily_metrics
+            WHERE lactate_threshold_hr IS NOT NULL
+               OR lactate_threshold_pace_min_per_km IS NOT NULL
+               OR ftp_watts IS NOT NULL
+            ORDER BY date DESC LIMIT 1
+        """).fetchone()
+
     # Compute pace (min/km) and rolling 4-week avg in Python
     pace_rows = []
     for r in pace_raw:
@@ -1470,11 +1515,24 @@ async def activities(request: Request, days: str = "30",
     # HR efficiency: runs with both avg_hr and pace
     hr_eff_rows = [r for r in pace_rows if r.get("avg_hr")]
 
+    thresholds = None
+    if thresholds_row:
+        lt_pace = thresholds_row[1]
+        thresholds = {
+            "lactate_threshold_hr": thresholds_row[0],
+            "lactate_threshold_pace": (
+                f"{int(lt_pace)}:{round((lt_pace % 1) * 60):02d}/km" if lt_pace else None
+            ),
+            "ftp_watts": thresholds_row[2],
+        }
+
     x_domain = _x_domain(days)
 
     return templates.TemplateResponse(request, "activities.html", {
         "days": days,
         "table_rows": table_rows,
+        "hr_zones": hr_zones,
+        "thresholds": thresholds,
         "count_spec": _activity_bar(count_rows, "count", "Activities"),
         "volume_spec": _weekly_volume_chart(weekly_rows),
         "pace_spec": _pace_trend_chart(pace_rows, x_domain=x_domain),
@@ -1511,17 +1569,47 @@ async def vitals(request: Request, days: str = "30",
         """, (clause,))
 
         bp_rows = _rows(conn, """
-            SELECT date, bp_systolic, bp_diastolic FROM daily_metrics
+            SELECT date, bp_systolic, bp_diastolic, bp_pulse FROM daily_metrics
             WHERE date >= date('now', ?)
               AND (bp_systolic IS NOT NULL OR bp_diastolic IS NOT NULL)
             ORDER BY date
         """, (clause,))
 
+        breathing_rows = _rows(conn, """
+            SELECT date, breathing_rate FROM daily_metrics
+            WHERE date >= date('now', ?) AND breathing_rate IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
+        score_rows = _rows(conn, """
+            SELECT date, sleep_score FROM daily_metrics
+            WHERE date >= date('now', ?) AND sleep_score IS NOT NULL ORDER BY date
+        """, (clause,))
+
+        stage_rows_raw = _rows(conn, """
+            SELECT date, sleep_deep_min, sleep_rem_min, sleep_light_min FROM daily_metrics
+            WHERE date >= date('now', ?)
+              AND (sleep_deep_min IS NOT NULL OR sleep_rem_min IS NOT NULL OR sleep_light_min IS NOT NULL)
+            ORDER BY date
+        """, (clause,))
+
+        sleep_regularity = sleep_regularity_from_db(conn)
+
+    stage_rows = []
+    for r in stage_rows_raw:
+        for stage, col in [("Deep", "sleep_deep_min"), ("REM", "sleep_rem_min"), ("Light", "sleep_light_min")]:
+            if r.get(col) is not None:
+                stage_rows.append({"date": r["date"], "stage": stage, "minutes": r[col]})
+
     x_domain = _x_domain(days)
 
     return templates.TemplateResponse(request, "vitals.html", {
         "days": days,
+        "sleep_spec": _sleep_chart(score_rows, stage_rows, x_domain=x_domain),
+        "sleep_regularity": sleep_regularity,
         "weight_spec": _sparse_line_chart(weight_rows, "weight_kg", "Weight (kg)", color="#f4a261", x_domain=x_domain),
         "spo2_spec": _sparse_line_chart(spo2_rows, "spo2_avg", "SpO2 (%)", color="#7ec8e3", x_domain=x_domain),
+        "breathing_spec": _sparse_line_chart(
+            breathing_rows, "breathing_rate", "Breathing rate (br/min)", color="#5cb85c", x_domain=x_domain),
         "bp_spec": _bp_chart(bp_rows, x_domain=x_domain),
     })

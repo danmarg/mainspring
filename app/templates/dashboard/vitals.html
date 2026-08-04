@@ -5,6 +5,17 @@
 {% block content %}
 <h1>Vitals</h1>
 
+<div class="chart-block">
+  <h3>Sleep — score &amp; stages
+    {% if sleep_regularity.score is not none %}
+    <span style="color:var(--text-muted);font-size:0.72rem">
+      — regularity {{ sleep_regularity.score }}/100
+      (wake ±{{ sleep_regularity.wake_sd_hours }}h · bedtime ±{{ sleep_regularity.bedtime_sd_hours }}h, 14-night)
+    </span>
+    {% endif %}
+  </h3>
+  <div class="vega-wrap" id="sleep-chart"></div>
+</div>
 
 <div class="two-col">
   <div class="chart-block">
@@ -18,15 +29,22 @@
 </div>
 
 <div class="chart-block">
-  <h3>Blood pressure <span style="color:#888;font-size:0.72rem">— green band = normal range (systolic 90–120 · diastolic 60–80)</span></h3>
+  <h3>Breathing rate <span style="color:#888;font-size:0.72rem">— all-day average, breaths/min</span></h3>
+  <div class="vega-wrap" id="breathing-chart"></div>
+</div>
+
+<div class="chart-block">
+  <h3>Blood pressure &amp; pulse <span style="color:#888;font-size:0.72rem">— green band = normal range (systolic 90–120 · diastolic 60–80)</span></h3>
   <div class="vega-wrap" id="bp-chart"></div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-embed('weight-chart', {{ weight_spec|safe }});
-embed('spo2-chart',   {{ spo2_spec|safe }});
-embed('bp-chart',     {{ bp_spec|safe }});
+embed('sleep-chart',     {{ sleep_spec|safe }});
+embed('weight-chart',    {{ weight_spec|safe }});
+embed('spo2-chart',      {{ spo2_spec|safe }});
+embed('breathing-chart', {{ breathing_spec|safe }});
+embed('bp-chart',        {{ bp_spec|safe }});
 </script>
 {% endblock %}
