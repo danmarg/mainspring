@@ -407,10 +407,12 @@ def test_training_load_ratio_none_without_both_atl_and_ctl(tmp_db):
 
 def test_hrv_recomputed_from_intraday_when_google_daily_rollup_used(tmp_db):
     """Google's daily-heart-rate-variability rollup is all-day, not overnight —
-    when it's the only source, recompute from the overnight intraday_hrv samples."""
+    when it's the only source, recompute from the overnight intraday_hrv samples.
+    No wake-time data seeded, so this falls back to the 01:00-06:00 local
+    (Europe/Berlin, UTC+1 in January) core-night window."""
     upsert_raw_metric(tmp_db, "2025-01-15", "google_health", "hrv", 60.0, utc_now())
     from datetime import datetime, timedelta
-    start = datetime.fromisoformat("2025-01-14T19:00:00+00:00")
+    start = datetime.fromisoformat("2025-01-15T00:30:00+00:00")
     for i in range(30):
         ts = (start + timedelta(minutes=i * 5)).strftime("%Y-%m-%dT%H:%M:%SZ")
         tmp_db.execute(
@@ -425,6 +427,38 @@ def test_hrv_recomputed_from_intraday_when_google_daily_rollup_used(tmp_db):
     ).fetchone()
     assert row[0] == 50.0  # overnight-computed, not the 60.0 all-day rollup
     assert json.loads(row[1])["hrv"] == "google_health_intraday"
+
+
+def test_hrv_recomputed_using_actual_sleep_window_not_wide_window(tmp_db):
+    """With real wake/duration data, only samples inside the actual bed-to-wake
+    span should count — evening-awake samples outside it (which the old
+    20:00-10:00 window would have included) must not pull the average down."""
+    upsert_raw_metric(tmp_db, "2025-01-15", "google_health", "hrv", 60.0, utc_now())
+    upsert_raw_metric(tmp_db, "2025-01-15", "google_health", "sleep_wake_hour", 7.0, utc_now())
+    upsert_raw_metric(tmp_db, "2025-01-15", "google_health", "sleep_duration_min", 420.0, utc_now())  # 7h -> bedtime 00:00 CET
+
+    from datetime import datetime, timedelta
+    # In-window: 2025-01-14T23:00 CET (22:00 UTC) through 2025-01-15T06:00 CET (05:00 UTC)
+    in_window_start = datetime.fromisoformat("2025-01-14T23:30:00+00:00")  # 00:30 CET, inside bed 00:00 -> wake 07:00
+    for i in range(30):
+        ts = (in_window_start + timedelta(minutes=i * 5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        tmp_db.execute(
+            "INSERT INTO intraday_hrv(ts, source, rmssd) VALUES (?,?,?)",
+            (ts, "google_health", 50.0),
+        )
+    # Out-of-window: early evening, well before bedtime — would bias a wide window down
+    evening_start = datetime.fromisoformat("2025-01-14T18:00:00+00:00")
+    for i in range(30):
+        ts = (evening_start + timedelta(minutes=i * 5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        tmp_db.execute(
+            "INSERT INTO intraday_hrv(ts, source, rmssd) VALUES (?,?,?)",
+            (ts, "google_health", 20.0),
+        )
+    tmp_db.commit()
+    rebuild_daily_metrics(tmp_db, {"2025-01-15"})
+    tmp_db.commit()
+    row = tmp_db.execute("SELECT hrv FROM daily_metrics WHERE date='2025-01-15'").fetchone()
+    assert row[0] == 50.0  # only the in-window samples counted, not the evening 20.0s
 
 
 def test_hrv_garmin_untouched_when_already_overnight(tmp_db):
