@@ -268,11 +268,45 @@ def _resting_hr_from_intraday(conn, date_str: str) -> tuple[float | None, str | 
 # is what resolve_metric picked, recompute from those samples instead — same
 # fix as _resting_hr_from_intraday, applied to whichever side actually needs it
 # (Garmin's own figure is left untouched; it's already correct).
+#
+# Unlike RHR's lowest-5% extraction (inherently drawn from the sleep portion
+# regardless of window width), this takes a plain mean, so the window matters:
+# _overnight_utc_bounds' 20:00-10:00 span includes hours most people are awake,
+# and awake RMSSD runs systematically lower (sympathetic dominance) — averaging
+# that in would bias the result exactly when the readiness baseline-matching
+# above assumes "overnight-only" values are comparable. Use the actual sleep
+# window (same bedtime estimate as sleep_regularity) when available, falling
+# back to a conservative 01:00-06:00 local core-night window otherwise.
 HRV_MIN_SAMPLES = 20  # ~100min at Google's ~5min sample spacing
 
 
-def _hrv_overnight_from_intraday(conn, date_str: str, source: str) -> float | None:
-    utc_start, utc_end = _overnight_utc_bounds(date_str)
+def _sleep_window_utc_bounds(date_str: str, wake_hour: float | None, duration_min: float | None) -> tuple[str, str]:
+    try:
+        tz = ZoneInfo(HOME_TZ)
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    d = date.fromisoformat(date_str)
+
+    if wake_hour is not None and duration_min:
+        bedtime_hour = (wake_hour - duration_min / 60) % 24
+        bed_date = d if bedtime_hour < wake_hour else d - timedelta(days=1)
+        bh, bm = divmod(round(bedtime_hour * 60), 60)
+        wh, wm = divmod(round(wake_hour * 60), 60)
+        window_start = datetime(bed_date.year, bed_date.month, bed_date.day, bh, bm, tzinfo=tz)
+        window_end = datetime(d.year, d.month, d.day, wh, wm, tzinfo=tz)
+    else:
+        window_start = datetime(d.year, d.month, d.day, 1, 0, tzinfo=tz)
+        window_end = datetime(d.year, d.month, d.day, 6, 0, tzinfo=tz)
+
+    return (
+        window_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        window_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+def _hrv_overnight_from_intraday(conn, date_str: str, source: str, duration_min: float | None) -> float | None:
+    wake_hour, _ = resolve_metric(conn, date_str, "sleep_wake_hour")
+    utc_start, utc_end = _sleep_window_utc_bounds(date_str, wake_hour, duration_min)
     rows = conn.execute(
         "SELECT rmssd FROM intraday_hrv WHERE source=? AND ts >= ? AND ts < ?",
         (source, utc_start, utc_end),
@@ -390,7 +424,9 @@ def _rebuild_one_day(conn, date_str: str) -> None:
     # from overnight-only intraday samples instead (see _hrv_overnight_from_intraday).
     # Garmin's own hrv is already overnight-only and left as resolved.
     if source_flags.get("hrv") == "google_health":
-        overnight_hrv = _hrv_overnight_from_intraday(conn, date_str, "google_health")
+        overnight_hrv = _hrv_overnight_from_intraday(
+            conn, date_str, "google_health", values.get("sleep_duration_min")
+        )
         if overnight_hrv is not None:
             values["hrv"] = overnight_hrv
             source_flags["hrv"] = "google_health_intraday"

@@ -396,7 +396,11 @@ def get_source_config() -> dict:
 @mcp.tool()
 def set_source_preference(metric: str, source: str) -> str:
     """Set the canonical source for a metric. source must be 'garmin' or 'google_health'.
-    Use 'activities' as the metric to set the preference for activity dedup."""
+    Use 'activities' as the metric to set the preference for activity dedup.
+    Note: 'resting_hr' and (when Google Health provides it) 'hrv' are recomputed
+    from raw intraday samples in normalize.py regardless of this setting — see the
+    README's "Which metrics come from which platform" section — so a preference
+    set here has no effect on those two."""
     valid_sources = ("garmin", "google_health")
     if source not in valid_sources:
         return f"Error: source must be one of {valid_sources}"
