@@ -156,6 +156,8 @@ Once connected, Claude can log meals, caffeine, alcohol, weight, and blood press
 | `log_weight(kg)` | Log a weight measurement |
 | `log_blood_pressure(systolic, diastolic, pulse?)` | Log a BP reading |
 | `log_rpe(value, activity_type?)` | Log perceived exertion after a workout (1–10) |
+| `log_hydration(ml)` | Log fluid intake; also pushed to Garmin Connect if configured |
+| `log_soreness(body_part, severity, notes?)` | Log soreness/minor injury (severity 1–10); surfaces in `get_workout_context` for 3 days |
 | `log_note(description)` | Log a free-text note |
 | `amend_log(log_id, ...)` | Correct a previous log entry |
 | `delete_log(log_id)` | Delete a log entry |
@@ -167,8 +169,8 @@ All logging tools accept an optional `ts` parameter (UTC ISO-8601) to back-date 
 | Tool | What it returns |
 |---|---|
 | `get_logs(start_date, end_date, type?)` | Raw log entries (meals, caffeine, alcohol, notes) |
-| `get_daily_metrics(start_date, end_date)` | HRV, sleep, training load, nutrition totals by date |
-| `get_workout_context(date?)` | Everything needed for workout planning in one call: today's HRV + trend, training stress balance (TSB/form), week volume vs targets, next goal event, yesterday's RPE, recent activities, Garmin's suggested workout, and personalized insights from historical correlations |
+| `get_daily_metrics(start_date, end_date)` | HRV, sleep (incl. sleep-specific respiration, skin temp deviation), training load, hydration, lactate threshold, FTP, recovery time, nutrition totals by date |
+| `get_workout_context(date?)` | Everything needed for workout planning in one call: today's HRV + trend, composite readiness score, training stress balance (TSB/form) and ACWR, personalized HR zones, recovery time, sleep regularity, week volume vs targets, next goal event, yesterday's RPE, recent soreness, recent activities, Garmin's suggested workout, and personalized insights from historical correlations |
 | `get_suggested_workout(date?)` | Garmin's raw workout suggestion for a date |
 | `get_correlations(input_metric, output_metric, lag?)` | Pearson/Spearman correlation between any two metrics with a configurable day lag — e.g. `alcohol_units` → `hrv` at lag 1 reveals last night's drinking vs this morning's recovery |
 | `get_training_goals()` | Current weekly training targets |
@@ -264,8 +266,8 @@ Both importers write into the same `raw_daily_metrics` table, so most biometrics
 
 | Metric | Garmin | Google Health |
 |---|:---:|:---:|
-| HRV | ✅ | ✅ |
-| Resting heart rate | ✅ | ✅ |
+| HRV | ✅ (already overnight-only) | ✅ (recomputed from overnight intraday samples when available — see below) |
+| Resting heart rate | ✅ (computed from raw intraday HR, not either vendor's own RHR — see below) | ✅ |
 | Sleep score | ✅ (native) | ✅ (synthesized from stages if not provided) |
 | Sleep duration / stages (deep, REM, light, awake) | ✅ | ✅ |
 | Steps, active zone minutes, calories | ✅ | ✅ |
@@ -277,8 +279,22 @@ Both importers write into the same `raw_daily_metrics` table, so most biometrics
 | **Stress score** (avg/max) | ✅ | ❌ |
 | **Suggested workout** | ✅ | ❌ |
 | Blood pressure | ✅ (read + write-back to Garmin Connect) | ❌ |
+| **Hydration** | ✅ (read + write-back; also loggable via `log_hydration`) | ❌ |
+| **Lactate threshold HR/pace, cycling FTP** | ✅ | ❌ |
+| **Recovery time** | ✅ | ❌ |
+| **Skin temperature deviation** | ✅ (compatible devices only — Venu 3, epix Pro, fēnix 7 Pro+) | ✅ (compatible devices only; field names unverified — see caveat below) |
+| Sleep-specific respiration (distinct from all-day `breathing_rate`) | ✅ | ❌ (falls back to all-day average) |
+| HR zones (derived from `max_hr`, standard %HRmax bands — not vendor-scraped) | ✅ (max_hr sourced from Garmin today) | ❌ (would work automatically if a source ever provides `max_hr`) |
+| Sleep regularity (bed/wake-time consistency) | ✅ | ✅ (fully derived from `sleep_wake_hour` + duration, already shared) |
+| Soreness/injury logging (`log_soreness`) | ✅ (manual — not platform-dependent) | ✅ (manual — not platform-dependent) |
 
-Garmin is the only source for training-load-derived signals (TSB, ACWR, `training_readiness`) because Google Health/Health Connect has no equivalent API — there's no on-device Banister impulse-response model to read. The composite `readiness` score (see [`get_workout_context`](#query-tools)) degrades gracefully without them: it renormalizes across whatever's available (HRV, sleep, resting HR), it just won't include the two training-load components. If you only have a Garmin-compatible device, none of this matters — Garmin alone covers everything in this table.
+Garmin is the only source for training-load-derived signals (TSB, ACWR, `training_readiness`) and the Firstbeat-modeled metrics above (lactate threshold, FTP, recovery time) because Google Health/Health Connect has no equivalent API — there's no on-device Banister impulse-response model or sports-science engine to read. Hydration *does* have a Health Connect record type in principle, so a Google Health importer could pick it up later — it's just not wired up yet. The composite `readiness` score (see [`get_workout_context`](#query-tools)) degrades gracefully without any of these: it renormalizes across whatever's available (HRV, sleep, resting HR), it just won't include the training-load components. If you only have a Garmin-compatible device, none of this matters — Garmin alone covers everything in this table.
+
+**Resting heart rate is computed, not vendor-reported.** Garmin's `restingHeartRate` is an overnight minimum; Google Health/Health Connect's `dailyRestingHeartRate` is closer to waking RHR and reads ~10bpm higher for the same person on the same night — so picking one canonical source per `source_config` would still produce a discontinuity if you ever switch, or an apples-to-oranges trend across a Garmin-then-Fitbit history. Instead, `daily_metrics.resting_hr` is computed from raw 1-minute HR samples in `intraday_hr` (mean of the lowest 5% of samples in the overnight window), which both importers populate the same way. This only works for dates with intraday HR on file — both importers pull it for just the last ~2 days on a normal rolling import (a full month of backfill is ~50-100 extra API pages, see `app/importers/garmin.py`/`google_health.py`), so older dates fall back to whichever vendor's RHR `resolve_metric` finds via the normal source-priority.
+
+**HRV has the same problem on Google Health's side only.** Garmin's `hrv` is already overnight-only (`hrvSummary.lastNight`), but Google Health/Health Connect's `daily-heart-rate-variability` rollup is a 24h aggregate, not sleep-window-specific. Google Health separately provides real overnight RMSSD samples (`intraday_hrv`, ~5-min resolution) via the same paging fetch used for the dashboard's intraday HRV data — when Google Health's daily rollup is what gets picked, `hrv` is recomputed from those samples instead. Garmin's figure is left untouched since it doesn't have this problem. Both this and the RHR fix above track *which* computation method produced each day's value in `source_flags_json`, and `readiness_from_db` only builds its 7-day rolling baseline from days using the same method as today — mixing methodologies through the readiness score's ratio-based components would otherwise read as a manufactured recovery swing on the day the method changes, not real signal.
+
+**Field names to double-check after your first real import**, since several of the metrics above come from undocumented parts of each API and were implemented defensively (best-effort field name guesses, degrading to a silent `NULL` rather than an error if wrong) rather than against verified documentation: Garmin `recoveryTime` (training readiness), `avgSleepRespirationValue` and `skinTempDataDTOList`/`skinTempCelsius` (sleep endpoint), and the FTP response shape; Google Health's `skin-temperature` data type and its delta field names entirely (Health Connect's `SkinTemperatureRecord` support is new and may not match the guessed shape). If any of these stay `NULL` for you, check the corresponding row in `raw_import_payloads` — the untouched upstream response is always captured before parsing, so fixing the parser later doesn't require re-fetching anything.
 
 ---
 

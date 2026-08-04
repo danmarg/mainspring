@@ -166,7 +166,26 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
   bp_systolic          REAL,
   bp_diastolic         REAL,
   bp_pulse             REAL,
-  rpe                  REAL
+  rpe                  REAL,
+  skin_temp_deviation  REAL,  -- deg C vs personal baseline, illness/cycle-shift signal
+  hydration_ml         REAL,
+  max_hr               REAL,  -- observed max HR for the day; feeds hr_zones
+  lactate_threshold_hr REAL,
+  lactate_threshold_pace_min_per_km REAL,
+  ftp_watts            REAL,  -- cycling functional threshold power
+  sleep_breathing_rate REAL,  -- overnight-only respiration, distinct from all-day breathing_rate
+  recovery_hours       REAL   -- estimated hours until ready for hard training again
+);
+
+-- personalized HR zone boundaries, derived from max_hr (%HRmax bands) — source-agnostic,
+-- not scraped from any single vendor's proprietary zone endpoint
+CREATE TABLE IF NOT EXISTS hr_zones (
+  date    TEXT NOT NULL,
+  source  TEXT NOT NULL,   -- 'derived' (computed from max_hr) | vendor name if ever sourced directly
+  zone    INTEGER NOT NULL,-- 1-5
+  min_bpm REAL,
+  max_bpm REAL,
+  PRIMARY KEY (date, source, zone)
 );
 
 -- Google Health API OAuth token storage (single row, id=1 enforced by CHECK)

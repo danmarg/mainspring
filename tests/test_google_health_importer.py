@@ -15,7 +15,7 @@ import pytest
 
 import app.db as db_module
 from app.db import init_db, get_connection
-from app.importers.google_health import _get, _post
+from app.importers.google_health import _get, _parse_skin_temp, _post
 
 
 @pytest.fixture
@@ -95,3 +95,22 @@ def test_post_propagates_refreshed_token_to_caller(tmp_db, monkeypatch):
 
     assert data == {"ok": True}
     assert tokens["access_token"] == "new-access-token"
+
+
+def test_parse_skin_temp(tmp_db):
+    data = {
+        "dataPoints": [
+            {"skinTemperature": {"deltas": [{"deltaCelsius": 0.2}, {"deltaCelsius": 0.4}]}}
+        ]
+    }
+    rows = _parse_skin_temp(tmp_db, "2025-01-01", data)
+    assert rows == 1
+    row = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='skin_temp_deviation'"
+    ).fetchone()
+    assert abs(row[0] - 0.3) < 0.01
+
+
+def test_parse_skin_temp_no_data(tmp_db):
+    assert _parse_skin_temp(tmp_db, "2025-01-01", {}) == 0
+    assert _parse_skin_temp(tmp_db, "2025-01-01", {"dataPoints": []}) == 0

@@ -1,5 +1,6 @@
 """Tests for the composite readiness score (app/readiness.py)."""
 
+import json
 import sqlite3
 
 import pytest
@@ -7,10 +8,13 @@ import pytest
 import app.db as db_module
 from app.db import init_db, upsert_raw_metric, utc_now
 from app.readiness import (
+    _circular_sd_hours,
     _ln_rmssd_cv,
     _sleep_debt_score,
     compute_readiness,
     readiness_from_db,
+    sleep_regularity,
+    sleep_regularity_from_db,
 )
 
 
@@ -149,6 +153,61 @@ def test_compute_readiness_no_data_returns_none_score():
 
 # ── readiness_from_db integration ────────────────────────────────────────────
 
+def test_readiness_from_db_rhr_baseline_excludes_mismatched_methodology():
+    """7 days of vendor-sourced resting_hr (55, flagged 'garmin') followed by one
+    day of intraday-computed resting_hr (48, flagged 'garmin_intraday') shouldn't
+    read as a huge recovery improvement — that's a methodology change, not signal.
+    The RHR component should either be dropped (no matching-methodology baseline)
+    or computed against a same-methodology baseline, never pinned at the 100 cap."""
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    now = utc_now()
+    for i, d in enumerate([
+        "2025-04-01", "2025-04-02", "2025-04-03", "2025-04-04",
+        "2025-04-05", "2025-04-06", "2025-04-07",
+    ]):
+        conn.execute(
+            "INSERT INTO daily_metrics(date, resting_hr, source_flags_json) VALUES (?,?,?)",
+            (d, 55.0, json.dumps({"resting_hr": "garmin"})),
+        )
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, source_flags_json) VALUES (?,?,?)",
+        ("2025-04-08", 48.0, json.dumps({"resting_hr": "garmin_intraday"})),
+    )
+    conn.commit()
+
+    result = readiness_from_db(conn, "2025-04-08")
+    conn.close()
+
+    rhr_component = next((c for c in result["components"] if c["name"] == "Resting HR"), None)
+    assert rhr_component is None or rhr_component["score"] < 100.0
+
+
+def test_readiness_from_db_hrv_baseline_excludes_mismatched_methodology():
+    """7 days of Google's all-day HRV rollup (60, flagged 'google_health') followed
+    by one day of overnight-computed HRV (50, flagged 'google_health_intraday')
+    shouldn't read as a big HRV drop — that's a methodology change, not signal."""
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    for d in ["2025-05-01", "2025-05-02", "2025-05-03", "2025-05-04",
+              "2025-05-05", "2025-05-06", "2025-05-07"]:
+        conn.execute(
+            "INSERT INTO daily_metrics(date, hrv, source_flags_json) VALUES (?,?,?)",
+            (d, 60.0, json.dumps({"hrv": "google_health"})),
+        )
+    conn.execute(
+        "INSERT INTO daily_metrics(date, hrv, source_flags_json) VALUES (?,?,?)",
+        ("2025-05-08", 50.0, json.dumps({"hrv": "google_health_intraday"})),
+    )
+    conn.commit()
+
+    result = readiness_from_db(conn, "2025-05-08")
+    conn.close()
+
+    hrv_component = next((c for c in result["components"] if c["name"] == "HRV"), None)
+    # With no matching-methodology baseline, the component should drop out rather
+    # than score against Google's incomparable all-day average.
+    assert hrv_component is None
+
+
 def test_readiness_from_db_uses_trailing_sleep_debt_and_acwr():
     conn = sqlite3.connect(str(db_module.DB_PATH))
     dates = ["2025-02-01", "2025-02-02", "2025-02-03", "2025-02-04",
@@ -182,3 +241,67 @@ def test_readiness_from_db_uses_trailing_sleep_debt_and_acwr():
     # Last night was 90 but preceded by a week of 50s — debt-adjusted score should
     # land well below the raw last-night value.
     assert sleep_component["score"] < 90.0
+
+
+# ── sleep regularity ──────────────────────────────────────────────────────────
+
+def test_circular_sd_hours_none_with_too_few_nights():
+    assert _circular_sd_hours([7.0, 7.5]) is None
+
+
+def test_circular_sd_hours_low_for_consistent_wake_times():
+    sd = _circular_sd_hours([7.0, 7.1, 6.9, 7.0, 7.2])
+    assert sd is not None
+    assert sd < 0.3
+
+
+def test_circular_sd_hours_handles_midnight_wraparound():
+    """Bedtimes clustered around midnight (23.5, 0.5) shouldn't read as wildly
+    variable just because they're numerically far apart."""
+    naive_sd = (sum((h - 12) ** 2 for h in [23.5, 0.5, 23.8, 0.2]) / 4) ** 0.5
+    circular_sd = _circular_sd_hours([23.5, 0.5, 23.8, 0.2])
+    assert circular_sd is not None
+    assert circular_sd < naive_sd
+
+
+def test_circular_sd_hours_high_for_erratic_times():
+    consistent = _circular_sd_hours([7.0, 7.1, 6.9, 7.0])
+    erratic = _circular_sd_hours([5.0, 9.0, 6.0, 10.0])
+    assert erratic > consistent
+
+
+def test_sleep_regularity_score_high_for_consistent_nights():
+    nights = [(7.0, 480.0), (7.1, 470.0), (6.9, 475.0), (7.0, 480.0)]
+    result = sleep_regularity(nights)
+    assert result["score"] is not None
+    assert result["score"] > 80
+
+
+def test_sleep_regularity_score_low_for_erratic_nights():
+    nights = [(5.0, 300.0), (9.0, 600.0), (6.0, 400.0), (10.0, 350.0)]
+    result = sleep_regularity(nights)
+    assert result["score"] is not None
+    assert result["score"] < 60
+
+
+def test_sleep_regularity_none_with_no_nights():
+    result = sleep_regularity([])
+    assert result["score"] is None
+
+
+def test_sleep_regularity_from_db(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    now = utc_now()
+    dates = ["2025-03-01", "2025-03-02", "2025-03-03", "2025-03-04"]
+    for d, wake, dur in zip(dates, [7.0, 7.1, 6.9, 7.0], [480.0, 470.0, 475.0, 480.0]):
+        conn.execute(
+            "INSERT INTO daily_metrics(date, sleep_duration_min, source_flags_json) VALUES (?,?,?)",
+            (d, dur, "{}"),
+        )
+        upsert_raw_metric(conn, d, "garmin", "sleep_wake_hour", wake, now)
+    conn.commit()
+
+    result = sleep_regularity_from_db(conn, "2025-03-04")
+    conn.close()
+    assert result["score"] is not None
+    assert result["score"] > 80

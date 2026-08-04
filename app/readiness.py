@@ -110,6 +110,7 @@ Two-process model: alertness(t) = f(C(t), S(t)) where:
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from datetime import date
@@ -280,27 +281,65 @@ def compute_readiness(
     return {"score": score, "label": label, "color": color, "components": components}
 
 
+def _source_flag(source_flags_json: str | None, metric: str) -> str | None:
+    if not source_flags_json:
+        return None
+    try:
+        flag = json.loads(source_flags_json).get(metric)
+    except (ValueError, TypeError):
+        return None
+    return flag if isinstance(flag, str) else None
+
+
+def _is_computed_rhr_flag(source_flags_json: str | None) -> bool:
+    """True if that day's resting_hr came from _resting_hr_from_intraday (flagged
+    "<source>_intraday" in normalize.py) rather than a vendor's own RHR figure."""
+    flag = _source_flag(source_flags_json, "resting_hr")
+    return flag is not None and flag.endswith("_intraday")
+
+
+def _is_all_day_hrv_flag(source_flags_json: str | None) -> bool:
+    """True only for Google Health's raw daily rollup (a 24h aggregate) — Garmin's
+    hrv and the "google_health_intraday" recompute are both overnight-only and
+    comparable to each other; the raw google_health rollup isn't comparable to
+    either (see _hrv_overnight_from_intraday in normalize.py)."""
+    return _source_flag(source_flags_json, "hrv") == "google_health"
+
+
 def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> dict:
     """Query today's metrics and compute readiness. date_str defaults to today."""
     if date_str is None:
         date_str = date.today().isoformat()
 
     row = conn.execute(
-        "SELECT hrv, sleep_score, resting_hr FROM daily_metrics WHERE date=?",
+        "SELECT hrv, sleep_score, resting_hr, source_flags_json FROM daily_metrics WHERE date=?",
         (date_str,),
     ).fetchone()
 
     hrv = sleep_score = rhr = None
+    today_rhr_computed = today_hrv_all_day = False
     if row:
-        hrv, sleep_score, rhr = row
+        hrv, sleep_score, rhr, today_flags = row
+        today_rhr_computed = _is_computed_rhr_flag(today_flags)
+        today_hrv_all_day = _is_all_day_hrv_flag(today_flags)
 
     trailing = conn.execute(
-        """SELECT hrv, resting_hr FROM daily_metrics
+        """SELECT hrv, resting_hr, source_flags_json FROM daily_metrics
            WHERE date >= date(?, '-7 days') AND date < ?""",
         (date_str, date_str),
     ).fetchall()
-    hrv_values_7d = [r[0] for r in trailing if r[0] is not None]
-    rhr_values_7d = [r[1] for r in trailing if r[1] is not None]
+    # Both baselines must be like-for-like: mixing methodologies (vendor RHR vs our
+    # intraday-computed RHR; Google's all-day HRV rollup vs overnight-only HRV)
+    # through the readiness ratios' large multipliers produces a false floor/ceiling
+    # on methodology-transition days, not real signal.
+    hrv_values_7d = [
+        r[0] for r in trailing
+        if r[0] is not None and _is_all_day_hrv_flag(r[2]) == today_hrv_all_day
+    ]
+    rhr_values_7d = [
+        r[1] for r in trailing
+        if r[1] is not None and _is_computed_rhr_flag(r[2]) == today_rhr_computed
+    ]
     hrv_7d = sum(hrv_values_7d) / len(hrv_values_7d) if hrv_values_7d else None
     rhr_7d = sum(rhr_values_7d) / len(rhr_values_7d) if rhr_values_7d else None
     hrv_cv = _ln_rmssd_cv(hrv_values_7d + ([hrv] if hrv is not None else []))
@@ -324,6 +363,105 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
     atl = load_row[1] if load_row else None
 
     return compute_readiness(hrv, hrv_7d, hrv_cv, sleep_debt, rhr, rhr_7d, atl, ctl)
+
+
+# ── sleep regularity ─────────────────────────────────────────────────────────
+#
+# Night-to-night consistency of bed/wake times, independent of duration or
+# score — increasingly shown to predict recovery on its own (Windred, D.P. et
+# al. (2024). "Sleep regularity is a stronger predictor of mortality risk than
+# sleep duration." Sleep, 47(1)). Reported separately rather than folded into
+# the weighted readiness score above, since it's a slower-moving trend
+# (multi-week pattern) rather than an acute daily input.
+#
+# Bed/wake hours wrap at midnight, so plain min/max SD would overstate
+# variability for anyone who crosses it — circular standard deviation
+# (Mardia, K.V. (1972). "Statistics of Directional Data") handles that
+# correctly by treating each time-of-day as an angle around a 24h clock.
+
+def _circular_sd_hours(hours: list[float]) -> float | None:
+    if len(hours) < 3:
+        return None
+    angles = [h / 24 * 2 * math.pi for h in hours]
+    n = len(angles)
+    sin_sum = sum(math.sin(a) for a in angles)
+    cos_sum = sum(math.cos(a) for a in angles)
+    r = min(1.0, math.sqrt(sin_sum ** 2 + cos_sum ** 2) / n)
+    if r <= 0:
+        return 12.0  # maximally irregular
+    circular_sd_rad = math.sqrt(-2 * math.log(r))
+    return circular_sd_rad / (2 * math.pi) * 24
+
+
+def sleep_regularity(nights: list[tuple[float, float]]) -> dict:
+    """
+    Args:
+        nights: list of (wake_hour, sleep_duration_min) tuples, most recent
+                14 or so nights.
+
+    Returns:
+        score: 0-100 (100 = perfectly consistent bed/wake times), or None if
+               too few nights
+        wake_sd_hours, bedtime_sd_hours: circular SD of each, in hours
+    """
+    wake_hours = [w for w, _ in nights if w is not None]
+    bedtimes = [
+        (w - d / 60) % 24
+        for w, d in nights
+        if w is not None and d is not None
+    ]
+
+    wake_sd = _circular_sd_hours(wake_hours)
+    bedtime_sd = _circular_sd_hours(bedtimes)
+    if wake_sd is None and bedtime_sd is None:
+        return {"score": None, "wake_sd_hours": None, "bedtime_sd_hours": None}
+
+    sds = [sd for sd in (wake_sd, bedtime_sd) if sd is not None]
+    avg_sd = sum(sds) / len(sds)
+    # SD of 0h -> 100; SD of 2.5h -> 0 (a "goes to bed within ~15min most
+    # nights" athlete scores high, someone routinely off by 2h+ scores low)
+    score = round(max(0.0, min(100.0, 100.0 - avg_sd * 40.0)))
+
+    return {
+        "score": score,
+        "wake_sd_hours": round(wake_sd, 2) if wake_sd is not None else None,
+        "bedtime_sd_hours": round(bedtime_sd, 2) if bedtime_sd is not None else None,
+    }
+
+
+def sleep_regularity_from_db(conn: sqlite3.Connection, date_str: str | None = None, window_days: int = 14) -> dict:
+    """sleep_wake_hour only lives in raw_daily_metrics (not the daily_metrics wide
+    table), so resolve it per-date with the usual garmin-first source priority,
+    then pair with daily_metrics.sleep_duration_min (already source-resolved)."""
+    if date_str is None:
+        date_str = date.today().isoformat()
+
+    wake_rows = conn.execute(
+        """SELECT date,
+               MIN(CASE WHEN source='garmin' THEN value END) AS garmin_val,
+               MIN(CASE WHEN source='google_health' THEN value END) AS gh_val
+           FROM raw_daily_metrics
+           WHERE metric='sleep_wake_hour' AND date <= ? AND date > date(?, ?)
+           GROUP BY date""",
+        (date_str, date_str, f"-{window_days} days"),
+    ).fetchall()
+    wake_by_date = {r[0]: r[1] if r[1] is not None else r[2] for r in wake_rows}
+    if not wake_by_date:
+        return sleep_regularity([])
+
+    dur_rows = conn.execute(
+        """SELECT date, sleep_duration_min FROM daily_metrics
+           WHERE date <= ? AND date > date(?, ?)""",
+        (date_str, date_str, f"-{window_days} days"),
+    ).fetchall()
+    dur_by_date = {r[0]: r[1] for r in dur_rows}
+
+    nights = [
+        (wake, dur_by_date.get(d))
+        for d, wake in wake_by_date.items()
+        if wake is not None
+    ]
+    return sleep_regularity(nights)
 
 
 def alertness_curve(

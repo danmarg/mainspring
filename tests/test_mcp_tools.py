@@ -378,6 +378,38 @@ def test_log_rpe_validates_range():
     assert "7" in result
 
 
+def test_log_hydration():
+    from app.mcp_server import log_hydration
+    result = log_hydration(ml=500.0, ts="2025-06-01T09:00:00+00:00")
+    assert "500" in result
+
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    row = conn.execute("SELECT hydration_ml FROM daily_metrics WHERE date='2025-06-01'").fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == 500.0
+
+
+def test_log_soreness_validates_range():
+    from app.mcp_server import log_soreness
+    assert "Error" in log_soreness(body_part="left calf", severity=11)
+    assert "Error" in log_soreness(body_part="left calf", severity=0)
+    result = log_soreness(body_part="left calf", severity=6, notes="tight", date="2025-06-01")
+    assert "Error" not in result
+    assert "left calf" in result
+    assert "6" in result
+
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    row = conn.execute(
+        "SELECT type, quantity, unit, description FROM manual_logs WHERE type='soreness'"
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[1] == 6.0
+    assert row[2] == "left calf"
+    assert "tight" in row[3]
+
+
 # ── T9: TZ boundary test for get_logs ────────────────────────────────────────
 
 def test_get_logs_tz_boundary():
@@ -425,6 +457,14 @@ def test_get_workout_context():
         "target_duration_min, target_intensity, fetched_at) VALUES (?,?,?,?,?,?,?)",
         (target_date, "garmin", "base", "Easy 45 min jog", 45.0, "low", utc_now()),
     )
+    conn.execute(
+        "INSERT INTO hr_zones(date, source, zone, min_bpm, max_bpm) VALUES (?,?,?,?,?)",
+        (target_date, "derived", 3, 126, 144),
+    )
+    conn.execute(
+        "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
+        (f"{target_date}T08:00:00+00:00", "soreness", "left calf: 6/10", 6.0, "left calf", utc_now()),
+    )
     conn.commit()
     conn.close()
 
@@ -437,3 +477,7 @@ def test_get_workout_context():
     assert isinstance(result["today"]["hrv"], (int, float))
     assert "readiness" in result["today"]
     assert result["today"]["readiness"]["score"] is not None
+    assert result["today"]["hr_zones"] == [{"zone": 3, "min_bpm": 126, "max_bpm": 144}]
+    assert len(result["recent_soreness"]) == 1
+    assert result["recent_soreness"][0]["body_part"] == "left calf"
+    assert result["recent_soreness"][0]["severity"] == 6.0

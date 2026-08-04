@@ -423,6 +423,46 @@ def _parse_vo2max(conn, date_str: str, data: dict) -> int:
     return 1
 
 
+def _parse_skin_temp(conn, date_str: str, data: dict) -> int:
+    """Skin temperature is a session-type record in Health Connect (SkinTemperatureRecord:
+    start/end interval + a list of delta readings), same shape family as sleep/exercise —
+    so it's fetched via _list_datapoints, not _daily_rollup. Data type slug and field names
+    are best-effort (undocumented for this endpoint specifically); check
+    raw_import_payloads for endpoint='skin_temperature' if this never populates."""
+    if not data:
+        return 0
+    points = data.get("dataPoints") or data.get("sessions", [])
+    if not points:
+        return 0
+
+    readings = []
+    for pt in points:
+        record = pt.get("skinTemperature", pt)
+        deltas = record.get("deltas") or record.get("readings") or [record]
+        for d in deltas:
+            if not isinstance(d, dict):
+                continue
+            val = (
+                d.get("deltaCelsius")
+                or d.get("temperatureDeltaCelsius")
+                or d.get("deviationCelsius")
+            )
+            if val is not None:
+                readings.append(val)
+
+    if not readings:
+        return 0
+    avg_deviation = sum(readings) / len(readings)
+    # Sanity guard: this column means degrees from personal baseline, not an
+    # absolute skin temperature (~30-35C) — plausible mix-up given the field-name
+    # uncertainty above. Skip rather than write a value that reads as a false
+    # illness signal every day; check raw_import_payloads to fix the mapping.
+    if abs(avg_deviation) < 10:
+        upsert_raw_metric(conn, date_str, SOURCE, "skin_temp_deviation", float(avg_deviation), utc_now())
+        return 1
+    return 0
+
+
 def _parse_active_minutes(conn, date_str: str, data: dict) -> int:
     pt = _first_rollup(data)
     if not pt:
@@ -623,6 +663,12 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
         if sleep_data:
             upsert_raw_payload(conn, SOURCE, "sleep", json.dumps(sleep_data), ds)
             rows_upserted += _parse_sleep(conn, ds, sleep_data)
+
+        # Skin temperature: session type (compatible devices only), use list
+        skin_temp_data = _list_datapoints(conn, "skin-temperature", d, tokens)
+        if skin_temp_data:
+            upsert_raw_payload(conn, SOURCE, "skin_temperature", json.dumps(skin_temp_data), ds)
+            rows_upserted += _parse_skin_temp(conn, ds, skin_temp_data)
 
         # Activities: session type, use list
         exercise_data = _list_datapoints(conn, "exercise", d, tokens)

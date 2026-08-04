@@ -17,7 +17,10 @@ from app.importers.garmin import (
     _parse_blood_pressure,
     _parse_body_battery,
     _parse_body_composition,
+    _parse_ftp,
     _parse_hrv,
+    _parse_hydration,
+    _parse_lactate_threshold,
     _parse_sleep,
     _parse_splits,
     _parse_stats,
@@ -26,6 +29,7 @@ from app.importers.garmin import (
     _parse_training_status,
     _upsert_activity,
     push_blood_pressure,
+    push_hydration,
     push_weight,
     run_import,
 )
@@ -54,6 +58,16 @@ def test_parse_stats(tmp_db):
         "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='resting_hr'"
     ).fetchone()
     assert row[0] == 52.0
+
+
+def test_parse_stats_max_hr(tmp_db):
+    data = {"restingHeartRate": 52, "maxHeartRate": 178}
+    rows = _parse_stats(tmp_db, "2025-01-01", data)
+    assert rows == 2
+    row = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='max_hr'"
+    ).fetchone()
+    assert row[0] == 178.0
 
 
 def test_parse_hrv(tmp_db):
@@ -97,6 +111,29 @@ def test_parse_sleep(tmp_db):
     assert abs(wake[0] - 7.5) < 0.01
 
 
+def test_parse_sleep_respiration_and_skin_temp(tmp_db):
+    data = {
+        "dailySleepDTO": {
+            "sleepTimeSeconds": 27000,
+            "avgSleepRespirationValue": 13.8,
+        },
+        "skinTempDataDTOList": [
+            {"skinTempCelsius": 0.2},
+            {"skinTempCelsius": 0.4},
+        ],
+    }
+    rows = _parse_sleep(tmp_db, "2025-01-01", data)
+    assert rows >= 3
+    resp = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='sleep_breathing_rate'"
+    ).fetchone()
+    assert resp[0] == 13.8
+    temp = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='skin_temp_deviation'"
+    ).fetchone()
+    assert abs(temp[0] - 0.3) < 0.01
+
+
 def test_parse_stress(tmp_db):
     data = {"avgStressLevel": 35, "maxStressLevel": 72}
     rows = _parse_stress(tmp_db, "2025-01-01", data)
@@ -117,6 +154,64 @@ def test_parse_training_readiness(tmp_db):
     data = [{"score": 68, "trainingReadinessScore": 68}]
     rows = _parse_training_readiness(tmp_db, "2025-01-01", data)
     assert rows == 1
+
+
+def test_parse_training_readiness_recovery_time(tmp_db):
+    data = [{"score": 68, "recoveryTime": 22}]
+    rows = _parse_training_readiness(tmp_db, "2025-01-01", data)
+    assert rows == 2
+    row = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='recovery_hours'"
+    ).fetchone()
+    assert row[0] == 22.0
+
+
+def test_parse_hydration(tmp_db):
+    rows = _parse_hydration(tmp_db, "2025-01-01", {"valueInML": 2200.0})
+    assert rows == 1
+    row = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='hydration_ml'"
+    ).fetchone()
+    assert row[0] == 2200.0
+
+
+def test_parse_lactate_threshold(tmp_db):
+    data = {"speed_and_heart_rate": {"speed": 3.5, "heartRate": 168}}
+    rows = _parse_lactate_threshold(tmp_db, "2025-01-01", data)
+    assert rows == 2
+    hr = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='lactate_threshold_hr'"
+    ).fetchone()
+    assert hr[0] == 168.0
+    pace = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='lactate_threshold_pace_min_per_km'"
+    ).fetchone()
+    assert abs(pace[0] - (1000 / 3.5 / 60)) < 0.01
+
+
+def test_parse_ftp(tmp_db):
+    rows = _parse_ftp(tmp_db, "2025-01-01", {"functionalThresholdPower": 245})
+    assert rows == 1
+    row = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='ftp_watts'"
+    ).fetchone()
+    assert row[0] == 245.0
+
+
+def test_push_hydration_not_configured(monkeypatch):
+    monkeypatch.delenv("GARMINTOKENS", raising=False)
+    monkeypatch.delenv("GARMIN_EMAIL", raising=False)
+    monkeypatch.delenv("GARMIN_PASSWORD", raising=False)
+    assert push_hydration(2000.0) is False
+
+
+def test_push_hydration_calls_client(monkeypatch):
+    monkeypatch.setenv("GARMINTOKENS", "fake")
+    mock_client = MagicMock()
+    with patch("app.importers.garmin._client", return_value=mock_client):
+        result = push_hydration(2000.0, "2025-06-01T09:00:00+00:00")
+    assert result is True
+    mock_client.add_hydration_data.assert_called_once()
 
 
 def test_parse_training_status_vo2max(tmp_db):
@@ -293,6 +388,12 @@ MOCK_INTENSITY = {"moderateIntensityMinutes": 20, "vigorousIntensityMinutes": 15
 MOCK_HEART_RATES = {"heartRateValues": [[1735714800000, 58], [1735714920000, 60]]}
 MOCK_WEIGH_INS = {"dateWeightList": [{"weight": 74.2}]}
 MOCK_BLOOD_PRESSURE = {"systolic": 122, "diastolic": 78, "pulse": 60}
+MOCK_HYDRATION = {"valueInML": 1800.0}
+MOCK_LACTATE_THRESHOLD = {
+    "speed_and_heart_rate": {"speed": 3.5, "heartRate": 168},
+    "power": {},
+}
+MOCK_FTP = {"functionalThresholdPower": 245}
 MOCK_ACTIVITIES = [
     {
         "activityId": "999",
@@ -322,6 +423,9 @@ def _make_mock_client():
     client.get_heart_rates.return_value = MOCK_HEART_RATES
     client.get_daily_weigh_ins.return_value = MOCK_WEIGH_INS
     client.get_blood_pressure.return_value = MOCK_BLOOD_PRESSURE
+    client.get_hydration_data.return_value = MOCK_HYDRATION
+    client.get_lactate_threshold.return_value = MOCK_LACTATE_THRESHOLD
+    client.get_cycling_ftp.return_value = MOCK_FTP
     client.get_activity_splits.return_value = {
         "lapDTOs": [
             {"distance": 1000.0, "duration": 300, "averageHR": 135},
