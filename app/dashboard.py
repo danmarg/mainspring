@@ -29,7 +29,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── auth ─────────────────────────────────────────────────────────────────────
 
 COOKIE_NAME = "ms_dash_auth"
-COOKIE_TTL = 86400  # 24h
+COOKIE_TTL = 30 * 86400  # 30 days, matching the MCP refresh token lifetime
 
 
 def _token_hash(token: str) -> str:
