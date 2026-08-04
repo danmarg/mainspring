@@ -736,6 +736,55 @@ def _bp_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
     ).to_json()
 
 
+def _hr_zones_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
+    """Stacked area of personalized HR zone boundaries over time. rows:
+    [{date, zone, min_bpm, max_bpm}, ...]. Each date's stack starts at that
+    day's zone-1 floor (not zero) so the band tops line up with real bpm
+    values — the top edge of each layer is exactly that zone's ceiling."""
+    if not rows:
+        return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
+    zone_colors = ["#2ecc71", "#a8d95e", "#f4a261", "#e76f51", "#e05c5c"]
+    by_date: dict[str, list[dict]] = {}
+    for r in rows:
+        by_date.setdefault(r["date"], []).append(r)
+
+    long = []
+    for d, zones in sorted(by_date.items()):
+        zones = sorted(zones, key=lambda z: z["zone"])
+        if not zones:
+            continue
+        running = zones[0]["min_bpm"]
+        for z in zones:
+            top = running + (z["max_bpm"] - z["min_bpm"])
+            long.append({
+                "date": d, "zone": f"Z{z['zone']}", "y1": running, "y2": top,
+                "min_bpm": z["min_bpm"], "max_bpm": z["max_bpm"],
+            })
+            running = top
+    if not long:
+        return "{}"
+
+    chart = (
+        alt.Chart(alt.Data(values=long))
+        .mark_area(opacity=0.85, line={"strokeWidth": 0.5, "color": "#1a1a1a"})
+        .encode(
+            x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
+            y=alt.Y("y1:Q", title="Zone (bpm)"),
+            y2="y2:Q",
+            color=alt.Color("zone:N", scale=alt.Scale(
+                domain=["Z1", "Z2", "Z3", "Z4", "Z5"], range=zone_colors,
+            ), title="Zone", legend=alt.Legend(orient="bottom", labelColor="#aaa", titleColor="#aaa")),
+            tooltip=[
+                alt.Tooltip("date:T", title="Date"), "zone:N",
+                alt.Tooltip("min_bpm:Q", title="Min bpm"), alt.Tooltip("max_bpm:Q", title="Max bpm"),
+            ],
+        )
+        .properties(width="container", height=200)
+    )
+    return _dark(chart).to_json()
+
+
 def _running_economy_chart(rows: list[dict], band_pct: float = 0.07) -> str:
     """HR trend at a consistent effort: filters runs to within band_pct of the
     median pace, then plots avg HR over time with a linear trend line — same
@@ -1482,22 +1531,31 @@ async def activities(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
-        # Personalized HR zones + training thresholds are point-in-time values
-        # (recomputed from the latest max_hr / test), not daily time series —
-        # pull the most recent non-null reading of each rather than charting them.
-        zones_date = _scalar(conn, "SELECT MAX(date) FROM hr_zones")
-        hr_zones = _rows(conn,
-            "SELECT zone, min_bpm, max_bpm FROM hr_zones WHERE date=? ORDER BY zone",
-            (zones_date,)) if zones_date else []
+        # Personalized HR zones are rebuilt daily from that day's max_hr, so
+        # they drift over a training block — worth trending, not just a snapshot.
+        hr_zone_rows = _rows(conn, """
+            SELECT date, zone, min_bpm, max_bpm FROM hr_zones
+            WHERE date >= date('now', ?)
+            ORDER BY date, zone
+        """, (clause,))
 
-        thresholds_row = conn.execute("""
-            SELECT lactate_threshold_hr, lactate_threshold_pace_min_per_km, ftp_watts
-            FROM daily_metrics
-            WHERE lactate_threshold_hr IS NOT NULL
-               OR lactate_threshold_pace_min_per_km IS NOT NULL
-               OR ftp_watts IS NOT NULL
-            ORDER BY date DESC LIMIT 1
-        """).fetchone()
+        lt_hr_rows = _rows(conn, """
+            SELECT date, lactate_threshold_hr FROM daily_metrics
+            WHERE date >= date('now', ?) AND lactate_threshold_hr IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
+        lt_pace_rows = _rows(conn, """
+            SELECT date, lactate_threshold_pace_min_per_km FROM daily_metrics
+            WHERE date >= date('now', ?) AND lactate_threshold_pace_min_per_km IS NOT NULL
+            ORDER BY date
+        """, (clause,))
+
+        ftp_rows = _rows(conn, """
+            SELECT date, ftp_watts FROM daily_metrics
+            WHERE date >= date('now', ?) AND ftp_watts IS NOT NULL
+            ORDER BY date
+        """, (clause,))
 
     # Compute pace (min/km) and rolling 4-week avg in Python
     pace_rows = []
@@ -1515,24 +1573,11 @@ async def activities(request: Request, days: str = "30",
     # HR efficiency: runs with both avg_hr and pace
     hr_eff_rows = [r for r in pace_rows if r.get("avg_hr")]
 
-    thresholds = None
-    if thresholds_row:
-        lt_pace = thresholds_row[1]
-        thresholds = {
-            "lactate_threshold_hr": thresholds_row[0],
-            "lactate_threshold_pace": (
-                f"{int(lt_pace)}:{round((lt_pace % 1) * 60):02d}/km" if lt_pace else None
-            ),
-            "ftp_watts": thresholds_row[2],
-        }
-
     x_domain = _x_domain(days)
 
     return templates.TemplateResponse(request, "activities.html", {
         "days": days,
         "table_rows": table_rows,
-        "hr_zones": hr_zones,
-        "thresholds": thresholds,
         "count_spec": _activity_bar(count_rows, "count", "Activities"),
         "volume_spec": _weekly_volume_chart(weekly_rows),
         "pace_spec": _pace_trend_chart(pace_rows, x_domain=x_domain),
@@ -1542,6 +1587,10 @@ async def activities(request: Request, days: str = "30",
             decoupling_rows, "decoupling_pct", "Aerobic decoupling (%)", invert_color=True, x_domain=x_domain
         ),
         "vo2max_spec": _sparse_line_chart(vo2max_rows, "vo2max", "VO2 Max (mL/kg/min)", color="#5cb85c", x_domain=x_domain),
+        "hr_zones_spec": _hr_zones_chart(hr_zone_rows, x_domain=x_domain),
+        "lt_hr_spec": _sparse_line_chart(lt_hr_rows, "lactate_threshold_hr", "LT heart rate (bpm)", color="#e76f51", x_domain=x_domain),
+        "lt_pace_spec": _sparse_line_chart(lt_pace_rows, "lactate_threshold_pace_min_per_km", "LT pace (min/km)", color="#4e9af1", x_domain=x_domain),
+        "ftp_spec": _sparse_line_chart(ftp_rows, "ftp_watts", "FTP (W)", color="#f4a261", x_domain=x_domain),
     })
 
 
