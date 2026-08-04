@@ -33,6 +33,13 @@
   <div class="vega-wrap" id="breathing-chart"></div>
 </div>
 
+{% if skin_temp_spec != '{}' %}
+<div class="chart-block">
+  <h3>Skin temperature deviation <span style="color:#888;font-size:0.72rem">— vs personal baseline · red = elevated (illness/cycle-shift signal)</span></h3>
+  <div class="vega-wrap" id="skin-temp-chart"></div>
+</div>
+{% endif %}
+
 <div class="chart-block">
   <h3>Blood pressure &amp; pulse <span style="color:#888;font-size:0.72rem">— green band = normal range (systolic 90–120 · diastolic 60–80)</span></h3>
   <div class="vega-wrap" id="bp-chart"></div>
@@ -45,6 +52,7 @@ embed('sleep-chart',     {{ sleep_spec|safe }});
 embed('weight-chart',    {{ weight_spec|safe }});
 embed('spo2-chart',      {{ spo2_spec|safe }});
 embed('breathing-chart', {{ breathing_spec|safe }});
+embed('skin-temp-chart', {{ skin_temp_spec|safe }});
 embed('bp-chart',        {{ bp_spec|safe }});
 </script>
 {% endblock %}
