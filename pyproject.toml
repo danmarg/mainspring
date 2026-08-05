@@ -10,7 +10,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "garminconnect>=0.2",
-    "mcp[cli]>=1.0",
+    "mcp[cli]==1.28.1",
     "datasette>=0.65",
     "datasette-vega>=0.6",
     "altair>=5",
