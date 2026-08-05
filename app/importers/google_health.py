@@ -432,39 +432,32 @@ def _parse_vo2max(conn, date_str: str, data: dict) -> int:
 
 
 def _parse_skin_temp(conn, date_str: str, data: dict) -> int:
-    """Skin temperature is a session-type record in Health Connect (SkinTemperatureRecord:
-    start/end interval + a list of delta readings), same shape family as sleep/exercise —
-    so it's fetched via _list_datapoints, not _daily_rollup. Data type slug and field names
-    are best-effort (undocumented for this endpoint specifically); check
-    raw_import_payloads for endpoint='skin_temperature' if this never populates."""
+    """dailyRollUp doesn't cover this type; dataPoints.list returns one point per
+    night under dailySleepTemperatureDerivations, giving the night's absolute
+    skin temp plus the device's own rolling baseline — deviation is the
+    difference, not a field the API hands back directly."""
     if not data:
         return 0
-    points = data.get("dataPoints") or data.get("sessions", [])
+    points = data.get("dataPoints") or []
     if not points:
         return 0
 
-    readings = []
+    deviations = []
     for pt in points:
-        record = pt.get("skinTemperature", pt)
-        deltas = record.get("deltas") or record.get("readings") or [record]
-        for d in deltas:
-            if not isinstance(d, dict):
-                continue
-            val = (
-                d.get("deltaCelsius")
-                or d.get("temperatureDeltaCelsius")
-                or d.get("deviationCelsius")
-            )
-            if val is not None:
-                readings.append(val)
+        record = pt.get("dailySleepTemperatureDerivations")
+        if not record:
+            continue
+        nightly = record.get("nightlyTemperatureCelsius")
+        baseline = record.get("baselineTemperatureCelsius")
+        if nightly is not None and baseline is not None:
+            deviations.append(nightly - baseline)
 
-    if not readings:
+    if not deviations:
         return 0
-    avg_deviation = sum(readings) / len(readings)
-    # Sanity guard: this column means degrees from personal baseline, not an
-    # absolute skin temperature (~30-35C) — plausible mix-up given the field-name
-    # uncertainty above. Skip rather than write a value that reads as a false
-    # illness signal every day; check raw_import_payloads to fix the mapping.
+    avg_deviation = sum(deviations) / len(deviations)
+    # Sanity guard: this column means degrees from personal baseline (a couple
+    # degrees C at most), not an absolute skin temperature (~30-35C). Skip
+    # rather than write a value that reads as a false illness signal every day.
     if abs(avg_deviation) < 10:
         upsert_raw_metric(conn, date_str, SOURCE, "skin_temp_deviation", float(avg_deviation), utc_now())
         return 1
@@ -672,8 +665,8 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
             upsert_raw_payload(conn, SOURCE, "sleep", json.dumps(sleep_data), ds)
             rows_upserted += _parse_sleep(conn, ds, sleep_data)
 
-        # Skin temperature: session type (compatible devices only), use list
-        skin_temp_data = _list_datapoints(conn, "skin-temperature", d, tokens)
+        # Skin temperature: daily-list type (compatible devices only)
+        skin_temp_data = _list_datapoints(conn, "daily-sleep-temperature-derivations", d, tokens)
         if skin_temp_data:
             upsert_raw_payload(conn, SOURCE, "skin_temperature", json.dumps(skin_temp_data), ds)
             rows_upserted += _parse_skin_temp(conn, ds, skin_temp_data)

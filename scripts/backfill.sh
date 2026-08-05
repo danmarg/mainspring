@@ -17,6 +17,11 @@ TOKEN="${ADMIN_TOKEN:?ADMIN_TOKEN env var required}"
 
 POLL_INTERVAL=5
 CHUNK_DAYS=7
+# Each chunk fires ~10 endpoint calls per day (rollups + daily-* + sleep/exercise
+# lists) against the Google Health API, so a 7-day chunk is ~70 requests already.
+# Pause between successful chunks so a long backfill doesn't run afoul of Google's
+# per-user rate limits — failed chunks still use the exponential backoff below.
+THROTTLE_SECONDS=20
 
 date_add() {
     date -d "$1 + $2 days" +%Y-%m-%d 2>/dev/null \
@@ -52,12 +57,40 @@ run_chunk() {
 
         if [ "$status" = "ok" ] || [ "$status" = "skipped" ]; then
             echo "  ✓ $rows rows"
-            break
+            return 0
         elif [ "$status" = "error" ]; then
             echo "  ✗ error: $err"
-            break
+            return 1
         fi
     done
+}
+
+# A failing chunk (e.g. a revoked OAuth token) fails fast, and every later chunk hits
+# the same broken credential — without a backoff, that turns into a tight retry loop
+# hammering the import endpoint every few seconds. Back off exponentially between
+# failures and give up after a run of consecutive ones instead of grinding through
+# every remaining chunk against a credential that isn't coming back on its own.
+MAX_CONSECUTIVE_FAILURES=3
+BACKOFF_BASE=30
+BACKOFF_MAX=600
+consecutive_failures=0
+
+run_chunk_with_backoff() {
+    if run_chunk "$@"; then
+        consecutive_failures=0
+        return 0
+    fi
+
+    consecutive_failures=$((consecutive_failures + 1))
+    if [ "$consecutive_failures" -ge "$MAX_CONSECUTIVE_FAILURES" ]; then
+        echo "  ✗ $consecutive_failures consecutive failures — aborting backfill (likely a persistent auth/config issue, not a transient one)."
+        exit 1
+    fi
+
+    local backoff=$((BACKOFF_BASE * (2 ** (consecutive_failures - 1))))
+    [ "$backoff" -gt "$BACKOFF_MAX" ] && backoff="$BACKOFF_MAX"
+    echo "  … backing off ${backoff}s before the next chunk (failure $consecutive_failures/$MAX_CONSECUTIVE_FAILURES)"
+    sleep "$backoff"
 }
 
 chunk_start="$START"
@@ -66,13 +99,14 @@ while date_le "$chunk_start" "$END"; do
     [ "$(python3 -c "print('1' if '$chunk_end' > '$END' else '0')")" = "1" ] && chunk_end="$END"
 
     if [ "$SOURCE_FILTER" = "both" ] || [ "$SOURCE_FILTER" = "garmin" ]; then
-        run_chunk garmin "$chunk_start" "$chunk_end"
+        run_chunk_with_backoff garmin "$chunk_start" "$chunk_end"
     fi
     if [ "$SOURCE_FILTER" = "both" ] || [ "$SOURCE_FILTER" = "google_health" ]; then
-        run_chunk google_health "$chunk_start" "$chunk_end"
+        run_chunk_with_backoff google_health "$chunk_start" "$chunk_end"
     fi
 
     chunk_start=$(date_add "$chunk_start" "$CHUNK_DAYS")
+    date_le "$chunk_start" "$END" && sleep "$THROTTLE_SECONDS"
 done
 
 echo "Done."
