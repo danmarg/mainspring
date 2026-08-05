@@ -100,7 +100,9 @@ def test_post_propagates_refreshed_token_to_caller(tmp_db, monkeypatch):
 def test_parse_skin_temp(tmp_db):
     data = {
         "dataPoints": [
-            {"skinTemperature": {"deltas": [{"deltaCelsius": 0.2}, {"deltaCelsius": 0.4}]}}
+            {"dailySleepTemperatureDerivations": {
+                "nightlyTemperatureCelsius": 34.3, "baselineTemperatureCelsius": 34.0,
+            }}
         ]
     }
     rows = _parse_skin_temp(tmp_db, "2025-01-01", data)
