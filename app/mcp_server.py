@@ -13,7 +13,9 @@ built-in auth machinery (MainspringOAuthProvider in mcp_oauth.py).
 The login page lives at /mcp-auth/login on the main FastAPI app.
 """
 
+import functools
 import json
+import math
 import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -51,6 +53,39 @@ def _ts_or_now(ts: Optional[str]) -> str:
 
 def _date_or_today(d: Optional[str]) -> str:
     return d or date.today().isoformat()
+
+
+def _fmt_num(x: float) -> str:
+    """Render a number for a status string without a spurious .0 (e.g. 95 not 95.0)."""
+    r = round(x, 2)
+    return str(int(r)) if r == int(r) else str(r)
+
+
+def _clean(obj):
+    """Recursively round floats to 2dp and collapse whole numbers to int.
+
+    Applied at tool-return boundaries so an LLM reads '72' / '0.31' instead of
+    '71.999999997' / '0.3073529411764706' straight out of SQLite/numpy math."""
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        r = round(obj, 2)
+        return int(r) if r == int(r) else r
+    if isinstance(obj, dict):
+        return {k: _clean(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_clean(v) for v in obj]
+    return obj
+
+
+def _clean_output(fn):
+    """Decorator: clean a tool's dict/list return value before FastMCP serializes it."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return _clean(fn(*args, **kwargs))
+    return wrapper
 
 
 def _renormalize_date(ts_iso: str) -> None:
@@ -110,7 +145,7 @@ def log_caffeine(
             "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
             (event_ts, "caffeine", description, amount_mg, "mg", utc_now()),
         )
-    return f"Logged caffeine at {event_ts}: {description}" + (f" ({amount_mg}mg)" if amount_mg else "")
+    return f"Logged caffeine at {event_ts}: {description}" + (f" ({_fmt_num(amount_mg)}mg)" if amount_mg else "")
 
 
 @mcp.tool()
@@ -126,7 +161,7 @@ def log_alcohol(
             "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
             (event_ts, "alcohol", description, units, "units", utc_now()),
         )
-    return f"Logged alcohol at {event_ts}: {description}" + (f" ({units} units)" if units else "")
+    return f"Logged alcohol at {event_ts}: {description}" + (f" ({_fmt_num(units)} units)" if units else "")
 
 
 # ── amend / delete tools ────────────────────────────────────────────────────
@@ -199,6 +234,7 @@ def _local_date_utc_bounds(date_str: str, tz_name: str | None) -> tuple[str, str
 
 
 @mcp.tool()
+@_clean_output
 def get_logs(
     start_date: str,
     end_date: str,
@@ -248,6 +284,7 @@ def get_logs(
 
 
 @mcp.tool()
+@_clean_output
 def get_daily_metrics(
     start_date: str,
     end_date: str,
@@ -326,6 +363,7 @@ def get_daily_metrics(
 
 
 @mcp.tool()
+@_clean_output
 def get_suggested_workout(date: Optional[str] = None) -> dict | None:
     """Return Garmin's suggested workout for a given date (YYYY-MM-DD, defaults to today),
     plus the training-load context behind it: Garmin's own training_readiness alongside
@@ -437,13 +475,13 @@ def log_weight(kg: float, ts: Optional[str] = None) -> str:
     with db() as conn:
         conn.execute(
             "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
-            (event_ts, "weight", f"{kg}kg", kg, "kg", utc_now()),
+            (event_ts, "weight", f"{_fmt_num(kg)}kg", kg, "kg", utc_now()),
         )
     _renormalize_date(event_ts)
     from app.importers.garmin import push_weight
     pushed = push_weight(kg, event_ts)
     suffix = " (synced to Garmin)" if pushed else ""
-    return f"Logged weight at {event_ts}: {kg}kg{suffix}"
+    return f"Logged weight at {event_ts}: {_fmt_num(kg)}kg{suffix}"
 
 
 @mcp.tool()
@@ -489,13 +527,13 @@ def log_hydration(ml: float, ts: Optional[str] = None) -> str:
     with db() as conn:
         conn.execute(
             "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
-            (event_ts, "hydration", f"{ml}ml", ml, "ml", utc_now()),
+            (event_ts, "hydration", f"{_fmt_num(ml)}ml", ml, "ml", utc_now()),
         )
     _renormalize_date(event_ts)
     from app.importers.garmin import push_hydration
     pushed = push_hydration(ml, event_ts)
     suffix = " (synced to Garmin)" if pushed else ""
-    return f"Logged hydration at {event_ts}: {ml}ml{suffix}"
+    return f"Logged hydration at {event_ts}: {_fmt_num(ml)}ml{suffix}"
 
 
 @mcp.tool()
@@ -523,6 +561,7 @@ def log_soreness(
 
 
 @mcp.tool()
+@_clean_output
 def get_correlations(
     days: int = 90,
     lags: Optional[list] = None,
@@ -583,7 +622,7 @@ def set_training_goal(metric: str, value: float, unit: Optional[str] = None) -> 
             "ON CONFLICT(metric) DO UPDATE SET value=excluded.value, unit=excluded.unit, updated_at=excluded.updated_at",
             (metric, value, unit, utc_now()),
         )
-    return f"Set training goal: {metric} = {value}" + (f" {unit}" if unit else "")
+    return f"Set training goal: {metric} = {_fmt_num(value)}" + (f" {unit}" if unit else "")
 
 
 @mcp.tool()
@@ -597,6 +636,7 @@ def delete_training_goal(metric: str) -> str:
 
 
 @mcp.tool()
+@_clean_output
 def get_training_goals() -> dict:
     """Return current weekly training targets and upcoming goal events."""
     with db() as conn:
@@ -637,6 +677,7 @@ def add_training_event(
 
 
 @mcp.tool()
+@_clean_output
 def list_training_events(status: Optional[str] = None) -> list:
     """List training events. status: 'upcoming' | 'completed' | 'cancelled' | None for all."""
     with db() as conn:
@@ -689,6 +730,7 @@ def delete_training_event(event_id: int) -> str:
 
 
 @mcp.tool()
+@_clean_output
 def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict:
     """Rich context for workout planning: today's metrics, HRV trend, TSB (form),
     training load status, week progress vs targets, next goal event, yesterday's RPE,
