@@ -66,7 +66,7 @@ def test_log_meal_ts_defaults_to_now():
 def test_log_caffeine():
     from app.mcp_server import log_caffeine
     result = log_caffeine(description="espresso", amount_mg=65.0, ts="2025-01-01T07:30:00+00:00")
-    assert "65.0mg" in result
+    assert "65mg" in result
 
     conn = sqlite3.connect(str(db_module.DB_PATH))
     row = conn.execute("SELECT type, quantity, unit FROM manual_logs").fetchone()
