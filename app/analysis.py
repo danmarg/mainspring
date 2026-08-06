@@ -31,6 +31,7 @@ def compute_correlations(
     days: int = 90,
     min_pairs: int = 14,
     method: str = "pearson",
+    max_results: int = 20,
 ) -> dict:
     """
     Compute lag-shifted Pearson or Spearman correlations between behavior
@@ -38,6 +39,10 @@ def compute_correlations(
 
     lag=1 means output measured 1 day AFTER the input date (the classic
     "last night's alcohol → this morning's HRV" pattern).
+
+    `correlations` is capped at `max_results` (strongest |r| first) so a
+    broad inputs/outputs sweep doesn't dump dozens of weak, sub-threshold
+    rows on the caller; `n_correlations` still reports the true total found.
     """
     inp_cols = inputs or DEFAULT_INPUTS
     out_cols = outputs or DEFAULT_OUTPUTS
@@ -103,6 +108,8 @@ def compute_correlations(
                 })
 
     correlations.sort(key=lambda c: abs(c["r"]), reverse=True)
+    n_correlations = len(correlations)
+    correlations = correlations[:max_results]
 
     top = []
     for c in correlations[:10]:
@@ -115,7 +122,7 @@ def compute_correlations(
     return {
         "period_days": days,
         "date_range": {"start": start.isoformat(), "end": end.isoformat()},
-        "n_correlations": len(correlations),
+        "n_correlations": n_correlations,
         "correlations": correlations,
         "top_findings": top,
     }

@@ -55,6 +55,21 @@ def _date_or_today(d: Optional[str]) -> str:
     return d or date.today().isoformat()
 
 
+def _notable_sources(source_flags_json: Optional[str]) -> dict:
+    """Parse source_flags_json and keep only non-default attributions.
+
+    source_flags_json carries a source label for nearly every populated
+    metric each day, mostly just 'garmin' (the default priority) — echoing
+    all of that back doubles the row size for no LLM benefit. Only surface
+    entries that deviate from the default, e.g. 'google_health', 'synthetic',
+    'derived', 'manual', so `sources` reads as "here's what's unusual today."
+    """
+    if not source_flags_json:
+        return {}
+    flags = json.loads(source_flags_json)
+    return {k: v for k, v in flags.items() if v != "garmin"}
+
+
 def _fmt_num(x: float) -> str:
     """Render a number for a status string without a spurious .0 (e.g. 95 not 95.0)."""
     r = round(x, 2)
@@ -85,6 +100,31 @@ def _clean_output(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         return _clean(fn(*args, **kwargs))
+    return wrapper
+
+
+def _prune_empty(obj):
+    """Recursively drop dict entries whose value is an empty list/dict.
+
+    Only safe for single-object (non-tabular) returns: dropping an empty
+    field from one row of a homogeneous list-of-records (e.g. get_daily_metrics)
+    would make sibling rows' schemas inconsistent, which is worse for an LLM
+    than a present-but-empty field. Use _clean_and_prune only on tools that
+    return one dict, not a list of per-date/per-item records.
+    """
+    if isinstance(obj, dict):
+        pruned = {k: _prune_empty(v) for k, v in obj.items()}
+        return {k: v for k, v in pruned.items() if v != [] and v != {}}
+    if isinstance(obj, list):
+        return [_prune_empty(v) for v in obj]
+    return obj
+
+
+def _clean_and_prune(fn):
+    """Decorator: _clean() then _prune_empty() a tool's single-object dict return."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return _prune_empty(_clean(fn(*args, **kwargs)))
     return wrapper
 
 
@@ -204,7 +244,12 @@ def amend_log(
             f"UPDATE manual_logs SET {set_clause} WHERE id=?",
             (*fields.values(), log_id),
         )
-    return f"Amended log {log_id}: " + ", ".join(f"{k}={v}" for k, v in fields.items())
+    display = {("estimated_macros" if k == "estimated_macros_json" else k):
+               (estimated_macros if k == "estimated_macros_json" else v)
+               for k, v in fields.items()}
+    return f"Amended log {log_id}: " + ", ".join(
+        f"{k}={_fmt_num(v) if isinstance(v, float) else v}" for k, v in display.items()
+    )
 
 
 @mcp.tool()
@@ -356,14 +401,14 @@ def get_daily_metrics(
             "ftp_watts": r[33],
             "sleep_breathing_rate": r[34],
             "recovery_hours": r[35],
-            "sources": json.loads(r[36]) if r[36] else {},
+            "sources": _notable_sources(r[36]),
         }
         for r in rows
     ]
 
 
 @mcp.tool()
-@_clean_output
+@_clean_and_prune
 def get_suggested_workout(date: Optional[str] = None) -> dict | None:
     """Return Garmin's suggested workout for a given date (YYYY-MM-DD, defaults to today),
     plus the training-load context behind it: Garmin's own training_readiness alongside
@@ -569,11 +614,13 @@ def get_correlations(
     outputs: Optional[list] = None,
     min_pairs: int = 14,
     method: str = "pearson",
+    max_results: int = 20,
 ) -> dict:
     """Compute lag-shifted correlations between behavior inputs and recovery outputs.
     lag=1 means output measured 1 day after input (e.g. last night's alcohol → this morning's HRV).
     method: 'pearson' or 'spearman'.
-    Returns correlations sorted by absolute strength plus a plain-text top_findings summary."""
+    Returns correlations sorted by absolute strength (capped at max_results; n_correlations
+    reports the true total) plus a plain-text top_findings summary."""
     from app.analysis import compute_correlations
     with db() as conn:
         return compute_correlations(
@@ -584,6 +631,7 @@ def get_correlations(
             days=days,
             min_pairs=min_pairs,
             method=method,
+            max_results=max_results,
         )
 
 
@@ -636,7 +684,7 @@ def delete_training_goal(metric: str) -> str:
 
 
 @mcp.tool()
-@_clean_output
+@_clean_and_prune
 def get_training_goals() -> dict:
     """Return current weekly training targets and upcoming goal events."""
     with db() as conn:
@@ -730,7 +778,7 @@ def delete_training_event(event_id: int) -> str:
 
 
 @mcp.tool()
-@_clean_output
+@_clean_and_prune
 def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict:
     """Rich context for workout planning: today's metrics, HRV trend, TSB (form),
     training load status, week progress vs targets, next goal event, yesterday's RPE,
