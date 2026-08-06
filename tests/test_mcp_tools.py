@@ -189,7 +189,8 @@ def test_get_daily_metrics():
     conn.execute(
         "INSERT INTO daily_metrics(date, hrv, resting_hr, sleep_score, caffeine_mg, alcohol_units, source_flags_json) "
         "VALUES (?,?,?,?,?,?,?)",
-        ("2025-01-01", 55.0, 52.0, 78.0, 200.0, 1.5, json.dumps({"hrv": "garmin"})),
+        ("2025-01-01", 55.0, 52.0, 78.0, 200.0, 1.5,
+         json.dumps({"hrv": "garmin", "resting_hr": "google_health"})),
     )
     conn.commit()
     conn.close()
@@ -200,7 +201,8 @@ def test_get_daily_metrics():
     assert rows[0]["hrv"] == 55.0
     assert rows[0]["resting_hr"] == 52.0
     assert rows[0]["caffeine_mg"] == 200.0
-    assert rows[0]["sources"] == {"hrv": "garmin"}
+    # 'garmin' is the default priority and is suppressed; only the deviation is surfaced
+    assert rows[0]["sources"] == {"resting_hr": "google_health"}
 
 
 def test_get_daily_metrics_date_range():
