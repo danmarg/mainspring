@@ -115,7 +115,7 @@
     <span style="color:var(--text-muted);font-size:0.72rem"> — {{ today_meal_count }} meal{{ 's' if today_meal_count != 1 }} logged</span>
     {% endif %}
   </h3>
-  {% if today_meal_count == 0 %}
+  {% if today_meal_count == 0 and today_hydration is none %}
   <p style="color:var(--text-muted);font-size:0.85rem;margin:0.25rem 0 0">No meals logged today.</p>
   {% else %}
   <div class="nutrition-bars">
@@ -155,6 +155,18 @@
       <span class="nbar-label">Fat</span>
       <span></span>
       <span class="nbar-val">{{ today_fat | round | int }}g</span>
+    </div>
+    {% endif %}
+    {% if today_hydration is not none %}
+    <div class="nbar-row">
+      <span class="nbar-label">Hydration</span>
+      <div class="nbar-track">
+        <div class="nbar-fill hydration-fill" style="width:{{ [[today_hydration / hydration_target * 100, 100] | min, 0] | max | round | int }}%"></div>
+      </div>
+      <span class="nbar-val">
+        {{ today_hydration | round | int }}mL
+        <span style="color:var(--text-muted)"> / {{ hydration_target | round | int }}mL</span>
+      </span>
     </div>
     {% endif %}
   </div>
