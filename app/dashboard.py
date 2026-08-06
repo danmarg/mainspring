@@ -1069,6 +1069,14 @@ async def overview(request: Request,
             "SELECT COUNT(*) FROM manual_logs WHERE type='meal' AND ts >= ? AND ts < ?",
             (today_utc_start, today_utc_end))
 
+        # Today's hydration total — summed from manual_logs (same as nutrition) rather
+        # than daily_metrics.hydration_ml, since that column isn't populated until the
+        # next normalization run.
+        today_hydration = _scalar(conn,
+            """SELECT SUM(quantity) FROM manual_logs
+               WHERE type='hydration' AND ts >= ? AND ts < ? AND quantity IS NOT NULL""",
+            (today_utc_start, today_utc_end))
+
         # Nutrition targets
         protein_target_row = conn.execute(
             "SELECT value FROM training_goals WHERE metric='protein_g_daily'"
@@ -1079,6 +1087,11 @@ async def overview(request: Request,
             "SELECT value FROM training_goals WHERE metric='calories_daily'"
         ).fetchone()
         calorie_target = float(calorie_target_row[0]) if calorie_target_row else None
+
+        hydration_target_row = conn.execute(
+            "SELECT value FROM training_goals WHERE metric='hydration_ml_daily'"
+        ).fetchone()
+        hydration_target = float(hydration_target_row[0]) if hydration_target_row else 2500.0
 
         # Sleep debt — recent nights' shortfall vs target, for the bedtime recommendation
         sleep_target_row = conn.execute(
@@ -1174,8 +1187,10 @@ async def overview(request: Request,
         "today_carbs": today_macros.get("carbs_g"),
         "today_fat": today_macros.get("fat_g"),
         "today_meal_count": today_meal_count or 0,
+        "today_hydration": today_hydration,
         "protein_target": protein_target,
         "calorie_target": calorie_target,
+        "hydration_target": hydration_target,
         "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None),
         "wake_hour": wake_hour,
         "bedtime_wake_hour": bedtime_wake_hour,
@@ -1407,6 +1422,12 @@ async def nutrition(request: Request, days: str = "30",
         ).fetchone()
         protein_target = float(protein_target_row[0]) if protein_target_row else 150.0
 
+        hydration_rows = _rows(conn, """
+            SELECT date, hydration_ml FROM daily_metrics
+            WHERE date >= ? AND hydration_ml IS NOT NULL
+            ORDER BY date
+        """, (local_window_start,))
+
     # Assign each log to its local date in Python using browser tz
     tz = _get_tz(ms_tz)
     _meal_by_local_date: dict[str, dict] = {}
@@ -1480,6 +1501,8 @@ async def nutrition(request: Request, days: str = "30",
         "calories_spec": _daily_bar_chart(cal_logged_rows, "calories", "Calories (kcal)", color="#f4a261", x_domain=x_domain),
         "protein_spec": _daily_bar_chart(protein_rows, "protein_g", "Protein (g)", color="#e05c5c", ref_line=protein_target, x_domain=x_domain),
         "macro_dow_spec": _macro_dow_chart(dow_macro_rows),
+        "hydration_spec": _daily_bar_chart(
+            hydration_rows, "hydration_ml", "Hydration (mL)", color="#1a6b9e", x_domain=x_domain),
     })
 
 
@@ -1647,12 +1670,6 @@ async def vitals(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
-        hydration_rows = _rows(conn, """
-            SELECT date, hydration_ml FROM daily_metrics
-            WHERE date >= date('now', ?) AND hydration_ml IS NOT NULL
-            ORDER BY date
-        """, (clause,))
-
         score_rows = _rows(conn, """
             SELECT date, sleep_score FROM daily_metrics
             WHERE date >= date('now', ?) AND sleep_score IS NOT NULL ORDER BY date
@@ -1685,7 +1702,5 @@ async def vitals(request: Request, days: str = "30",
             breathing_rows, "breathing_rate", "Breathing rate (br/min)", color="#5cb85c", x_domain=x_domain),
         "skin_temp_spec": _diverging_bar_chart(
             skin_temp_rows, "skin_temp_deviation", "Skin temp deviation (°C)", invert_color=True, x_domain=x_domain),
-        "hydration_spec": _daily_bar_chart(
-            hydration_rows, "hydration_ml", "Hydration (mL)", color="#1a6b9e", x_domain=x_domain),
         "bp_spec": _bp_chart(bp_rows, x_domain=x_domain),
     })

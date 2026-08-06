@@ -24,6 +24,13 @@
   <h3>Average macros by day of week (days with macro estimates)</h3>
   <div class="vega-wrap" id="macro-dow-chart"></div>
 </div>
+
+{% if hydration_spec != '{}' %}
+<div class="chart-block">
+  <h3>Hydration <span style="color:#888;font-size:0.72rem">— fluid intake, mL/day (Garmin auto-tracked + manual logs)</span></h3>
+  <div class="vega-wrap" id="hydration-chart"></div>
+</div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -31,5 +38,6 @@
 embed('calories-chart',  {{ calories_spec|safe }});
 embed('protein-chart',   {{ protein_spec|safe }});
 embed('macro-dow-chart', {{ macro_dow_spec|safe }});
+embed('hydration-chart', {{ hydration_spec|safe }});
 </script>
 {% endblock %}
