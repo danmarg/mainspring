@@ -567,13 +567,19 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
                           dur_ms / 60000, now)
         rows += 1
 
-    # Extract wake hour from interval.endTime
+    # Extract wake hour from interval.endTime. endTime is genuine UTC (unlike
+    # Garmin's "Local" timestamps, which are epoch ms already shifted to local
+    # wall-clock) — must apply endUtcOffset to get the local hour, or this reads
+    # ~2h early for HOME_TZ and silently wrong wherever the offset differs.
     interval = sleep_data.get("interval", {})
     end_str = interval.get("endTime")
     if end_str:
         try:
             end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-            wake_hour = end_dt.hour + end_dt.minute / 60
+            offset_str = interval.get("endUtcOffset", "0s")
+            offset_seconds = float(offset_str.rstrip("s")) if offset_str else 0.0
+            local_dt = end_dt + timedelta(seconds=offset_seconds)
+            wake_hour = local_dt.hour + local_dt.minute / 60
             upsert_raw_metric(conn, date_str, SOURCE, "sleep_wake_hour", wake_hour, now)
             rows += 1
         except (ValueError, TypeError):
