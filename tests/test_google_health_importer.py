@@ -20,6 +20,7 @@ from app.importers.google_health import (
     _get,
     _parse_intraday_hr,
     _parse_skin_temp,
+    _parse_sleep,
     _parse_spo2,
     _post,
 )
@@ -239,3 +240,31 @@ def test_parse_spo2_reads_average_percentage(tmp_db):
 def test_parse_spo2_no_data(tmp_db):
     assert _parse_spo2(tmp_db, "2025-01-01", {}) == 0
     assert _parse_spo2(tmp_db, "2025-01-01", {"dataPoints": []}) == 0
+
+
+def test_parse_sleep_wake_hour_applies_utc_offset(tmp_db):
+    """interval.endTime is genuine UTC (unlike Garmin's already-local-shifted
+    'Local' timestamps) — endUtcOffset must be applied or wake hour reads
+    early by however far local time is ahead of UTC. Regression test for a
+    ~2h-early bug (04:25 UTC read as 4:25am local instead of the correct
+    06:25 local at UTC+2) that fed a nonsensically early bedtime recommendation."""
+    data = {
+        "dataPoints": [
+            {"sleep": {
+                "interval": {
+                    "startTime": "2026-08-06T21:03:00Z",
+                    "startUtcOffset": "7200s",
+                    "endTime": "2026-08-07T04:25:00Z",
+                    "endUtcOffset": "7200s",
+                },
+                "type": "STAGES",
+                "stages": [],
+            }}
+        ]
+    }
+    rows = _parse_sleep(tmp_db, "2026-08-07", data)
+    assert rows >= 1
+    row = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2026-08-07' AND metric='sleep_wake_hour'"
+    ).fetchone()
+    assert abs(row[0] - 6.4167) < 0.01  # 04:25 UTC + 2h offset = 06:25 local
