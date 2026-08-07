@@ -135,11 +135,11 @@
     <div class="nbar-row">
       <span class="nbar-label">Protein</span>
       <div class="nbar-track">
-        <div class="nbar-fill protein-fill" style="width:{{ [[today_protein / protein_target * 100, 100] | min, 0] | max | round | int }}%"></div>
+        <div class="nbar-fill protein-fill" style="width:{{ [[today_protein / (protein_target or today_protein) * 100, 100] | min, 0] | max | round | int }}%"></div>
       </div>
       <span class="nbar-val">
         {{ today_protein | round | int }}g
-        <span style="color:var(--text-muted)"> / {{ protein_target | round | int }}g</span>
+        {% if protein_target %}<span style="color:var(--text-muted)"> / {{ protein_target | round | int }}g</span>{% endif %}
       </span>
     </div>
     {% endif %}
@@ -161,11 +161,11 @@
     <div class="nbar-row">
       <span class="nbar-label">Hydration</span>
       <div class="nbar-track">
-        <div class="nbar-fill hydration-fill" style="width:{{ [[today_hydration / hydration_target * 100, 100] | min, 0] | max | round | int }}%"></div>
+        <div class="nbar-fill hydration-fill" style="width:{{ [[today_hydration / (hydration_target or today_hydration) * 100, 100] | min, 0] | max | round | int }}%"></div>
       </div>
       <span class="nbar-val">
         {{ today_hydration | round | int }}mL
-        <span style="color:var(--text-muted)"> / {{ hydration_target | round | int }}mL</span>
+        {% if hydration_target %}<span style="color:var(--text-muted)"> / {{ hydration_target | round | int }}mL</span>{% endif %}
       </span>
     </div>
     {% endif %}

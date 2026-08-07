@@ -1077,11 +1077,12 @@ async def overview(request: Request,
                WHERE type='hydration' AND ts >= ? AND ts < ? AND quantity IS NOT NULL""",
             (today_utc_start, today_utc_end))
 
-        # Nutrition targets
+        # Nutrition targets — no default; only shown once the user sets one via
+        # set_nutrition_goal.
         protein_target_row = conn.execute(
             "SELECT value FROM training_goals WHERE metric='protein_g_daily'"
         ).fetchone()
-        protein_target = float(protein_target_row[0]) if protein_target_row else 160.0
+        protein_target = float(protein_target_row[0]) if protein_target_row else None
 
         calorie_target_row = conn.execute(
             "SELECT value FROM training_goals WHERE metric='calories_daily'"
@@ -1091,7 +1092,7 @@ async def overview(request: Request,
         hydration_target_row = conn.execute(
             "SELECT value FROM training_goals WHERE metric='hydration_ml_daily'"
         ).fetchone()
-        hydration_target = float(hydration_target_row[0]) if hydration_target_row else 2500.0
+        hydration_target = float(hydration_target_row[0]) if hydration_target_row else None
 
         # Sleep debt — recent nights' shortfall vs target, for the bedtime recommendation
         sleep_target_row = conn.execute(
@@ -1416,11 +1417,11 @@ async def nutrition(request: Request, days: str = "30",
             ORDER BY ts
         """, (utc_window_start,))
 
-        # Pull protein target from training_goals if set
+        # Pull protein target from training_goals if set — no default
         protein_target_row = conn.execute(
             "SELECT value FROM training_goals WHERE metric='protein_g_daily'"
         ).fetchone()
-        protein_target = float(protein_target_row[0]) if protein_target_row else 150.0
+        protein_target = float(protein_target_row[0]) if protein_target_row else None
 
         hydration_rows = _rows(conn, """
             SELECT date, hydration_ml FROM daily_metrics

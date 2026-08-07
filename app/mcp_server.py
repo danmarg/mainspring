@@ -683,6 +683,42 @@ def delete_training_goal(metric: str) -> str:
     return f"Deleted training goal: {metric}"
 
 
+_NUTRITION_GOAL_METRICS = {
+    "protein_g_daily": "g",
+    "calories_daily": "kcal",
+    "hydration_ml_daily": "mL",
+}
+
+
+@mcp.tool()
+def set_nutrition_goal(metric: str, value: float) -> str:
+    """Set a daily nutrition target shown on the Today/Nutrition dashboard pages.
+    metric must be one of: protein_g_daily, calories_daily, hydration_ml_daily.
+    Example: set_nutrition_goal('protein_g_daily', 160)."""
+    if metric not in _NUTRITION_GOAL_METRICS:
+        return f"Unknown nutrition metric '{metric}'. Valid metrics: {', '.join(_NUTRITION_GOAL_METRICS)}"
+    unit = _NUTRITION_GOAL_METRICS[metric]
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO training_goals(metric, value, unit, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(metric) DO UPDATE SET value=excluded.value, unit=excluded.unit, updated_at=excluded.updated_at",
+            (metric, value, unit, utc_now()),
+        )
+    return f"Set nutrition goal: {metric} = {_fmt_num(value)} {unit}"
+
+
+@mcp.tool()
+def delete_nutrition_goal(metric: str) -> str:
+    """Delete a nutrition goal by metric name (protein_g_daily, calories_daily, hydration_ml_daily)."""
+    if metric not in _NUTRITION_GOAL_METRICS:
+        return f"Unknown nutrition metric '{metric}'. Valid metrics: {', '.join(_NUTRITION_GOAL_METRICS)}"
+    with db() as conn:
+        cur = conn.execute("DELETE FROM training_goals WHERE metric=?", (metric,))
+    if cur.rowcount == 0:
+        return f"No nutrition goal found for '{metric}'"
+    return f"Deleted nutrition goal: {metric}"
+
+
 @mcp.tool()
 @_clean_and_prune
 def get_training_goals() -> dict:
