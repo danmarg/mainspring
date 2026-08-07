@@ -422,8 +422,11 @@ def _rebuild_one_day(conn, date_str: str) -> None:
 
     # If Google Health's all-day HRV rollup is what got picked above, recompute
     # from overnight-only intraday samples instead (see _hrv_overnight_from_intraday).
+    # Also try this when hrv resolved to nothing at all — Google's daily rollup
+    # endpoint can lag a day behind the intraday RMSSD samples, which land as
+    # soon as they sync, so don't wait on the rollup to have a value to overwrite.
     # Garmin's own hrv is already overnight-only and left as resolved.
-    if source_flags.get("hrv") == "google_health":
+    if source_flags.get("hrv") in ("google_health", None):
         overnight_hrv = _hrv_overnight_from_intraday(
             conn, date_str, "google_health", values.get("sleep_duration_min")
         )

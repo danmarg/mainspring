@@ -222,7 +222,8 @@ def _list_datapoints(conn, data_type: str, d: date, tokens: dict) -> Any | None:
     #   daily-*    → {type}.date >= / <
     #   sleep      → sleep.interval.civil_end_time (only end_time is filterable for sleep)
     #   exercise   → exercise.interval.civil_start_time
-    #   heart-rate → heart_rate.startTime (UTC ISO-8601; sample type, not interval)
+    # heart-rate isn't handled here — see _fetch_intraday_hr_for_date, which
+    # needs its own pagination loop rather than this function's single GET.
     path = f"/users/me/dataTypes/{data_type}/dataPoints"
     field = data_type.replace("-", "_")
     next_day = d + timedelta(days=1)
@@ -232,13 +233,6 @@ def _list_datapoints(conn, data_type: str, d: date, tokens: dict) -> Any | None:
         f = (
             f'sleep.interval.civil_end_time >= "{d.isoformat()}T00:00:00" '
             f'AND sleep.interval.civil_end_time < "{next_day.isoformat()}T00:00:00"'
-        )
-    elif data_type == "heart-rate":
-        # Sample type: filter by UTC timestamp. Use 28h window centred on the civil day
-        # to capture data regardless of local UTC offset (±14h covers all timezones).
-        f = (
-            f'heart_rate.startTime >= "{d.isoformat()}T00:00:00Z" '
-            f'AND heart_rate.startTime < "{next_day.isoformat()}T00:00:00Z"'
         )
     else:
         # exercise and any future session types: filter by civil_start_time
@@ -318,6 +312,50 @@ def _fetch_and_store_hrv(conn, target_dates: set, tokens: dict, max_pages: int =
     return rows
 
 
+HR_PAGE_SIZE = 5000  # server caps pageSize at 5000 for this type regardless of what's requested
+HR_MAX_PAGES = 15    # 15 * 5000 = 75k samples/day — Fitbit's ~2s passive sampling is ~25-40k/day
+
+
+def _fetch_intraday_hr_for_date(conn, d: date, tokens: dict) -> int:
+    """
+    Page through a single day's heart-rate dataPoints, writing 1-min bucket
+    averages to intraday_hr as each page arrives (no raw payload stored — the
+    blob would be huge, same reasoning as _fetch_and_store_hrv).
+
+    Without an explicit pageSize the server defaults to 50 rows for this raw
+    sample type — Fitbit's passive HR reporting is roughly 1 sample every 2s,
+    so a single default-sized page covers under two minutes of a night, not
+    the whole thing. The date filter already scopes the request to this one
+    day, so unlike the HRV fetch this doesn't need a manual date cutoff — just
+    page until nextPageToken runs out (or the safety cap is hit).
+    """
+    path = "/users/me/dataTypes/heart-rate/dataPoints"
+    next_day = d + timedelta(days=1)
+    f = (
+        f'heart_rate.sample_time.physical_time >= "{d.isoformat()}T00:00:00Z" '
+        f'AND heart_rate.sample_time.physical_time < "{next_day.isoformat()}T00:00:00Z"'
+    )
+
+    rows = 0
+    page_token: str | None = None
+    for _ in range(HR_MAX_PAGES):
+        params: dict = {"filter": f, "pageSize": HR_PAGE_SIZE}
+        if page_token:
+            params["pageToken"] = page_token
+        data = _get(conn, path, params, tokens)
+        if not data:
+            break
+
+        rows += _parse_intraday_hr(conn, data)
+        conn.commit()
+
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+    return rows
+
+
 def _parse_intraday_hr(conn, data: dict) -> int:
     """
     Parse individual heart-rate sample data points from Health Connect and write
@@ -329,8 +367,14 @@ def _parse_intraday_hr(conn, data: dict) -> int:
 
     buckets: dict[str, list[float]] = {}
     for pt in points:
-        ts_str = pt.get("startTime")
-        bpm = pt.get("heartRate", {}).get("beatsPerMinute")
+        heart_rate = pt.get("heartRate", {})
+        ts_str = heart_rate.get("sampleTime", {}).get("physicalTime")
+        # beatsPerMinute comes back as a string (e.g. "65"), not a number.
+        raw_bpm = heart_rate.get("beatsPerMinute")
+        try:
+            bpm = float(raw_bpm) if raw_bpm is not None else None
+        except (TypeError, ValueError):
+            bpm = None
         if not ts_str or bpm is None or bpm <= 0:
             continue
         try:
@@ -679,12 +723,10 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
                 if _upsert_activity(conn, session, ds):
                     rows_upserted += 1
 
-        # Intraday HR: individual heart-rate samples (Fitbit writes these to Health Connect)
+        # Intraday HR: individual heart-rate samples (Fitbit writes these to Health Connect).
+        # Paginated separately from _list_datapoints — see _fetch_intraday_hr_for_date.
         if d in hr_dates:
-            hr_data = _list_datapoints(conn, "heart-rate", d, tokens)
-            if hr_data:
-                upsert_raw_payload(conn, SOURCE, "heart_rate_intraday", json.dumps(hr_data), ds)
-                rows_upserted += _parse_intraday_hr(conn, hr_data)
+            rows_upserted += _fetch_intraday_hr_for_date(conn, d, tokens)
 
         # Commit per day rather than holding one open write transaction across
         # the whole chunk (each day is several sequential blocking HTTP calls —
