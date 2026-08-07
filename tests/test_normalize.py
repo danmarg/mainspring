@@ -475,6 +475,28 @@ def test_hrv_garmin_untouched_when_already_overnight(tmp_db):
     assert json.loads(row[1])["hrv"] == "garmin"
 
 
+def test_hrv_recomputed_from_intraday_when_no_daily_rollup_yet(tmp_db):
+    """Google's daily-heart-rate-variability rollup can lag a day behind the
+    intraday RMSSD samples syncing — hrv should still resolve from intraday
+    even when there's no rollup row to recompute from at all."""
+    from datetime import datetime, timedelta
+    start = datetime.fromisoformat("2025-01-15T00:30:00+00:00")
+    for i in range(30):
+        ts = (start + timedelta(minutes=i * 5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        tmp_db.execute(
+            "INSERT INTO intraday_hrv(ts, source, rmssd) VALUES (?,?,?)",
+            (ts, "google_health", 50.0),
+        )
+    tmp_db.commit()
+    rebuild_daily_metrics(tmp_db, {"2025-01-15"})
+    tmp_db.commit()
+    row = tmp_db.execute(
+        "SELECT hrv, source_flags_json FROM daily_metrics WHERE date='2025-01-15'"
+    ).fetchone()
+    assert row[0] == 50.0
+    assert json.loads(row[1])["hrv"] == "google_health_intraday"
+
+
 def test_hrv_falls_back_to_daily_rollup_without_enough_intraday_samples(tmp_db):
     upsert_raw_metric(tmp_db, "2025-01-15", "google_health", "hrv", 60.0, utc_now())
     tmp_db.commit()

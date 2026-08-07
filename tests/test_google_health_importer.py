@@ -15,7 +15,13 @@ import pytest
 
 import app.db as db_module
 from app.db import init_db, get_connection
-from app.importers.google_health import _get, _parse_skin_temp, _post
+from app.importers.google_health import (
+    _fetch_intraday_hr_for_date,
+    _get,
+    _parse_intraday_hr,
+    _parse_skin_temp,
+    _post,
+)
 
 
 @pytest.fixture
@@ -116,3 +122,93 @@ def test_parse_skin_temp(tmp_db):
 def test_parse_skin_temp_no_data(tmp_db):
     assert _parse_skin_temp(tmp_db, "2025-01-01", {}) == 0
     assert _parse_skin_temp(tmp_db, "2025-01-01", {"dataPoints": []}) == 0
+
+
+def test_parse_intraday_hr_reads_sample_time_and_bpm(tmp_db):
+    """HeartRate data points nest the timestamp under sampleTime.physicalTime
+    (ObservationSampleTime), not a bare startTime (regression test for the 400
+    INVALID_DATA_POINT_FILTER this shape mismatch caused, which meant
+    google_health intraday HR was never actually ingested). beatsPerMinute
+    comes back as a string, not a number."""
+    data = {
+        "dataPoints": [
+            {"heartRate": {
+                "sampleTime": {"physicalTime": "2025-01-01T03:00:00Z"},
+                "beatsPerMinute": "52",
+            }},
+            {"heartRate": {
+                "sampleTime": {"physicalTime": "2025-01-01T03:00:30Z"},
+                "beatsPerMinute": "54",
+            }},
+        ]
+    }
+    rows = _parse_intraday_hr(tmp_db, data)
+    assert rows == 1  # both samples fall in the same 1-min bucket
+    row = tmp_db.execute(
+        "SELECT bpm FROM intraday_hr WHERE ts='2025-01-01T03:00:00Z' AND source='google_health'"
+    ).fetchone()
+    assert row[0] == 53.0
+
+
+def test_fetch_intraday_hr_filters_on_sample_time_not_start_time(tmp_db):
+    """Regression test for the 400 INVALID_DATA_POINT_FILTER this shape mismatch
+    caused, which meant google_health intraday HR was never actually ingested."""
+    from datetime import date
+    captured = {}
+
+    def fake_get(conn, path, params, tokens):
+        captured["filter"] = params["filter"]
+        captured["pageSize"] = params.get("pageSize")
+        return None
+
+    import app.importers.google_health as gh
+    orig_get = gh._get
+    gh._get = fake_get
+    try:
+        _fetch_intraday_hr_for_date(tmp_db, date(2025, 1, 15), {})
+    finally:
+        gh._get = orig_get
+
+    assert "heart_rate.sample_time.physical_time" in captured["filter"]
+    assert "heart_rate.startTime" not in captured["filter"]
+    assert captured["pageSize"] == gh.HR_PAGE_SIZE
+
+
+def test_fetch_intraday_hr_pages_until_token_exhausted(tmp_db):
+    """A single default-sized page (50 rows) covers under two minutes of a
+    night at Fitbit's ~2s passive sampling rate — this must keep following
+    nextPageToken rather than stopping after page one."""
+    from datetime import date
+
+    import app.importers.google_health as gh
+
+    def make_page(hour: int, has_next: bool):
+        return {
+            "dataPoints": [{"heartRate": {
+                "sampleTime": {"physicalTime": f"2025-01-15T{hour:02d}:00:00Z"},
+                "beatsPerMinute": "60",
+            }}],
+            **({"nextPageToken": f"tok-{hour}"} if has_next else {}),
+        }
+
+    pages = [make_page(3, True), make_page(2, True), make_page(1, False)]
+    calls = []
+
+    def fake_get(conn, path, params, tokens):
+        calls.append(params.get("pageToken"))
+        return pages[len(calls) - 1]
+
+    orig_get = gh._get
+    gh._get = fake_get
+    try:
+        rows = _fetch_intraday_hr_for_date(tmp_db, date(2025, 1, 15), {})
+    finally:
+        gh._get = orig_get
+
+    assert len(calls) == 3
+    assert calls[0] is None  # first request has no pageToken
+    assert calls[1] == "tok-3"
+    assert calls[2] == "tok-2"
+    assert rows == 3
+    stored = tmp_db.execute("SELECT count(*) FROM intraday_hr WHERE source='google_health'").fetchone()[0]
+    assert stored == 3
