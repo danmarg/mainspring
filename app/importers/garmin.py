@@ -160,6 +160,37 @@ def push_hydration(ml: float, ts: str | None = None) -> bool:
     )
 
 
+def push_pending_manual_logs(conn) -> int:
+    """Push manual_logs rows not yet synced to Garmin (hydration/weight/
+    blood_pressure logged via MCP). Run at the start of each import so
+    pushes piggyback on that run's login instead of blocking the MCP tool
+    call — a failed push here just gets retried on the next import cycle.
+    Returns the number of rows successfully pushed."""
+    if not _configured():
+        return 0
+    rows = conn.execute(
+        "SELECT id, type, ts, quantity, estimated_macros_json FROM manual_logs "
+        "WHERE garmin_synced_at IS NULL AND type IN ('hydration', 'weight', 'blood_pressure')"
+    ).fetchall()
+    pushed = 0
+    for log_id, log_type, ts, quantity, macros_json in rows:
+        if log_type == "hydration":
+            ok = push_hydration(quantity, ts)
+        elif log_type == "weight":
+            ok = push_weight(quantity, ts)
+        else:  # blood_pressure
+            macros = json.loads(macros_json) if macros_json else {}
+            ok = push_blood_pressure(macros["systolic"], macros["diastolic"], macros["pulse"], ts)
+        if ok:
+            conn.execute(
+                "UPDATE manual_logs SET garmin_synced_at=? WHERE id=?", (utc_now(), log_id)
+            )
+            pushed += 1
+    if pushed:
+        conn.commit()
+    return pushed
+
+
 def _store_raw(conn, endpoint: str, data: Any, date_str: str | None = None) -> None:
     upsert_raw_payload(
         conn,
@@ -790,6 +821,8 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
 
     client = _client()
 
+    pending_pushed = push_pending_manual_logs(conn)
+
     dates = _build_date_range(days, start_date, end_date)
     start_str = dates[0].isoformat()
     end_str = dates[-1].isoformat()
@@ -971,4 +1004,9 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
                 rows_upserted += 1
 
     conn.commit()
-    return {"skipped": False, "rows_upserted": rows_upserted, "dates": [d.isoformat() for d in dates]}
+    return {
+        "skipped": False,
+        "rows_upserted": rows_upserted,
+        "dates": [d.isoformat() for d in dates],
+        "manual_logs_pushed": pending_pushed,
+    }

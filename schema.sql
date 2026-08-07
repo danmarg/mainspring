@@ -126,7 +126,8 @@ CREATE TABLE IF NOT EXISTS manual_logs (
   estimated_calories    INTEGER,
   estimated_macros_json TEXT,                 -- {"protein_g":…, "carbs_g":…, "fat_g":…}
   confidence            TEXT,                 -- 'photo_estimate' | 'user_confirmed' | ...
-  created_at            TEXT NOT NULL         -- UTC ISO-8601, when logged (vs. when it happened)
+  created_at            TEXT NOT NULL,        -- UTC ISO-8601, when logged (vs. when it happened)
+  garmin_synced_at      TEXT                  -- UTC ISO-8601 when pushed (or marked not-applicable); NULL = pending push
 );
 
 -- per-day timezone, derived from device data (GPS / local offset in raw payloads)

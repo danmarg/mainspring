@@ -153,10 +153,10 @@ Once connected, Claude can log meals, caffeine, alcohol, weight, and blood press
 | `log_meal(description, estimated_calories?, estimated_macros?, confidence?)` | Log a meal; Claude can estimate calories and macros from a photo or description |
 | `log_caffeine(description, amount_mg?)` | Log a coffee or other caffeine source |
 | `log_alcohol(description, units?)` | Log alcohol in standard units |
-| `log_weight(kg)` | Log a weight measurement |
-| `log_blood_pressure(systolic, diastolic, pulse?)` | Log a BP reading |
+| `log_weight(kg)` | Log a weight measurement; queued for push to Garmin Connect on the next import if configured |
+| `log_blood_pressure(systolic, diastolic, pulse?)` | Log a BP reading; queued for push to Garmin Connect on the next import if configured and pulse is given |
 | `log_rpe(value, activity_type?)` | Log perceived exertion after a workout (1–10) |
-| `log_hydration(ml)` | Log fluid intake; also pushed to Garmin Connect if configured |
+| `log_hydration(ml)` | Log fluid intake; queued for push to Garmin Connect on the next import if configured |
 | `log_soreness(body_part, severity, notes?)` | Log soreness/minor injury (severity 1–10); surfaces in `get_workout_context` for 3 days |
 | `log_note(description)` | Log a free-text note |
 | `amend_log(log_id, ...)` | Correct a previous log entry |

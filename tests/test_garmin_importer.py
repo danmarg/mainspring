@@ -30,6 +30,7 @@ from app.importers.garmin import (
     _upsert_activity,
     push_blood_pressure,
     push_hydration,
+    push_pending_manual_logs,
     push_weight,
     run_import,
 )
@@ -212,6 +213,70 @@ def test_push_hydration_calls_client(monkeypatch):
         result = push_hydration(2000.0, "2025-06-01T09:00:00+00:00")
     assert result is True
     mock_client.add_hydration_data.assert_called_once()
+
+
+def test_push_pending_manual_logs_not_configured(monkeypatch, tmp_db):
+    monkeypatch.delenv("GARMINTOKENS", raising=False)
+    monkeypatch.delenv("GARMIN_EMAIL", raising=False)
+    monkeypatch.delenv("GARMIN_PASSWORD", raising=False)
+    tmp_db.execute(
+        "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) "
+        "VALUES ('2025-06-01T09:00:00+00:00', 'hydration', '500ml', 500.0, 'ml', ?)",
+        (utc_now(),),
+    )
+    tmp_db.commit()
+    assert push_pending_manual_logs(tmp_db) == 0
+
+
+def test_push_pending_manual_logs_pushes_and_marks_synced(monkeypatch, tmp_db):
+    monkeypatch.setenv("GARMINTOKENS", "fake")
+    mock_client = MagicMock()
+    tmp_db.execute(
+        "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) "
+        "VALUES ('2025-06-01T09:00:00+00:00', 'hydration', '500ml', 500.0, 'ml', ?)",
+        (utc_now(),),
+    )
+    tmp_db.execute(
+        "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) "
+        "VALUES ('2025-06-01T09:00:00+00:00', 'weight', '82.5kg', 82.5, 'kg', ?)",
+        (utc_now(),),
+    )
+    tmp_db.execute(
+        "INSERT INTO manual_logs(ts, type, description, quantity, unit, estimated_macros_json, created_at) "
+        "VALUES ('2025-06-01T09:00:00+00:00', 'blood_pressure', '120/80', 120, 'mmHg', ?, ?)",
+        (json.dumps({"systolic": 120, "diastolic": 80, "pulse": 65}), utc_now()),
+    )
+    tmp_db.commit()
+    with patch("app.importers.garmin._client", return_value=mock_client):
+        pushed = push_pending_manual_logs(tmp_db)
+    assert pushed == 3
+    mock_client.add_hydration_data.assert_called_once()
+    mock_client.add_weigh_in.assert_called_once()
+    mock_client.set_blood_pressure.assert_called_once()
+    remaining = tmp_db.execute(
+        "SELECT COUNT(*) FROM manual_logs WHERE garmin_synced_at IS NULL"
+    ).fetchone()[0]
+    assert remaining == 0
+
+
+def test_push_pending_manual_logs_leaves_failed_rows_pending(monkeypatch, tmp_db):
+    monkeypatch.setenv("GARMINTOKENS", "fake")
+    monkeypatch.setattr("app.importers.garmin.time.sleep", lambda _: None)
+    mock_client = MagicMock()
+    mock_client.add_hydration_data.side_effect = Exception("boom")
+    tmp_db.execute(
+        "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) "
+        "VALUES ('2025-06-01T09:00:00+00:00', 'hydration', '500ml', 500.0, 'ml', ?)",
+        (utc_now(),),
+    )
+    tmp_db.commit()
+    with patch("app.importers.garmin._client", return_value=mock_client):
+        pushed = push_pending_manual_logs(tmp_db)
+    assert pushed == 0
+    remaining = tmp_db.execute(
+        "SELECT COUNT(*) FROM manual_logs WHERE garmin_synced_at IS NULL"
+    ).fetchone()[0]
+    assert remaining == 1
 
 
 def test_parse_training_status_vo2max(tmp_db):
