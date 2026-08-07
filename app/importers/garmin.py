@@ -11,6 +11,7 @@ Each API call is wrapped so a single endpoint failure doesn't abort the run.
 import json
 import logging
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -21,6 +22,12 @@ log = logging.getLogger(__name__)
 
 SOURCE = "garmin"
 WINDOW_DAYS = 7
+CLIENT_CACHE_SECONDS = 30 * 60
+PUSH_RETRIES = 3
+PUSH_RETRY_BACKOFF_SECONDS = 2
+
+_cached_client = None
+_cached_client_at = 0.0
 
 
 def _configured() -> bool:
@@ -31,9 +38,8 @@ def _configured() -> bool:
     )
 
 
-def _client():
-    """
-    Return an authenticated Garmin client.
+def _login() -> Any:
+    """Perform a fresh Garmin login (the actual network round-trip).
 
     Prefers GARMINTOKENS (serialized session, no MFA needed).
     Falls back to GARMIN_EMAIL + GARMIN_PASSWORD (triggers SSO/MFA on first
@@ -49,6 +55,48 @@ def _client():
     client = Garmin(email=email, password=password)
     client.login()  # uses GARMINTOKENS env var automatically if set
     return client
+
+
+def _client(force_refresh: bool = False) -> Any:
+    """Return an authenticated Garmin client, reusing a cached session for
+    CLIENT_CACHE_SECONDS. Garmin's unofficial auth endpoint is the flakiest
+    part of this integration, so avoiding a fresh login() on every single
+    manual push (log_hydration/log_weight/log_blood_pressure) meaningfully
+    cuts failure exposure — most calls just reuse the in-process session."""
+    global _cached_client, _cached_client_at
+    now = time.monotonic()
+    if (
+        force_refresh
+        or _cached_client is None
+        or (now - _cached_client_at) > CLIENT_CACHE_SECONDS
+    ):
+        _cached_client = _login()
+        _cached_client_at = now
+    return _cached_client
+
+
+def _with_retry(fn, label: str) -> bool:
+    """Run a Garmin write (fn takes a client), retrying transient failures
+    with backoff. On failure, drops the cached client so the next attempt
+    re-authenticates rather than retrying against a possibly-stale session."""
+    global _cached_client
+    last_exc: Exception | None = None
+    for attempt in range(1, PUSH_RETRIES + 1):
+        try:
+            client = _client(force_refresh=(attempt > 1))
+            fn(client)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            _cached_client = None
+            if attempt < PUSH_RETRIES:
+                log.warning(
+                    "garmin %s failed (attempt %d/%d), retrying: %s",
+                    label, attempt, PUSH_RETRIES, exc,
+                )
+                time.sleep(PUSH_RETRY_BACKOFF_SECONDS * attempt)
+    log.warning("garmin %s failed after %d attempts: %s", label, PUSH_RETRIES, last_exc)
+    return False
 
 
 def _safe(fn, label: str) -> Any | None:
@@ -78,13 +126,10 @@ def push_weight(kg: float, ts: str | None = None) -> bool:
     fails, so callers can log locally regardless of Garmin's availability."""
     if not _configured():
         return False
-    try:
-        client = _client()
-        client.add_weigh_in(weight=kg, unitKey="kg", timestamp=_as_utc_iso(ts))
-        return True
-    except Exception as exc:
-        log.warning("garmin push_weight failed: %s", exc)
-        return False
+    return _with_retry(
+        lambda client: client.add_weigh_in(weight=kg, unitKey="kg", timestamp=_as_utc_iso(ts)),
+        "push_weight",
+    )
 
 
 def push_blood_pressure(
@@ -95,16 +140,13 @@ def push_blood_pressure(
     callers without a pulse reading should skip calling this."""
     if not _configured():
         return False
-    try:
-        client = _client()
-        client.set_blood_pressure(
+    return _with_retry(
+        lambda client: client.set_blood_pressure(
             systolic=systolic, diastolic=diastolic, pulse=pulse,
             timestamp=_as_utc_iso(ts), notes=notes,
-        )
-        return True
-    except Exception as exc:
-        log.warning("garmin push_blood_pressure failed: %s", exc)
-        return False
+        ),
+        "push_blood_pressure",
+    )
 
 
 def push_hydration(ml: float, ts: str | None = None) -> bool:
@@ -112,13 +154,10 @@ def push_hydration(ml: float, ts: str | None = None) -> bool:
     log_hydration call). Best-effort, same contract as push_weight."""
     if not _configured():
         return False
-    try:
-        client = _client()
-        client.add_hydration_data(value_in_ml=ml, timestamp=_as_utc_iso(ts))
-        return True
-    except Exception as exc:
-        log.warning("garmin push_hydration failed: %s", exc)
-        return False
+    return _with_retry(
+        lambda client: client.add_hydration_data(value_in_ml=ml, timestamp=_as_utc_iso(ts)),
+        "push_hydration",
+    )
 
 
 def _store_raw(conn, endpoint: str, data: Any, date_str: str | None = None) -> None:
