@@ -64,11 +64,22 @@ _ADDED_DAILY_METRICS_COLUMNS = [
 ]
 
 
+_ADDED_MANUAL_LOGS_COLUMNS = [
+    ("garmin_synced_at", "TEXT"),
+]
+
+
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(daily_metrics)")}
     for col, col_type in _ADDED_DAILY_METRICS_COLUMNS:
         if col not in existing:
             conn.execute(f"ALTER TABLE daily_metrics ADD COLUMN {col} {col_type}")
+
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(manual_logs)")}
+    for col, col_type in _ADDED_MANUAL_LOGS_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE manual_logs ADD COLUMN {col} {col_type}")
+
     conn.commit()
 
 

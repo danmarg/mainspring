@@ -514,8 +514,9 @@ def log_note(description: str, ts: Optional[str] = None) -> str:
 @mcp.tool()
 def log_weight(kg: float, ts: Optional[str] = None) -> str:
     """Log a weight measurement in kilograms. ts is UTC ISO-8601 (defaults to now).
-    Also pushed to Garmin Connect if Garmin credentials are configured
-    (Google Health has no write API yet for this as of Q2 2026)."""
+    Queued for push to Garmin Connect on the next import run if Garmin
+    credentials are configured (Google Health has no write API yet for this
+    as of Q2 2026)."""
     event_ts = _ts_or_now(ts)
     with db() as conn:
         conn.execute(
@@ -523,10 +524,7 @@ def log_weight(kg: float, ts: Optional[str] = None) -> str:
             (event_ts, "weight", f"{_fmt_num(kg)}kg", kg, "kg", utc_now()),
         )
     _renormalize_date(event_ts)
-    from app.importers.garmin import push_weight
-    pushed = push_weight(kg, event_ts)
-    suffix = " (synced to Garmin)" if pushed else ""
-    return f"Logged weight at {event_ts}: {_fmt_num(kg)}kg{suffix}"
+    return f"Logged weight at {event_ts}: {_fmt_num(kg)}kg"
 
 
 @mcp.tool()
@@ -537,37 +535,34 @@ def log_blood_pressure(
     ts: Optional[str] = None,
 ) -> str:
     """Log a blood pressure reading in mmHg. pulse is beats per minute (optional).
-    ts is UTC ISO-8601 (defaults to now). Also pushed to Garmin Connect if
-    Garmin credentials are configured and pulse is provided — Garmin's write
-    endpoint requires it (Google Health has no write API yet for this as of
-    Q2 2026)."""
+    ts is UTC ISO-8601 (defaults to now). Queued for push to Garmin Connect on
+    the next import run if Garmin credentials are configured and pulse is
+    provided — Garmin's write endpoint requires it (Google Health has no
+    write API yet for this as of Q2 2026)."""
     event_ts = _ts_or_now(ts)
     desc = f"{systolic}/{diastolic}" + (f" pulse {pulse}" if pulse else "")
     with db() as conn:
         conn.execute(
-            "INSERT INTO manual_logs(ts, type, description, quantity, unit, estimated_macros_json, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO manual_logs(ts, type, description, quantity, unit, estimated_macros_json, created_at, garmin_synced_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (
                 event_ts, "blood_pressure", desc,
                 systolic, "mmHg",
                 json.dumps({"systolic": systolic, "diastolic": diastolic, "pulse": pulse}),
                 utc_now(),
+                None if pulse is not None else utc_now(),
             ),
         )
     _renormalize_date(event_ts)
-    pushed = False
-    if pulse is not None:
-        from app.importers.garmin import push_blood_pressure
-        pushed = push_blood_pressure(systolic, diastolic, pulse, event_ts)
-    suffix = " (synced to Garmin)" if pushed else ""
-    return f"Logged BP at {event_ts}: {desc}{suffix}"
+    return f"Logged BP at {event_ts}: {desc}"
 
 
 @mcp.tool()
 def log_hydration(ml: float, ts: Optional[str] = None) -> str:
     """Log fluid intake in milliliters. ts is UTC ISO-8601 (defaults to now).
-    Also pushed to Garmin Connect if Garmin credentials are configured
-    (Google Health/Health Connect has no write API for this)."""
+    Queued for push to Garmin Connect on the next import run if Garmin
+    credentials are configured (Google Health/Health Connect has no write
+    API for this)."""
     event_ts = _ts_or_now(ts)
     with db() as conn:
         conn.execute(
@@ -575,10 +570,7 @@ def log_hydration(ml: float, ts: Optional[str] = None) -> str:
             (event_ts, "hydration", f"{_fmt_num(ml)}ml", ml, "ml", utc_now()),
         )
     _renormalize_date(event_ts)
-    from app.importers.garmin import push_hydration
-    pushed = push_hydration(ml, event_ts)
-    suffix = " (synced to Garmin)" if pushed else ""
-    return f"Logged hydration at {event_ts}: {_fmt_num(ml)}ml{suffix}"
+    return f"Logged hydration at {event_ts}: {_fmt_num(ml)}ml"
 
 
 @mcp.tool()
@@ -1209,7 +1201,7 @@ A TSB of -30 with a marathon in 2 weeks = needs to taper urgently.
 | `log_weight` | kg; normalizer surfaces into daily_metrics and correlations |
 | `log_blood_pressure` | systolic/diastolic/pulse in mmHg |
 | `log_rpe` | 1–10 after a workout; feeds next-day correlation insights |
-| `log_hydration` | fluid intake in ml; also pushed to Garmin Connect |
+| `log_hydration` | fluid intake in ml; queued for push to Garmin Connect on next import |
 | `log_soreness` | body_part + severity 1–10; surfaces in `recent_soreness` for 3 days |
 | `log_note` | anything else — sleep quality, illness, stress events |
 | `amend_log` / `delete_log` | corrections; use get_logs to find the id |
