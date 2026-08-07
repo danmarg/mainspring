@@ -5,6 +5,7 @@ from typing import Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.db import init_db
 from app.admin_routes import router as admin_router
@@ -48,6 +49,11 @@ async def normalize_mcp_path(request: Request, call_next: Callable):
 app.include_router(admin_router)
 app.include_router(mcp_auth_router)
 app.include_router(dashboard_router)
+
+# PWA manifest + icons — publicly readable, same as any other static asset;
+# nothing sensitive lives under /static.
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 
 # Mount MCP server if MCP_TOKEN is configured (_mcp_app built at top of file)

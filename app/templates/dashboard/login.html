@@ -2,12 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Mainspring — Login</title>
+<link rel="manifest" href="/static/manifest.json">
+<meta name="theme-color" content="#111111">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Mainspring">
+<meta name="mobile-web-app-capable" content="yes">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #111; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-         display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+         display: flex; align-items: center; justify-content: center; min-height: 100vh;
+         padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   .box { background: #1a1a1a; border: 1px solid #2e2e2e; border-radius: 10px; padding: 2.5rem 2rem; width: 340px; }
   h1 { font-size: 1.2rem; font-weight: 700; color: #4e9af1; margin-bottom: 0.4rem; }
   p { font-size: 0.83rem; color: #888; margin-bottom: 1.5rem; }

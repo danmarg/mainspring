@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>{% block title %}Mainspring{% endblock %} — Health Dashboard</title>
+
+<link rel="manifest" href="/static/manifest.json">
+<meta name="theme-color" content="#111111">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Mainspring">
+<meta name="mobile-web-app-capable" content="yes">
 <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
@@ -26,7 +35,8 @@
   nav {
     display: flex; align-items: center; gap: 0;
     background: var(--surface); border-bottom: 1px solid var(--border);
-    padding: 0 1.5rem; height: 48px; position: sticky; top: 0; z-index: 10;
+    padding: env(safe-area-inset-top) 1.5rem 0; height: calc(48px + env(safe-area-inset-top));
+    position: sticky; top: 0; z-index: 10;
   }
   nav .brand { font-weight: 700; color: var(--accent); margin-right: 2rem; letter-spacing: 0.03em; font-size: 1.05rem; }
   nav a { color: var(--text-muted); text-decoration: none; padding: 0 0.9rem; height: 48px; display: flex; align-items: center; font-size: 0.88rem; border-bottom: 2px solid transparent; transition: color 0.15s; }
@@ -41,7 +51,7 @@
   .import-chip::before { content: "●"; color: var(--green); margin-right: 0.3rem; font-size: 0.65rem; }
   .import-chip.stale::before { color: var(--red); }
 
-  main { max-width: 1280px; margin: 0 auto; padding: 1.5rem 1.5rem 3rem; }
+  main { max-width: 1280px; margin: 0 auto; padding: 1.5rem 1.5rem calc(3rem + env(safe-area-inset-bottom)); }
 
   h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 1.2rem; color: var(--text); }
   h2 { font-size: 1rem; font-weight: 600; margin: 1.8rem 0 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.78rem; }
@@ -116,7 +126,7 @@
 </head>
 <body>
 <div id="ptr-indicator" style="position:fixed;top:0;left:0;right:0;display:flex;
-     justify-content:center;padding-top:6px;pointer-events:none;opacity:0;z-index:20;
+     justify-content:center;padding-top:calc(6px + env(safe-area-inset-top));pointer-events:none;opacity:0;z-index:20;
      transition:opacity 0.1s ease;">
   <span style="background:var(--surface2);color:var(--text-muted);font-size:0.75rem;
         padding:0.3rem 0.8rem;border-radius:999px;border:1px solid var(--border);">↓ Pull to refresh</span>
