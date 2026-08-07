@@ -299,6 +299,34 @@ def test_compute_illness_risk_hard_training_day_not_flagged_by_rhr_alone():
     assert result["level"] != "red"
 
 
+def test_compute_illness_risk_downgrades_when_two_signals_reverted():
+    """RHR and skin temp both crossed threshold on the same past day, but
+    neither is active on the most recent day — this is a resolved one-day
+    blip, not an ongoing state, so it shouldn't read as 'red' anymore even
+    though 2 signals technically fired somewhere in the window."""
+    days = [
+        _day("2026-01-01", rhr=54.0, skin_temp=0.5),  # both trigger, in the past
+        _day("2026-01-02"),  # today: everything back to baseline
+    ]
+    result = compute_illness_risk(days)
+    assert result["level"] == "yellow"
+    assert result["label"] == "Recent deviation (resolved)"
+    assert len(result["signals"]) == 2  # still visible for context
+
+
+def test_compute_illness_risk_stays_red_when_cascade_still_active_today():
+    """The genuine cascade case (RHR day 1, skin temp day 2, HRV day 3) must
+    stay red — today's HRV signal being part of the cascade keeps it active,
+    unlike the fully-reverted case above."""
+    days = [
+        _day("2026-01-01", rhr=54.0),
+        _day("2026-01-02", skin_temp=0.5),
+        _day("2026-01-03", hrv=50.0),  # today — still an active trigger
+    ]
+    result = compute_illness_risk(days)
+    assert result["level"] == "red"
+
+
 # ── illness_risk_from_db integration ────────────────────────────────────────
 
 def test_illness_risk_from_db_flags_cascade_within_window():
@@ -326,6 +354,36 @@ def test_illness_risk_from_db_flags_cascade_within_window():
 
     assert result["level"] == "red"
     assert len(result["signals"]) == 3
+
+
+def test_illness_risk_from_db_downgrades_reverted_single_day_double_trigger():
+    """Regression test: RHR and skin temp both crossed threshold on the same
+    day (2025-06-09), two days before the query date, but both are back to
+    baseline by the most recent day — this must not read as an active red
+    state."""
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    for d in ["2025-06-01", "2025-06-02", "2025-06-03", "2025-06-04",
+              "2025-06-05", "2025-06-06", "2025-06-07"]:
+        conn.execute(
+            "INSERT INTO daily_metrics(date, resting_hr, hrv, source_flags_json) VALUES (?,?,?,?)",
+            (d, 50.0, 60.0, "{}"),
+        )
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, hrv, skin_temp_deviation, source_flags_json) "
+        "VALUES (?,?,?,?,?)", ("2025-06-08", 50.0, 60.0, 0.0, "{}"))
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, hrv, skin_temp_deviation, source_flags_json) "
+        "VALUES (?,?,?,?,?)", ("2025-06-09", 54.0, 60.0, 0.5, "{}"))  # both trigger here
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, hrv, skin_temp_deviation, source_flags_json) "
+        "VALUES (?,?,?,?,?)", ("2025-06-10", 50.0, 60.0, 0.0, "{}"))  # today: reverted
+    conn.commit()
+
+    result = illness_risk_from_db(conn, "2025-06-10")
+    conn.close()
+
+    assert result["level"] == "yellow"
+    assert result["label"] == "Recent deviation (resolved)"
 
 
 def test_illness_risk_from_db_no_data_returns_none_level():

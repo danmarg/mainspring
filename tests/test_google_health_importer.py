@@ -20,6 +20,7 @@ from app.importers.google_health import (
     _get,
     _parse_intraday_hr,
     _parse_skin_temp,
+    _parse_spo2,
     _post,
 )
 
@@ -212,3 +213,29 @@ def test_fetch_intraday_hr_pages_until_token_exhausted(tmp_db):
     assert rows == 3
     stored = tmp_db.execute("SELECT count(*) FROM intraday_hr WHERE source='google_health'").fetchone()[0]
     assert stored == 3
+
+
+def test_parse_spo2_reads_average_percentage(tmp_db):
+    """dailyOxygenSaturation nests the value under averagePercentage, not a
+    bare percentage — regression test for spo2_avg silently never resolving
+    from google_health despite the API returning real readings."""
+    data = {
+        "dataPoints": [
+            {"dailyOxygenSaturation": {
+                "averagePercentage": 96.5,
+                "lowerBoundPercentage": 95.4,
+                "upperBoundPercentage": 98.2,
+            }}
+        ]
+    }
+    rows = _parse_spo2(tmp_db, "2025-01-01", data)
+    assert rows == 1
+    row = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date='2025-01-01' AND metric='spo2_avg'"
+    ).fetchone()
+    assert row[0] == 96.5
+
+
+def test_parse_spo2_no_data(tmp_db):
+    assert _parse_spo2(tmp_db, "2025-01-01", {}) == 0
+    assert _parse_spo2(tmp_db, "2025-01-01", {"dataPoints": []}) == 0

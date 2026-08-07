@@ -446,7 +446,7 @@ def _parse_spo2(conn, date_str: str, data: dict) -> int:
     pt = _first_rollup(data)
     if not pt:
         return 0
-    val = pt.get("dailyOxygenSaturation", {}).get("percentage")
+    val = pt.get("dailyOxygenSaturation", {}).get("averagePercentage")
     if val is None:
         return 0
     upsert_raw_metric(conn, date_str, SOURCE, "spo2_avg", float(val), utc_now())

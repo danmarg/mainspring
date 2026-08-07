@@ -402,35 +402,57 @@ def compute_illness_risk(
 
     Returns {level: "green"|"yellow"|"red"|None, label, color, detail, signals}
     where signals is a list of the individual triggers found in the window.
+
+    The window is scanned for triggers on any day, and severity (red needs 2+
+    distinct signals, yellow needs 1) is based on the total found anywhere in
+    the window — that's what makes a genuine cascade (RHR up day 1, skin temp
+    up day 2, HRV down day 3, none concordant on a single day) still read red.
+    But if *none* of those triggers are still active on the most recent day —
+    everything that crossed threshold has since reverted — the level is capped
+    at yellow with a distinct "resolved" label instead of red/yellow, so a
+    two-signal blip on one past day doesn't read as an active state days after
+    it passed. A past-only trigger still surfaces in `detail`/`signals` either way.
     """
     RHR_DELTA_BPM = 3.0       # bpm above baseline
     HRV_RATIO = 0.90          # fraction of baseline
     SKIN_TEMP_C = 0.3         # degrees C above personal baseline
 
     triggers: dict[str, dict] = {}  # signal name -> first/strongest trigger found
+    most_recent_date = days[-1].get("date") if days else None
+    active_today: set[str] = set()  # signal names currently crossed on most_recent_date
 
     for day in days:
         d = day.get("date")
+        is_today = d == most_recent_date
 
         rhr, rhr_base = day.get("rhr"), day.get("rhr_baseline")
         if rhr is not None and rhr_base:
             delta = rhr - rhr_base
-            if delta >= RHR_DELTA_BPM and "Resting HR" not in triggers:
-                triggers["Resting HR"] = {"date": d, "detail": f"+{delta:.0f}bpm vs baseline ({d})"}
+            if delta >= RHR_DELTA_BPM:
+                if "Resting HR" not in triggers:
+                    triggers["Resting HR"] = {"date": d, "detail": f"+{delta:.0f}bpm vs baseline ({d})"}
+                if is_today:
+                    active_today.add("Resting HR")
 
         hrv, hrv_base = day.get("hrv"), day.get("hrv_baseline")
         if hrv is not None and hrv_base:
             ratio = hrv / hrv_base
-            if ratio <= HRV_RATIO and "HRV" not in triggers:
-                triggers["HRV"] = {"date": d, "detail": f"{ratio*100:.0f}% of baseline ({d})"}
+            if ratio <= HRV_RATIO:
+                if "HRV" not in triggers:
+                    triggers["HRV"] = {"date": d, "detail": f"{ratio*100:.0f}% of baseline ({d})"}
+                if is_today:
+                    active_today.add("HRV")
 
         skin_temp = day.get("skin_temp_deviation")
         if skin_temp is not None and skin_temp >= SKIN_TEMP_C:
             if "Skin temp" not in triggers:
                 triggers["Skin temp"] = {"date": d, "detail": f"+{skin_temp:.1f}°C vs baseline ({d})"}
+            if is_today:
+                active_today.add("Skin temp")
 
     signals = [t["detail"] for t in triggers.values()]
     n = len(triggers)
+    n_today = len(active_today)
 
     have_any_data = any(
         day.get("rhr_baseline") or day.get("hrv_baseline") or day.get("skin_temp_deviation") is not None
@@ -439,7 +461,11 @@ def compute_illness_risk(
     if not have_any_data:
         return {"level": None, "label": "No data", "color": "#888", "detail": "", "signals": []}
 
-    if n >= 2:
+    if n >= 1 and n_today == 0:
+        # Everything that crossed threshold in the window has since reverted —
+        # don't read as an active state days after it passed.
+        level, label, color = "yellow", "Recent deviation (resolved)", "#f39c12"
+    elif n >= 2:
         level, label, color = "red", "Possible stress/illness signal", "#e74c3c"
     elif n == 1:
         level, label, color = "yellow", "Mild deviation", "#f39c12"
