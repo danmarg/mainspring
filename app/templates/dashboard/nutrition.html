@@ -6,9 +6,11 @@
 <h1>Nutrition</h1>
 
 
+{% if protein_target %}
 <div style="color: var(--text-muted); font-size:0.82rem; margin-bottom:1rem">
   Protein target: <strong style="color:var(--text)">{{ "%.0f"|format(protein_target) }}g/day</strong>
 </div>
+{% endif %}
 
 <div class="chart-block">
   <h3>Calories logged — per day</h3>
@@ -16,7 +18,7 @@
 </div>
 
 <div class="chart-block">
-  <h3>Protein <span style="color:#888;font-size:0.72rem">— days with macro estimates · dashed green = {{ "%.0f"|format(protein_target) }}g target</span></h3>
+  <h3>Protein <span style="color:#888;font-size:0.72rem">— days with macro estimates{% if protein_target %} · dashed green = {{ "%.0f"|format(protein_target) }}g target{% endif %}</span></h3>
   <div class="vega-wrap" id="protein-chart"></div>
 </div>
 
