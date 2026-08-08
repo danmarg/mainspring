@@ -8,7 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.db import HOME_TZ, db, utc_now
+from app.db import HOME_TZ, db, resolve_metric, utc_now
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin")
@@ -33,11 +33,16 @@ MORNING_WEBHOOK_EARLIEST_HOUR = int(os.getenv("MORNING_WEBHOOK_EARLIEST_HOUR", "
 
 
 def _is_morning_locally(conn, today: str) -> bool:
-    """True once it's past MORNING_WEBHOOK_EARLIEST_HOUR in today's local (health-day) tz.
+    """True once the user is actually likely to be awake.
 
-    Garmin finalizes a sleep_score as soon as it detects any wake — including a
-    brief middle-of-the-night wake-up — so "sleep_score landed" alone fires too
-    early. Gate on local wall-clock time instead.
+    Gate on the detected sleep_wake_hour (from Garmin's sleepEndTimestampLocal
+    or Google Health's last sleep sample — whichever resolve_metric picks) once
+    it's landed for today, since a fixed clock time can't tell "already awake"
+    from "still asleep, but data happened to sync early" (e.g. a phone-only
+    night with no watch worn). MORNING_WEBHOOK_EARLIEST_HOUR still acts as an
+    absolute floor — never fire before it even if a detected wake_hour is
+    implausibly early (bad sample, timezone glitch, etc) — and as the fallback
+    heuristic when no wake_hour has resolved yet for today.
     """
     row = conn.execute("SELECT tz FROM day_timezone WHERE date=?", (today,)).fetchone()
     tz_name = row[0] if row else HOME_TZ
@@ -46,7 +51,16 @@ def _is_morning_locally(conn, today: str) -> bool:
     except Exception:
         tz = ZoneInfo(HOME_TZ)
     local_now = datetime.now(timezone.utc).astimezone(tz)
-    return local_now.hour >= MORNING_WEBHOOK_EARLIEST_HOUR
+    local_now_hour = local_now.hour + local_now.minute / 60
+
+    if local_now_hour < MORNING_WEBHOOK_EARLIEST_HOUR:
+        return False
+
+    wake_hour, _ = resolve_metric(conn, today, "sleep_wake_hour")
+    if wake_hour is not None:
+        return local_now_hour >= wake_hour
+
+    return True
 
 
 def _fire_morning_webhook() -> bool:
