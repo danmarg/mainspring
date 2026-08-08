@@ -7,14 +7,14 @@ together. The fix claims the date via INSERT OR IGNORE (PRIMARY KEY) before
 firing, so only one of two concurrent-ish calls can win.
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 import pytest
 
 import app.db as db_module
 from app.db import init_db, get_connection, utc_now
-from app.admin_routes import _run_import_bg
+from app.admin_routes import _is_morning_locally, _run_import_bg
 
 
 @pytest.fixture
@@ -129,3 +129,78 @@ def test_early_sleep_score_does_not_fire_before_morning(tmp_db):
     assert mock_fire2.call_count == 1
     row = tmp_db.execute("SELECT COUNT(*) FROM morning_webhooks WHERE date=?", (today,)).fetchone()
     assert row[0] == 1
+
+
+"""
+Regression coverage for _is_morning_locally itself: it used to be a pure
+clock-time check (fire once local wall-clock passed a fixed hour), which
+fires even when the user is still asleep but data happened to sync early
+(e.g. a phone-only night with no watch worn). It now gates on the detected
+sleep_wake_hour when one has resolved for the day, only falling back to the
+clock-time heuristic when no wake_hour is available yet. The clock-time
+floor (MORNING_WEBHOOK_EARLIEST_HOUR) still applies as an absolute minimum
+either way.
+"""
+
+
+def _set_day_tz(conn, date_str: str, tz: str = "UTC"):
+    conn.execute(
+        "INSERT OR REPLACE INTO day_timezone(date, tz, source) VALUES (?,?,?)",
+        (date_str, tz, "test"),
+    )
+    conn.commit()
+
+
+def _seed_wake_hour(conn, date_str: str, wake_hour: float, source: str = "garmin"):
+    conn.execute(
+        "INSERT INTO raw_daily_metrics(date, source, metric, value, fetched_at) VALUES (?,?,?,?,?)",
+        (date_str, source, "sleep_wake_hour", wake_hour, utc_now()),
+    )
+    conn.commit()
+
+
+def _frozen_utc(hour: int, minute: int = 0):
+    return datetime(2026, 8, 8, hour, minute, tzinfo=timezone.utc)
+
+
+def test_before_floor_hour_never_fires_even_with_early_wake(tmp_db):
+    today = "2026-08-08"
+    _set_day_tz(tmp_db, today)
+    _seed_wake_hour(tmp_db, today, 4.0)  # detected wake at 4am
+
+    with patch("app.admin_routes.datetime") as mock_dt:
+        mock_dt.now.return_value = _frozen_utc(4, 30)
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert _is_morning_locally(tmp_db, today) is False
+
+
+def test_waits_for_detected_wake_hour_past_floor(tmp_db):
+    today = "2026-08-08"
+    _set_day_tz(tmp_db, today)
+    _seed_wake_hour(tmp_db, today, 8.0)  # user actually woke at 8am
+
+    with patch("app.admin_routes.datetime") as mock_dt:
+        mock_dt.now.return_value = _frozen_utc(6, 0)  # past the 5am floor, before wake
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert _is_morning_locally(tmp_db, today) is False
+
+    with patch("app.admin_routes.datetime") as mock_dt:
+        mock_dt.now.return_value = _frozen_utc(8, 0)  # at detected wake time
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert _is_morning_locally(tmp_db, today) is True
+
+
+def test_no_detected_wake_hour_falls_back_to_floor(tmp_db):
+    today = "2026-08-08"
+    _set_day_tz(tmp_db, today)
+    # No sleep_wake_hour row seeded at all.
+
+    with patch("app.admin_routes.datetime") as mock_dt:
+        mock_dt.now.return_value = _frozen_utc(4, 30)
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert _is_morning_locally(tmp_db, today) is False
+
+    with patch("app.admin_routes.datetime") as mock_dt:
+        mock_dt.now.return_value = _frozen_utc(6, 0)
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert _is_morning_locally(tmp_db, today) is True
