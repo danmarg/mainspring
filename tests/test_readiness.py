@@ -17,6 +17,8 @@ from app.readiness import (
     readiness_from_db,
     sleep_regularity,
     sleep_regularity_from_db,
+    alertness_curve,
+    trimp_from_hr_samples,
 )
 
 
@@ -455,3 +457,22 @@ def test_sleep_regularity_from_db(tmp_db):
     conn.close()
     assert result["score"] is not None
     assert result["score"] > 80
+
+
+def test_trimp_requires_sufficient_hr_coverage():
+    assert trimp_from_hr_samples([150.0] * 9, 30, 50) is None
+
+
+def test_trimp_increases_with_intensity():
+    easy = trimp_from_hr_samples([110.0] * 20, 30, 50)
+    hard = trimp_from_hr_samples([170.0] * 20, 30, 50)
+    assert easy is not None and hard is not None
+    assert hard > easy > 0
+
+
+def test_alertness_curve_exercise_strain_decays():
+    curve = alertness_curve(7.0, hours=8, strain_events=[(100.0, 0.0)])
+    assert curve[0]["exercise_strain"] == pytest.approx(10.0)
+    assert curve[-1]["exercise_strain"] < curve[0]["exercise_strain"]
+    baseline = alertness_curve(7.0, hours=8)
+    assert curve[0]["alertness"] < baseline[0]["alertness"]

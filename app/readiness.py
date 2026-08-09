@@ -673,6 +673,8 @@ def alertness_curve(
     hours: int = 17,
     caffeine_doses: list[tuple[float, float]] | None = None,
     activity_boosts: list[tuple[float, float]] | None = None,
+    strain_events: list[tuple[float, float]] | None = None,
+    strain_tau_hours: float = 6.0,
 ) -> list[dict]:
     """
     Simplified two-process alertness model (Borbély 1982; Daan, Beersma, Borbély 1984).
@@ -692,6 +694,8 @@ def alertness_curve(
         hours: how many hours forward to forecast
         caffeine_doses: list of (dose_mg, local_hour_of_dose) tuples for today
         activity_boosts: list of (intensity_0_to_1, local_end_hour) tuples for today
+        strain_events: list of (TRIMP, hours_since_wake_when_activity_ended).
+        strain_tau_hours: exponential decay time constant for exercise strain.
 
     Returns:
         List of {hour, alertness} dicts at 15-min resolution.
@@ -735,10 +739,38 @@ def alertness_curve(
 
         S_effective = max(0.0, S - caffeine_reduction - exercise_reduction)
 
-        # Alertness ∝ C (circadian drive) minus S_effective (sleep pressure)
-        raw = C * 0.65 + (1 - S_effective) * 0.35
-        alertness = round(max(5.0, min(100.0, raw * quality * 100)), 1)
+        # A TRIMP of 100 gives a ~10 point initial penalty, capped at 18
+        # points. This describes intraday availability, not multi-day recovery.
+        strain_debt = 0.0
+        if strain_events:
+            for trimp, end_hours_since_wake in strain_events:
+                hours_since_end = t - end_hours_since_wake
+                if hours_since_end >= 0:
+                    initial_penalty = min(0.18, max(0.0, trimp) / 1000.0)
+                    strain_debt += initial_penalty * math.exp(-hours_since_end / max(0.1, strain_tau_hours))
+        strain_debt = min(0.18, strain_debt)
 
-        result.append({"hour": round(hour, 3), "alertness": alertness})
+        raw = C * 0.65 + (1 - S_effective) * 0.35
+        base_alertness = max(5.0, min(100.0, raw * quality * 100))
+        alertness = round(max(5.0, base_alertness - strain_debt * 100), 1)
+
+        result.append({"hour": round(hour, 3), "alertness": alertness,
+                       "exercise_strain": round(strain_debt * 100, 1)})
 
     return result
+
+
+def trimp_from_hr_samples(
+    hr_samples: list[float], duration_minutes: float, resting_hr: float,
+    max_hr: float = 190.0, min_samples: int = 10,
+) -> float | None:
+    """Return an HR-reserve-weighted TRIMP estimate; reject sparse coverage."""
+    values = [float(v) for v in hr_samples if v is not None and v > 0]
+    if len(values) < min_samples or duration_minutes <= 0 or max_hr <= resting_hr:
+        return None
+    reserve = max_hr - resting_hr
+    weighted = []
+    for bpm in values:
+        hrr = min(1.0, max(0.0, (bpm - resting_hr) / reserve))
+        weighted.append(hrr * math.exp(1.92 * hrr))
+    return round(duration_minutes * sum(weighted) / len(weighted), 2)

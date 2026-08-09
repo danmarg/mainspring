@@ -189,6 +189,27 @@ def log_caffeine(
 
 
 @mcp.tool()
+def log_energy(level: int, ts: Optional[str] = None, note: Optional[str] = None) -> str:
+    """Log perceived energy 1-5 at a moment in time (defaults to now)."""
+    if not 1 <= level <= 5:
+        return "Error: level must be between 1 and 5"
+    event_ts = _ts_or_now(ts)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
+            (event_ts, "energy", note, float(level), "/5", utc_now()),
+        )
+    return f"Logged energy {level}/5 at {event_ts}" + (f": {note}" if note else "")
+
+
+@mcp.tool()
+def get_energy_calibration() -> dict:
+    """Return the latest exercise-strain decay suggestion. It is never auto-applied."""
+    from app.calibration import latest_energy_calibration
+    return latest_energy_calibration() or {"status": "not_run"}
+
+
+@mcp.tool()
 def log_alcohol(
     description: str,
     ts: Optional[str] = None,
@@ -287,7 +308,7 @@ def get_logs(
     tz: Optional[str] = None,
 ) -> list[dict]:
     """Return manual logs between start_date and end_date (YYYY-MM-DD, inclusive).
-    type filters to 'meal' | 'caffeine' | 'alcohol' | 'note'.
+    type filters to 'meal' | 'caffeine' | 'alcohol' | 'energy' | 'note'.
     tz: IANA timezone name for the user's local date (e.g. 'America/New_York').
     Always pass tz when you know the user's timezone — logs are stored in UTC and
     date boundaries differ by up to a day without it."""
