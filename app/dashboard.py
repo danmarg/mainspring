@@ -1461,6 +1461,11 @@ async def nutrition(request: Request, days: str = "30",
         ).fetchone()
         protein_target = float(protein_target_row[0]) if protein_target_row else None
 
+        calorie_target_row = conn.execute(
+            "SELECT value FROM training_goals WHERE metric='calories_daily'"
+        ).fetchone()
+        calorie_target = float(calorie_target_row[0]) if calorie_target_row else None
+
         hydration_rows = _rows(conn, """
             SELECT date, hydration_ml FROM daily_metrics
             WHERE date >= ? AND hydration_ml IS NOT NULL
@@ -1537,7 +1542,8 @@ async def nutrition(request: Request, days: str = "30",
     return templates.TemplateResponse(request, "nutrition.html", {
         "days": days,
         "protein_target": protein_target,
-        "calories_spec": _daily_bar_chart(cal_logged_rows, "calories", "Calories (kcal)", color="#f4a261", x_domain=x_domain),
+        "calorie_target": calorie_target,
+        "calories_spec": _daily_bar_chart(cal_logged_rows, "calories", "Calories (kcal)", color="#f4a261", ref_line=calorie_target, x_domain=x_domain),
         "protein_spec": _daily_bar_chart(protein_rows, "protein_g", "Protein (g)", color="#e05c5c", ref_line=protein_target, x_domain=x_domain),
         "macro_dow_spec": _macro_dow_chart(dow_macro_rows),
         "hydration_spec": _daily_bar_chart(
