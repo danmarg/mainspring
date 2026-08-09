@@ -6,14 +6,16 @@
 <h1>Nutrition</h1>
 
 
-{% if protein_target %}
+{% if calorie_target or protein_target %}
 <div style="color: var(--text-muted); font-size:0.82rem; margin-bottom:1rem">
-  Protein target: <strong style="color:var(--text)">{{ "%.0f"|format(protein_target) }}g/day</strong>
+  {% if calorie_target %}Calories: <strong style="color:var(--text)">{{ "%.0f"|format(calorie_target) }} kcal/day</strong>{% endif %}
+  {% if calorie_target and protein_target %} · {% endif %}
+  {% if protein_target %}Protein: <strong style="color:var(--text)">{{ "%.0f"|format(protein_target) }}g/day</strong>{% endif %}
 </div>
 {% endif %}
 
 <div class="chart-block">
-  <h3>Calories logged — per day</h3>
+  <h3>Calories logged <span style="color:#888;font-size:0.72rem">— per day{% if calorie_target %} · dashed green = {{ "%.0f"|format(calorie_target) }} kcal target{% endif %}</span></h3>
   <div class="vega-wrap" id="calories-chart"></div>
 </div>
 
