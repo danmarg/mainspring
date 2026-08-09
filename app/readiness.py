@@ -421,6 +421,19 @@ def compute_illness_risk(
     most_recent_date = days[-1].get("date") if days else None
     active_today: set[str] = set()  # signal names currently crossed on most_recent_date
 
+    def _recency(d: str | None) -> str:
+        if not d or not most_recent_date:
+            return d or ""
+        try:
+            n = (date.fromisoformat(most_recent_date) - date.fromisoformat(d)).days
+        except ValueError:
+            return d
+        if n <= 0:
+            return "today"
+        if n == 1:
+            return "yesterday"
+        return f"{n} days ago"
+
     for day in days:
         d = day.get("date")
         is_today = d == most_recent_date
@@ -430,7 +443,7 @@ def compute_illness_risk(
             delta = rhr - rhr_base
             if delta >= RHR_DELTA_BPM:
                 if "Resting HR" not in triggers:
-                    triggers["Resting HR"] = {"date": d, "detail": f"+{delta:.0f}bpm vs baseline ({d})"}
+                    triggers["Resting HR"] = {"date": d, "detail": f"Resting HR +{delta:.0f}bpm vs baseline ({_recency(d)})"}
                 if is_today:
                     active_today.add("Resting HR")
 
@@ -439,14 +452,14 @@ def compute_illness_risk(
             ratio = hrv / hrv_base
             if ratio <= HRV_RATIO:
                 if "HRV" not in triggers:
-                    triggers["HRV"] = {"date": d, "detail": f"{ratio*100:.0f}% of baseline ({d})"}
+                    triggers["HRV"] = {"date": d, "detail": f"HRV {ratio*100:.0f}% of baseline ({_recency(d)})"}
                 if is_today:
                     active_today.add("HRV")
 
         skin_temp = day.get("skin_temp_deviation")
         if skin_temp is not None and skin_temp >= SKIN_TEMP_C:
             if "Skin temp" not in triggers:
-                triggers["Skin temp"] = {"date": d, "detail": f"+{skin_temp:.1f}°C vs baseline ({d})"}
+                triggers["Skin temp"] = {"date": d, "detail": f"Skin temp +{skin_temp:.1f}°C vs baseline ({_recency(d)})"}
             if is_today:
                 active_today.add("Skin temp")
 
