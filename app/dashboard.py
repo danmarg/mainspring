@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.db import db, DEFAULT_SOURCE_PRIORITY
-from app.readiness import alertness_curve, average_wake_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db
+from app.readiness import alertness_curve, average_wake_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db, trimp_from_hr_samples
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard")
@@ -501,7 +501,8 @@ def _activity_end_local_hour(start_time: str, duration_s: int, browser_tz: str |
 
 def _energy_chart(wake_hour: float | None, sleep_score: float | None,
                   caffeine_doses: list[tuple[float, float]] | None = None,
-                  activity_boosts: list[tuple[float, float]] | None = None) -> str:
+                  activity_boosts: list[tuple[float, float]] | None = None,
+                  strain_events: list[tuple[float, float]] | None = None) -> str:
     """
     Energy forecast chart using two-process alertness model (Borbély 1982).
     Anchored to today's wake time from Garmin sleep data.
@@ -512,7 +513,8 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
 
     FORECAST_HOURS = 18  # slightly past midnight for late sleepers
     curve = alertness_curve(wake_hour, sleep_score or 75.0, FORECAST_HOURS,
-                            caffeine_doses=caffeine_doses, activity_boosts=activity_boosts)
+                            caffeine_doses=caffeine_doses, activity_boosts=activity_boosts,
+                            strain_events=strain_events)
 
     # Use hours-since-wake on X axis to avoid midnight-wrapping issues
     curve_hw = [
@@ -520,6 +522,18 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
         for i, r in enumerate(curve)
     ]
     peak = max(curve_hw, key=lambda r: r["alertness"])
+    peak_threshold = peak["alertness"] * 0.85
+    peak_idx = curve_hw.index(peak)
+    start_idx = peak_idx
+    end_idx = peak_idx
+    while start_idx > 0 and curve_hw[start_idx - 1]["alertness"] >= peak_threshold:
+        start_idx -= 1
+    while end_idx < len(curve_hw) - 1 and curve_hw[end_idx + 1]["alertness"] >= peak_threshold:
+        end_idx += 1
+    peak_range = [{"start": curve_hw[start_idx]["hw"],
+                   "end": min(FORECAST_HOURS, curve_hw[end_idx]["hw"] + 0.25),
+                   "alertness": peak["alertness"], "zero": 0,
+                   "label": "Peak alertness range"}]
 
     # X-axis: tick every 2h from wake, labeled as local clock time
     tick_vals = list(range(0, FORECAST_HOURS + 1, 2))
@@ -535,23 +549,25 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
     line = base.mark_line(color="#4e9af1", strokeWidth=2).encode(
         x="hw:Q", y="alertness:Q",
         tooltip=[alt.Tooltip("label:N", title="Time"),
-                 alt.Tooltip("alertness:Q", title="Alertness", format=".0f")],
+                 alt.Tooltip("alertness:Q", title="Alertness", format=".0f"),
+                 alt.Tooltip("exercise_strain:Q", title="Exercise strain", format=".0f")],
     )
-    peak_dot = (
-        alt.Chart(alt.Data(values=[peak]))
-        .mark_point(color="#2ecc71", size=80, shape="triangle-up")
-        .encode(x="hw:Q", y="alertness:Q",
-                tooltip=[alt.Tooltip("label:N", title="Peak time"),
+    peak_bar = (
+        alt.Chart(alt.Data(values=peak_range))
+        .mark_rule(color="#2ecc71", strokeWidth=7)
+        .encode(x="start:Q", x2="end:Q", y="zero:Q",
+                tooltip=[alt.Tooltip("label:N", title="Window"),
                          alt.Tooltip("alertness:Q", title="Peak", format=".0f")])
     )
     return _dark(
-        alt.layer(area, line, peak_dot).properties(width="container", height=160)
+        alt.layer(area, line, peak_bar).properties(width="container", height=160)
     ).to_json()
 
 
 def _live_curve_json(wake_hour: float | None, sleep_score: float | None,
                      caffeine_doses: list[tuple[float, float]] | None = None,
-                     activity_boosts: list[tuple[float, float]] | None = None) -> str:
+                     activity_boosts: list[tuple[float, float]] | None = None,
+                     strain_events: list[tuple[float, float]] | None = None) -> str:
     """Raw alertness curve (hours-since-wake, alertness) for the client-side
     live status widget, which recomputes 'good window to train' / bedtime
     text every minute without a page reload."""
@@ -559,7 +575,8 @@ def _live_curve_json(wake_hour: float | None, sleep_score: float | None,
         return "[]"
     FORECAST_HOURS = 18
     curve = alertness_curve(wake_hour, sleep_score or 75.0, FORECAST_HOURS,
-                            caffeine_doses=caffeine_doses, activity_boosts=activity_boosts)
+                            caffeine_doses=caffeine_doses, activity_boosts=activity_boosts,
+                            strain_events=strain_events)
     return json.dumps([{"h": i / 4.0, "a": r["alertness"]} for i, r in enumerate(curve)])
 
 
@@ -1045,6 +1062,22 @@ async def overview(request: Request,
             """SELECT start_time, duration_s, avg_hr FROM activities
                WHERE date=? AND duration_s >= 600 AND start_time IS NOT NULL""",
             (today,))
+        activity_hr_samples: list[list[float]] = []
+        for act in activity_rows:
+            try:
+                start = datetime.fromisoformat(act["start_time"].replace("Z", "+00:00"))
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
+                start = start.astimezone(timezone.utc) - timedelta(minutes=15)
+                end = start + timedelta(seconds=(act["duration_s"] or 0) + 30 * 60)
+                rows = conn.execute(
+                    """SELECT COALESCE(MAX(CASE WHEN source='garmin' THEN bpm END), MAX(bpm))
+                       FROM intraday_hr WHERE ts >= ? AND ts < ? GROUP BY ts ORDER BY ts""",
+                    (start.strftime("%Y-%m-%dT%H:%M:%SZ"), end.strftime("%Y-%m-%dT%H:%M:%SZ")),
+                ).fetchall()
+                activity_hr_samples.append([r[0] for r in rows if r[0] is not None])
+            except (TypeError, ValueError):
+                activity_hr_samples.append([])
 
         # Today's RPE log — if the user logged it, prefer it over avg_hr as intensity proxy
         rpe_row = conn.execute(
@@ -1145,7 +1178,8 @@ async def overview(request: Request,
     # Intensity = RPE/10 if logged, else (avg_hr - resting_hr) / (190 - resting_hr).
     resting_hr_for_calc = float(today_row[2]) if today_row and today_row[2] else 55.0
     activity_boosts: list[tuple[float, float]] = []
-    for act in activity_rows:
+    strain_events: list[tuple[float, float]] = []
+    for index, act in enumerate(activity_rows):
         end_h = _activity_end_local_hour(act["start_time"], act["duration_s"] or 0, ms_tz)
         if end_h is None:
             continue
@@ -1158,6 +1192,10 @@ async def overview(request: Request,
             intensity = 0.4  # moderate default when no HR data
         if intensity >= 0.1:
             activity_boosts.append((intensity, end_h))
+        trimp = trimp_from_hr_samples(activity_hr_samples[index], (act["duration_s"] or 0) / 60,
+                                      resting_hr_for_calc)
+        if trimp is not None and wake_hour is not None:
+            strain_events.append((trimp, (end_h - wake_hour) % 24))
 
     # Sleep score from today's metrics (for energy curve quality)
     sleep_score_for_curve = today_row[1] if today_row and today_row[1] else None
@@ -1192,10 +1230,10 @@ async def overview(request: Request,
         "protein_target": protein_target,
         "calorie_target": calorie_target,
         "hydration_target": hydration_target,
-        "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None),
+        "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None, strain_events or None),
         "wake_hour": wake_hour,
         "bedtime_wake_hour": bedtime_wake_hour,
-        "live_curve_json": _live_curve_json(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None),
+        "live_curve_json": _live_curve_json(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None, strain_events or None),
         "recommended_sleep_hours": round(recommended_sleep_hours, 2),
         "sleep_debt_min": round(sleep_debt_min),
     })

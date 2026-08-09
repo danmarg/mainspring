@@ -107,6 +107,17 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
             )
         log.info("%s import run_id=%d finished: %s (%d rows)", source, run_id, status, rows)
 
+        # Calibration is deliberately suggestion-only. The database claim inside
+        # maybe_run_energy_calibration makes this safe when both importers finish
+        # together, while keeping the scheduler itself simple (hourly imports).
+        try:
+            from app.calibration import maybe_run_energy_calibration
+            calibration = maybe_run_energy_calibration()
+            if calibration.get("status") != "not_due":
+                log.info("energy calibration after %s import: %s", source, calibration["status"])
+        except Exception:
+            log.exception("energy calibration check after %s import failed", source)
+
         # Fire morning webhook once sleep_score has landed for today AND it's
         # actually morning locally (see _is_morning_locally — a brief nighttime
         # wake can make Garmin finalize sleep_score hours before real wake-up).
@@ -234,6 +245,13 @@ async def import_google_health(
         {"days": days, "start_date": start_date, "end_date": end_date},
     )
     return {"run_id": run_id, "status": "started"}
+
+
+@router.get("/calibration/energy", dependencies=[Depends(_import_auth)])
+async def energy_calibration_status():
+    """Return the latest suggestion; this endpoint never changes the live model."""
+    from app.calibration import latest_energy_calibration
+    return latest_energy_calibration() or {"status": "not_run"}
 
 
 @router.get("/export/db", dependencies=[Depends(_export_auth)])

@@ -483,3 +483,14 @@ def test_get_workout_context():
     assert len(result["recent_soreness"]) == 1
     assert result["recent_soreness"][0]["body_part"] == "left calf"
     assert result["recent_soreness"][0]["severity"] == 6.0
+
+
+def test_log_energy_validates_and_stores_ordinal_level():
+    from app.mcp_server import log_energy
+    assert "Error" in log_energy(0)
+    result = log_energy(4, ts="2025-01-01T13:00:00+00:00", note="focused")
+    assert "4/5" in result
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    row = conn.execute("SELECT type, quantity, unit, description FROM manual_logs").fetchone()
+    conn.close()
+    assert row == ("energy", 4.0, "/5", "focused")

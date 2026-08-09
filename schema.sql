@@ -257,6 +257,26 @@ CREATE TABLE IF NOT EXISTS morning_webhooks (
   sent_at TEXT NOT NULL
 );
 
+
+-- audit trail for learned alertness-model parameters. Results are suggestions;
+-- the dashboard keeps its current parameter until a user explicitly applies one.
+CREATE TABLE IF NOT EXISTS model_calibration_runs (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  model          TEXT NOT NULL,
+  started_at     TEXT NOT NULL,
+  finished_at    TEXT,
+  status         TEXT NOT NULL, -- running | suggested | insufficient | error
+  n_labels       INTEGER,
+  best_tau_hours REAL,
+  log_likelihood REAL,
+  auc            REAL,
+  details_json   TEXT,
+  error          TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_calibration_runs_model_started
+  ON model_calibration_runs(model, started_at DESC);
+
 -- goal races / training events
 CREATE TABLE IF NOT EXISTS training_events (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
