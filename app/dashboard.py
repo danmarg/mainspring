@@ -1440,11 +1440,12 @@ async def trends(request: Request, days: str = "30",
         ("Training load → next-day resting HR", "acute_training_load", "resting_hr", 1),
     ]
     relationship_cards = []
-    for title, input_field, output_field, card_lag in fixed_relationships:
-        card_rows = _relationship_rows(conn, input_field, output_field, card_lag, days_int)
-        spec, stats = _relationship_chart(card_rows, RELATIONSHIP_INPUTS[input_field], RELATIONSHIP_OUTPUTS[output_field])
-        relationship_cards.append({"title": title, "spec": spec, "stats": stats})
-    selected_rows = _relationship_rows(conn, selected_input, selected_output, selected_lag, days_int)
+    with db() as conn:
+        for title, input_field, output_field, card_lag in fixed_relationships:
+            card_rows = _relationship_rows(conn, input_field, output_field, card_lag, days_int)
+            spec, stats = _relationship_chart(card_rows, RELATIONSHIP_INPUTS[input_field], RELATIONSHIP_OUTPUTS[output_field])
+            relationship_cards.append({"title": title, "spec": spec, "stats": stats})
+        selected_rows = _relationship_rows(conn, selected_input, selected_output, selected_lag, days_int)
     selected_spec, selected_stats = _relationship_chart(
         selected_rows, RELATIONSHIP_INPUTS[selected_input], RELATIONSHIP_OUTPUTS[selected_output]
     )
