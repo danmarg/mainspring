@@ -380,9 +380,12 @@ def test_log_rpe_validates_range():
     assert "7" in result
 
 
-def test_log_hydration():
+def test_log_hydration_stays_local_without_garmin_push():
+    from unittest.mock import patch
     from app.mcp_server import log_hydration
-    result = log_hydration(ml=500.0, ts="2025-06-01T09:00:00+00:00")
+    with patch("app.importers.garmin.push_hydration") as push:
+        result = log_hydration(ml=500.0, ts="2025-06-01T09:00:00+00:00")
+    push.assert_not_called()
     assert "500" in result
 
     conn = sqlite3.connect(str(db_module.DB_PATH))

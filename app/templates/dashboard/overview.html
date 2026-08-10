@@ -90,6 +90,24 @@
 </div>
 {% endif %}
 
+{% if calibration_status %}
+<div class="behavior-summary" style="font-size:0.82rem">
+  Alertness calibration:
+  {% if calibration_status.status == 'suggested' %}
+    <strong>{{ "%.1f"|format(calibration_status.best_tau_hours) }}h suggested τ</strong>
+    {% if calibration_status.auc is not none %} · AUC {{ "%.2f"|format(calibration_status.auc) }}{% endif %}
+    · {{ calibration_status.n_labels }} ratings
+  {% elif calibration_status.status == 'insufficient' %}
+    collecting ratings{% if calibration_status.n_labels is not none %} ({{ calibration_status.n_labels }} so far){% endif %}
+  {% elif calibration_status.status == 'running' %}
+    calibration in progress
+  {% else %}
+    {{ calibration_status.status }}
+  {% endif %}
+  <span style="color:var(--text-muted)"> · suggestion only</span>
+</div>
+{% endif %}
+
 {# ── Info strip — only signals not already broken out in the readiness drivers above ── #}
 {% if today_info %}
 <div class="info-strip">

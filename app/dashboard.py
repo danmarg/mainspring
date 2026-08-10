@@ -1127,6 +1127,21 @@ async def overview(request: Request,
         ).fetchone()
         hydration_target = float(hydration_target_row[0]) if hydration_target_row else None
 
+        # Latest tau calibration is suggestion-only; keep the current 6h model
+        # parameter untouched until a user explicitly reviews a suggestion.
+        calibration_row = conn.execute(
+            "SELECT status, n_labels, best_tau_hours, auc FROM model_calibration_runs "
+            "WHERE model='exercise_strain_tau' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        calibration_status = None
+        if calibration_row:
+            calibration_status = {
+                "status": calibration_row[0],
+                "n_labels": calibration_row[1],
+                "best_tau_hours": calibration_row[2],
+                "auc": calibration_row[3],
+            }
+
         # Sleep debt — recent nights' shortfall vs target, for the bedtime recommendation
         sleep_target_row = conn.execute(
             "SELECT value FROM training_goals WHERE metric='sleep_target_hours'"
@@ -1230,6 +1245,7 @@ async def overview(request: Request,
         "protein_target": protein_target,
         "calorie_target": calorie_target,
         "hydration_target": hydration_target,
+        "calibration_status": calibration_status,
         "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None, strain_events or None),
         "wake_hour": wake_hour,
         "bedtime_wake_hour": bedtime_wake_hour,
