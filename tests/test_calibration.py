@@ -53,3 +53,19 @@ def test_weekly_claim_prevents_duplicate_runs():
     with db() as conn:
         count = conn.execute("SELECT COUNT(*) FROM model_calibration_runs").fetchone()[0]
     assert count == 1
+
+
+def test_stale_running_claim_is_recovered(tmp_db):
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO model_calibration_runs(model, started_at, status) VALUES (?,?,?)",
+            ("exercise_strain_tau", "2020-01-01T00:00:00+00:00", "running"),
+        )
+    result = maybe_run_energy_calibration()
+    assert result["status"] == "insufficient"
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT status, error FROM model_calibration_runs ORDER BY id"
+        ).fetchall()
+    assert rows[0][0] == "error"
+    assert "stale" in rows[0][1]

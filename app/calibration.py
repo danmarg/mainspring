@@ -162,9 +162,19 @@ def maybe_run_energy_calibration() -> dict:
     now = datetime.now(timezone.utc)
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        latest = conn.execute("SELECT started_at FROM model_calibration_runs WHERE model=? ORDER BY id DESC LIMIT 1", (MODEL,)).fetchone()
-        if latest and now - _parse_ts(latest[0]) < INTERVAL:
-            return {"status": "not_due"}
+        latest = conn.execute(
+            "SELECT id, started_at, status FROM model_calibration_runs WHERE model=? ORDER BY id DESC LIMIT 1",
+            (MODEL,),
+        ).fetchone()
+        if latest:
+            age = now - _parse_ts(latest[1])
+            if latest[2] == "running" and age >= timedelta(hours=2):
+                conn.execute(
+                    "UPDATE model_calibration_runs SET finished_at=?, status=?, error=? WHERE id=?",
+                    (utc_now(), "error", "stale calibration claim recovered", latest[0]),
+                )
+            elif age < INTERVAL:
+                return {"status": "not_due"}
         cur = conn.execute("INSERT INTO model_calibration_runs(model, started_at, status) VALUES (?,?,?)", (MODEL, utc_now(), "running"))
         run_id = cur.lastrowid
     try:
