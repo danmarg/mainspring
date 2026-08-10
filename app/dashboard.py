@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import statistics
 from datetime import date, datetime, timedelta, timezone
 
 import altair as alt
@@ -286,6 +287,81 @@ def _body_battery_chart(rows: list[dict], x_domain: list[str] | None = None) -> 
         .properties(width="container", height=160)
     )
     return _dark(chart).to_json()
+
+
+RELATIONSHIP_INPUTS = {
+    "alcohol_units": "Alcohol (units)",
+    "caffeine_mg": "Caffeine (mg)",
+    "calories_estimated": "Calories (kcal)",
+    "rpe": "Workout RPE",
+    "acute_training_load": "Acute training load",
+}
+RELATIONSHIP_OUTPUTS = {
+    "hrv": "HRV (ms)",
+    "sleep_score": "Sleep score",
+    "resting_hr": "Resting HR (bpm)",
+    "body_battery_high": "Body battery high",
+    "stress_avg": "Stress average",
+    "training_readiness": "Training readiness",
+}
+
+
+def _relationship_rows(conn, input_field: str, output_field: str, lag_days: int, days: int) -> list[dict]:
+    """Pair an input day with an outcome measured lag_days later."""
+    if input_field not in RELATIONSHIP_INPUTS or output_field not in RELATIONSHIP_OUTPUTS:
+        return []
+    start = date.today() - timedelta(days=max(1, days) - 1)
+    end = date.today()
+    rows = conn.execute(
+        f"SELECT date, {input_field}, {output_field} FROM daily_metrics "
+        "WHERE date BETWEEN ? AND ? ORDER BY date",
+        (start.isoformat(), (end + timedelta(days=lag_days)).isoformat()),
+    ).fetchall()
+    by_date = {row[0]: {"input": row[1], "output": row[2]} for row in rows}
+    pairs = []
+    for d_str, values in by_date.items():
+        try:
+            outcome_date = (date.fromisoformat(d_str) + timedelta(days=lag_days)).isoformat()
+        except ValueError:
+            continue
+        outcome = by_date.get(outcome_date, {}).get("output")
+        if values["input"] is None or outcome is None:
+            continue
+        pairs.append({
+            "input": float(values["input"]),
+            "output": float(outcome),
+            "date": d_str,
+            "outcome_date": outcome_date,
+        })
+    return pairs
+
+
+def _relationship_chart(rows: list[dict], input_label: str, output_label: str) -> tuple[str, dict]:
+    """Scatter + regression line and compact correlation diagnostics."""
+    if len(rows) < 3:
+        return "{}", {"n": len(rows), "r": None}
+    xs = [row["input"] for row in rows]
+    ys = [row["output"] for row in rows]
+    try:
+        r = statistics.correlation(xs, ys)
+    except statistics.StatisticsError:
+        r = None
+    base = alt.Chart(alt.Data(values=rows))
+    points = base.mark_circle(size=65, opacity=0.75, color="#4e9af1").encode(
+        x=alt.X("input:Q", title=input_label),
+        y=alt.Y("output:Q", title=output_label),
+        tooltip=[
+            alt.Tooltip("date:T", title="Input date"),
+            alt.Tooltip("outcome_date:T", title="Outcome date"),
+            alt.Tooltip("input:Q", title=input_label, format=".1f"),
+            alt.Tooltip("output:Q", title=output_label, format=".1f"),
+        ],
+    )
+    regression = base.transform_regression("input", "output").mark_line(color="#f4a261", strokeWidth=2).encode(
+        x="input:Q", y="output:Q"
+    )
+    chart = _dark((points + regression).properties(width="container", height=190)).to_json()
+    return chart, {"n": len(rows), "r": round(r, 2) if r is not None else None}
 
 
 def _diverging_bar_chart(rows: list[dict], field: str, title: str,
@@ -1259,11 +1335,19 @@ async def overview(request: Request,
 
 @router.get("/trends", response_class=HTMLResponse)
 async def trends(request: Request, days: str = "30",
+                 input: str = "alcohol_units", output: str = "hrv", lag: int = 1,
                  ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
 
     clause = _days_clause(days)
+    try:
+        days_int = max(7, min(3650, int(days)))
+    except (TypeError, ValueError):
+        days_int = 30
+    selected_input = input if input in RELATIONSHIP_INPUTS else "alcohol_units"
+    selected_output = output if output in RELATIONSHIP_OUTPUTS else "hrv"
+    selected_lag = lag if lag in (0, 1, 2) else 1
 
     with db() as conn:
         hrv_rows = _rows(conn, """
@@ -1350,8 +1434,31 @@ async def trends(request: Request, days: str = "30",
     acwr_rows = [{"date": r["date"], "training_load_ratio": r["training_load_ratio"]}
                  for r in all_load_rows_acwr]
 
+    fixed_relationships = [
+        ("Alcohol → next-day HRV", "alcohol_units", "hrv", 1),
+        ("Caffeine → next-day sleep", "caffeine_mg", "sleep_score", 1),
+        ("Training load → next-day resting HR", "acute_training_load", "resting_hr", 1),
+    ]
+    relationship_cards = []
+    for title, input_field, output_field, card_lag in fixed_relationships:
+        card_rows = _relationship_rows(conn, input_field, output_field, card_lag, days_int)
+        spec, stats = _relationship_chart(card_rows, RELATIONSHIP_INPUTS[input_field], RELATIONSHIP_OUTPUTS[output_field])
+        relationship_cards.append({"title": title, "spec": spec, "stats": stats})
+    selected_rows = _relationship_rows(conn, selected_input, selected_output, selected_lag, days_int)
+    selected_spec, selected_stats = _relationship_chart(
+        selected_rows, RELATIONSHIP_INPUTS[selected_input], RELATIONSHIP_OUTPUTS[selected_output]
+    )
+
     return templates.TemplateResponse(request, "trends.html", {
         "days": days,
+        "relationship_cards": relationship_cards,
+        "relationship_spec": selected_spec,
+        "relationship_stats": selected_stats,
+        "selected_input": selected_input,
+        "selected_output": selected_output,
+        "selected_lag": selected_lag,
+        "relationship_inputs": RELATIONSHIP_INPUTS,
+        "relationship_outputs": RELATIONSHIP_OUTPUTS,
         "hrv_spec": _trend_chart(hrv_rows, "hrv", "hrv_7d_avg", "HRV (ms)", x_domain=x_domain),
         "load_spec": _zone_load_chart(load_rows, x_domain=x_domain),
         "pmc_spec": _pmc_chart(pmc_rows, x_domain=x_domain),

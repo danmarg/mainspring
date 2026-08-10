@@ -4,7 +4,62 @@
 
 {% block content %}
 <h1>Trends</h1>
+<p style="color:var(--text-muted);font-size:0.86rem;margin:-0.7rem 0 1.2rem">
+  What tends to move together in your data. These are associations, not proof of cause.
+</p>
 
+<h2>Common comparisons</h2>
+<div class="two-col">
+{% for card in relationship_cards %}
+  <div class="chart-block">
+    <h3>{{ card.title }}</h3>
+    {% if card.stats.n >= 3 %}
+    <div style="color:var(--text-muted);font-size:0.74rem;margin:-0.35rem 0 0.45rem">
+      {% if card.stats.r is not none %}r = {{ "%.2f"|format(card.stats.r) }} · {% endif %}{{ card.stats.n }} paired days
+    </div>
+    <div class="vega-wrap" id="relationship-card-{{ loop.index }}"></div>
+    {% else %}
+    <p style="color:var(--text-muted);font-size:0.82rem">Not enough paired data yet.</p>
+    {% endif %}
+  </div>
+{% endfor %}
+</div>
+
+<h2>Explore a relationship</h2>
+<div class="chart-block">
+  <form method="get" style="display:flex;gap:0.65rem;flex-wrap:wrap;align-items:end;margin-bottom:0.9rem">
+    <input type="hidden" name="days" value="{{ days }}">
+    <label style="font-size:0.75rem;color:var(--text-muted)">Input<br>
+      <select name="input" style="padding:0.35rem;background:var(--surface2);color:var(--text);border:1px solid var(--border)">
+      {% for key, label in relationship_inputs.items() %}<option value="{{ key }}"{% if key == selected_input %} selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label style="font-size:0.75rem;color:var(--text-muted)">Outcome<br>
+      <select name="output" style="padding:0.35rem;background:var(--surface2);color:var(--text);border:1px solid var(--border)">
+      {% for key, label in relationship_outputs.items() %}<option value="{{ key }}"{% if key == selected_output %} selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label style="font-size:0.75rem;color:var(--text-muted)">Lag<br>
+      <select name="lag" style="padding:0.35rem;background:var(--surface2);color:var(--text);border:1px solid var(--border)">
+      <option value="0"{% if selected_lag == 0 %} selected{% endif %}>Same day</option>
+      <option value="1"{% if selected_lag == 1 %} selected{% endif %}>Next day</option>
+      <option value="2"{% if selected_lag == 2 %} selected{% endif %}>Two days later</option>
+      </select>
+    </label>
+    <button type="submit" style="padding:0.4rem 0.8rem">Compare</button>
+  </form>
+  {% if relationship_stats.n >= 3 %}
+  <div style="color:var(--text-muted);font-size:0.78rem;margin-bottom:0.35rem">
+    {{ relationship_inputs[selected_input] }} → {{ relationship_outputs[selected_output] }}
+    · {% if relationship_stats.r is not none %}r = {{ "%.2f"|format(relationship_stats.r) }} · {% endif %}{{ relationship_stats.n }} paired days
+  </div>
+  <div class="vega-wrap" id="relationship-explorer"></div>
+  {% else %}
+  <p style="color:var(--text-muted);font-size:0.85rem">Not enough paired data for this comparison yet.</p>
+  {% endif %}
+</div>
+
+<h2>Underlying time series</h2>
 
 <div class="chart-block">
   <h3>HRV <span style="color:#f4a261;font-size:0.72rem">— dashed = 7-day avg</span></h3>
@@ -50,6 +105,9 @@
 
 {% block scripts %}
 <script>
+{% for card in relationship_cards %}{% if card.spec != '{}' %}
+embed('relationship-card-{{ loop.index }}', {{ card.spec|safe }});{% endif %}{% endfor %}
+{% if relationship_spec != '{}' %}embed('relationship-explorer', {{ relationship_spec|safe }});{% endif %}
 embed('hrv-chart',     {{ hrv_spec|safe }});
 embed('hr-chart',      {{ hr_spec|safe }});
 embed('pmc-chart',     {{ pmc_spec|safe }});

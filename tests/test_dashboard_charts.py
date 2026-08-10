@@ -16,6 +16,7 @@ from app.dashboard import (
     _diverging_bar_chart,
     _dow_avg_chart,
     _running_economy_chart,
+    _relationship_chart,
     _sleep_chart,
     _sparse_line_chart,
     _trend_chart,
@@ -44,6 +45,23 @@ def test_trend_chart_valid():
     assert _is_valid_json(result)
     assert result != "{}"
 
+
+
+def test_relationship_chart_requires_three_pairs():
+    spec, stats = _relationship_chart([{"input": 1.0, "output": 2.0}], "Input", "Outcome")
+    assert spec == "{}"
+    assert stats["n"] == 1
+
+
+def test_relationship_chart_valid_with_correlation():
+    rows = [
+        {"input": 1.0, "output": 2.0, "date": "2025-01-01", "outcome_date": "2025-01-02"},
+        {"input": 2.0, "output": 4.0, "date": "2025-01-02", "outcome_date": "2025-01-03"},
+        {"input": 3.0, "output": 6.0, "date": "2025-01-03", "outcome_date": "2025-01-04"},
+    ]
+    spec, stats = _relationship_chart(rows, "Input", "Outcome")
+    assert _is_valid_json(spec)
+    assert stats["r"] == 1.0
 
 # ── _sleep_chart ──────────────────────────────────────────────────────────────
 
