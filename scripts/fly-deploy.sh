@@ -36,7 +36,11 @@ for m in machines:
         break
 " <<< "$MACHINES_JSON")
 
-SCHEDULER_CMD="/bin/sh -c \"curl -sf -X POST ${APP_URL}/admin/import/garmin -H 'Authorization: Bearer \$ADMIN_TOKEN' && curl -sf -X POST ${APP_URL}/admin/import/google_health -H 'Authorization: Bearer \$ADMIN_TOKEN' && echo imports done\""
+# Single-quote the /bin/sh -c script so the embedded double quotes around the
+# Authorization header stay literal — that's what lets sh expand $ADMIN_TOKEN
+# from the machine's own environment at runtime, instead of sending the
+# literal string "$ADMIN_TOKEN" as the token (which 401s every run).
+SCHEDULER_CMD="/bin/sh -c 'curl -sf -X POST ${APP_URL}/admin/import/garmin -H \"Authorization: Bearer \$ADMIN_TOKEN\" && curl -sf -X POST ${APP_URL}/admin/import/google_health -H \"Authorization: Bearer \$ADMIN_TOKEN\" && echo imports done'"
 
 if [ -n "$SCHEDULER_ID" ]; then
   echo "==> Updating scheduler machine $SCHEDULER_ID to image $IMAGE..."
