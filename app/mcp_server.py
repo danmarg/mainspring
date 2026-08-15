@@ -34,6 +34,12 @@ mcp = FastMCP(
     "mainspring",
     host="0.0.0.0",
     streamable_http_path="/",
+    # Stateless: the app runs on Fly with auto_stop_machines/min_machines_running=0
+    # to save cost, so the process (and any in-memory MCP session) can be torn down
+    # between calls. Stateful sessions would then 404 on the next request carrying
+    # the old Mcp-Session-Id. Stateless mode creates a fresh transport per request
+    # instead, so an autostop between tool calls is invisible to the client.
+    stateless_http=True,
     auth_server_provider=MainspringOAuthProvider(base_url=_base_url),
     auth=AuthSettings(
         issuer_url=f"{_base_url}/mcp",
