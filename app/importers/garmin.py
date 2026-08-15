@@ -180,7 +180,16 @@ def push_pending_manual_logs(conn) -> int:
             ok = push_weight(quantity, ts)
         else:  # blood_pressure
             macros = json.loads(macros_json) if macros_json else {}
-            ok = push_blood_pressure(macros["systolic"], macros["diastolic"], macros["pulse"], ts)
+            pulse = macros.get("pulse")
+            if pulse is None:
+                # No pulse reading (legacy rows from before log_blood_pressure skipped
+                # queuing these) — Garmin's endpoint requires pulse, so this can never
+                # succeed. Mark synced so it stops retrying every import forever.
+                conn.execute(
+                    "UPDATE manual_logs SET garmin_synced_at=? WHERE id=?", (utc_now(), log_id)
+                )
+                continue
+            ok = push_blood_pressure(macros["systolic"], macros["diastolic"], pulse, ts)
         if ok:
             conn.execute(
                 "UPDATE manual_logs SET garmin_synced_at=? WHERE id=?", (utc_now(), log_id)
