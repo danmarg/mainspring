@@ -750,6 +750,56 @@ def _fetch_and_store_decoupling(
         log.debug("garmin: could not compute decoupling for activity %s (insufficient/malformed splits)", activity_id)
 
 
+def _parse_hr_zones(data: Any) -> list[dict]:
+    """Defensive parse of Garmin's undocumented .../hrTimeInZones response.
+    Expected shape: [{"zoneNumber": int, "secsInZone": float}, ...]. Field
+    names are reverse-engineered — the raw payload is stored via _store_raw
+    so this is a one-look fix if a real account returns a different shape."""
+    rows = data if isinstance(data, list) else data.get("hrZones") or data.get("timeInZones") or []
+    out = []
+    for row in rows:
+        zone = row.get("zoneNumber") or row.get("zone")
+        secs = row.get("secsInZone") or row.get("secondsInZone")
+        if zone and secs is not None:
+            out.append({"zone": int(zone), "seconds": float(secs)})
+    return out
+
+
+def _fetch_and_store_hr_zones(
+    conn, client, activity_id: str, act_type: str | None, duration_s: int | None
+) -> None:
+    """Fetch per-activity HR time-in-zone for a qualifying run, powering
+    intensity_distribution_from_db. Whole-session avg-HR bucketing would
+    misclassify interval workouts (recoveries drag the average into the
+    grey zone) so this fetches Garmin's real time-in-zone breakdown instead.
+    Only runs once per activity, same rationale as decoupling."""
+    if not act_type or act_type.lower() not in _RUNNING_TYPES:
+        return
+    if not duration_s or duration_s < _MIN_DECOUPLING_DURATION_S:
+        return
+    existing = conn.execute(
+        "SELECT 1 FROM activity_hr_zones WHERE activity_id=?", (activity_id,)
+    ).fetchone()
+    if existing:
+        return
+
+    data = _safe(
+        lambda: client.get_activity_hr_in_timezones(activity_id),
+        f"get_activity_hr_in_timezones({activity_id})",
+    )
+    if not data:
+        return
+    _store_raw(conn, "get_activity_hr_in_timezones", data, None)
+    zones = _parse_hr_zones(data)
+    for z in zones:
+        conn.execute(
+            "INSERT OR REPLACE INTO activity_hr_zones (activity_id, zone, seconds) VALUES (?,?,?)",
+            (activity_id, z["zone"], z["seconds"]),
+        )
+    if not zones:
+        log.debug("garmin: could not parse hr zones for activity %s", activity_id)
+
+
 def _upsert_activity(conn, activity: dict) -> bool:
     activity_id = str(activity.get("activityId", ""))
     if not activity_id:
@@ -982,7 +1032,10 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
                 _fetch_and_store_decoupling(
                     conn, client, str(activity.get("activityId", "")), type_key, duration_s
                 )
-        conn.commit()  # activities can trigger a per-activity decoupling fetch each
+                _fetch_and_store_hr_zones(
+                    conn, client, str(activity.get("activityId", "")), type_key, duration_s
+                )
+        conn.commit()  # activities can trigger per-activity decoupling/hr-zone fetches each
 
     # suggested/scheduled workouts — monthly endpoint, call once per unique month in window
     year_months = sorted({(d.year, d.month) for d in dates})

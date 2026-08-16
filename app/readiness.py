@@ -234,6 +234,141 @@ def self_computed_load(conn: sqlite3.Connection, date_str: str) -> tuple[float |
     return atl, ctl
 
 
+# ── monotony / strain, decoupling trend, intensity distribution ──────────────
+#
+# Three coaching-facing signals ATL/CTL/TSB don't capture on their own: whether
+# load variety across the week is itself a risk (monotony/strain), whether the
+# aerobic base is trending better or worse across recent runs (decoupling
+# trend), and whether recent training has actually been polarized or has
+# drifted into the "grey zone" (intensity distribution). All computed at read
+# time from data already collected, matching the illness_risk_from_db /
+# sleep_regularity_from_db shape this module already assembles for
+# get_workout_context — leveled dicts, not bare floats, so the MCP caller
+# doesn't have to invent its own thresholds.
+
+def training_monotony_strain(conn: sqlite3.Connection, date_str: str, window_days: int = 7) -> dict:
+    """
+    Foster's training monotony/strain: monotony = mean(daily load) / population
+    SD(daily load) across a trailing week; strain = sum(daily load) * monotony.
+    High monotony (>2.0) means load is spread evenly across days with little
+    easy/hard contrast, which is itself an overtraining risk independent of
+    how much total load there is. Rest days count as zero load (not skipped)
+    — monotony is precisely a statement about variation across the week, so
+    dropping rest days would hide the exact pattern it exists to catch (same
+    reasoning as the rest-days-count-as-zero comment on _ewma_load above).
+
+    Reference: Foster, C. (1998). "Monitoring training in athletes with
+    reference to overtraining syndrome." Med Sci Sports Exerc, 30(7), 1164-8.
+    """
+    as_of = date.fromisoformat(date_str)
+    window_start = (as_of - timedelta(days=window_days - 1)).isoformat()
+
+    hr_row = conn.execute(
+        """SELECT resting_hr, max_hr FROM daily_metrics
+           WHERE date <= ? AND resting_hr IS NOT NULL ORDER BY date DESC LIMIT 1""",
+        (date_str,),
+    ).fetchone()
+    if not hr_row:
+        return {"monotony": None, "strain": None, "band": None, "detail": "insufficient HR data"}
+    resting_hr, max_hr = hr_row[0], hr_row[1] or 190.0
+
+    daily_trimp = _daily_trimp(conn, window_start, date_str, resting_hr, max_hr)
+    loads = [daily_trimp.get((as_of - timedelta(days=d)).isoformat(), 0.0) for d in range(window_days)]
+
+    mean_load = sum(loads) / window_days
+    if mean_load == 0:
+        return {"monotony": None, "strain": None, "band": None, "detail": "no training in window"}
+
+    variance = sum((l - mean_load) ** 2 for l in loads) / window_days
+    sd = variance ** 0.5
+    if sd == 0:
+        return {
+            "monotony": None, "strain": None, "band": "elevated",
+            "detail": "identical daily load all week — no easy/hard contrast",
+        }
+
+    monotony = round(mean_load / sd, 2)
+    strain = round(sum(loads) * monotony, 1)
+    band = "elevated" if monotony > 2.0 else "normal"
+    return {"monotony": monotony, "strain": strain, "band": band, "detail": None}
+
+
+def decoupling_trend_from_db(conn: sqlite3.Connection, date_str: str, window_runs: int = 8) -> dict:
+    """
+    Trend in aerobic decoupling (HR:pace drift within a run, see
+    _compute_decoupling in the Garmin importer) across the most recent
+    qualifying runs on/before date_str. Falling decoupling means the aerobic
+    base is improving and can absorb more intensity; rising decoupling means
+    back off — a signal independent of same-day HRV/sleep.
+    """
+    rows = conn.execute(
+        """SELECT date, decoupling_pct FROM activities
+           WHERE date <= ? AND decoupling_pct IS NOT NULL
+           ORDER BY date DESC LIMIT ?""",
+        (date_str, window_runs),
+    ).fetchall()
+    if len(rows) < 4:
+        return {"recent_avg_pct": None, "prior_avg_pct": None, "direction": None,
+                "detail": "fewer than 4 qualifying runs"}
+
+    values = [r[1] for r in rows]  # most recent first
+    mid = len(values) // 2
+    recent_avg = sum(values[:mid]) / mid
+    prior_avg = sum(values[mid:]) / len(values[mid:])
+    delta = recent_avg - prior_avg
+
+    if abs(delta) < 1.0:  # within 1 percentage point — noise floor
+        direction = "stable"
+    elif delta < 0:
+        direction = "improving"
+    else:
+        direction = "worsening"
+
+    return {
+        "recent_avg_pct": round(recent_avg, 2),
+        "prior_avg_pct": round(prior_avg, 2),
+        "direction": direction,
+        "detail": None,
+    }
+
+
+def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, window_days: int = 7) -> dict:
+    """
+    Polarization: % of trailing running time in easy (zones 1-2), moderate
+    (zone 3), and hard (zones 4-5) HR zones, using Garmin's real per-activity
+    time-in-zone (activity_hr_zones) rather than whole-session avg HR — an
+    interval session's recovery jogs would otherwise drag its average into
+    "moderate" and hide the exact grey-zone drift this metric exists to
+    catch. grey_zone_flag fires when moderate-zone time dominates, the
+    pattern polarized-training research associates with a fitness plateau.
+    """
+    rows = conn.execute(
+        """SELECT z.zone, SUM(z.seconds)
+           FROM activities a
+           JOIN activity_hr_zones z ON z.activity_id = a.garmin_activity_id
+           WHERE a.date <= ? AND a.date > date(?, ?)
+           GROUP BY z.zone""",
+        (date_str, date_str, f"-{window_days} days"),
+    ).fetchall()
+    zone_seconds = {int(z): s for z, s in rows if s}
+    total = sum(zone_seconds.values())
+    if total <= 0:
+        return {"easy_pct": None, "moderate_pct": None, "hard_pct": None, "grey_zone_flag": None,
+                "detail": "no zone data in window"}
+
+    easy = zone_seconds.get(1, 0) + zone_seconds.get(2, 0)
+    moderate = zone_seconds.get(3, 0)
+    hard = zone_seconds.get(4, 0) + zone_seconds.get(5, 0)
+
+    return {
+        "easy_pct": round(easy / total * 100, 1),
+        "moderate_pct": round(moderate / total * 100, 1),
+        "hard_pct": round(hard / total * 100, 1),
+        "grey_zone_flag": (moderate / total) > 0.30,
+        "detail": None,
+    }
+
+
 def compute_readiness(
     hrv: float | None,
     hrv_7d: float | None,
