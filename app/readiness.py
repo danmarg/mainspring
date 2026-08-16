@@ -113,7 +113,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
 
 def _ln_rmssd_cv(daily_hrv_values: list[float]) -> float | None:
@@ -162,6 +162,78 @@ def _sleep_debt_score(nights: list[tuple[str, float]], half_life_days: float = 2
     return weighted_sum / total_weight if total_weight > 0 else None
 
 
+def _daily_trimp(
+    conn: sqlite3.Connection, start_date: str, end_date: str, resting_hr: float, max_hr: float
+) -> dict[str, float]:
+    """
+    Per-day Banister TRIMP summed across activities in [start_date, end_date], using
+    each activity's avg_hr/duration_s against a single trailing resting/max HR (we
+    don't retain per-activity HR streams, so this is coarser than
+    trimp_from_hr_samples's sample-level HRR weighting, but same underlying formula).
+    """
+    rows = conn.execute(
+        """SELECT date, avg_hr, duration_s FROM activities
+           WHERE date >= ? AND date <= ? AND avg_hr IS NOT NULL AND duration_s IS NOT NULL""",
+        (start_date, end_date),
+    ).fetchall()
+    daily: dict[str, float] = {}
+    if max_hr <= resting_hr:
+        return daily
+    reserve = max_hr - resting_hr
+    for d, avg_hr, duration_s in rows:
+        hrr = min(1.0, max(0.0, (avg_hr - resting_hr) / reserve))
+        trimp = (duration_s / 60.0) * hrr * math.exp(1.92 * hrr)
+        daily[d] = daily.get(d, 0.0) + trimp
+    return daily
+
+
+def _ewma_load(daily_trimp: dict[str, float], as_of: date, tau_days: float, window_days: int) -> float | None:
+    """
+    Banister-style exponentially-weighted daily training load: weight = exp(-days_ago/tau)
+    (tau is a decay constant, not a half-life — half-life = tau * ln(2)). Rest days count
+    as zero load rather than being skipped, since absence of training is itself signal
+    here (unlike a missing sleep score, which just means no reading).
+    """
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for days_ago in range(window_days):
+        d = as_of - timedelta(days=days_ago)
+        trimp = daily_trimp.get(d.isoformat(), 0.0)
+        weight = math.exp(-days_ago / tau_days)
+        weighted_sum += trimp * weight
+        total_weight += weight
+    return weighted_sum / total_weight if total_weight > 0 else None
+
+
+def self_computed_load(conn: sqlite3.Connection, date_str: str) -> tuple[float | None, float | None]:
+    """
+    Source-agnostic ATL/CTL fallback, derived from our own `activities` table (Banister
+    TRIMP) instead of Garmin's proprietary training-status endpoint. Used when Garmin
+    hasn't synced yet for the day, or for Fitbit-only setups, so the TSB/ACWR readiness
+    components don't just vanish (see readiness_from_db).
+    """
+    as_of = date.fromisoformat(date_str)
+    window_start = (as_of - timedelta(days=180)).isoformat()  # ~4x CTL tau of headroom
+
+    hr_row = conn.execute(
+        """SELECT resting_hr, max_hr FROM daily_metrics
+           WHERE date <= ? AND resting_hr IS NOT NULL ORDER BY date DESC LIMIT 1""",
+        (date_str,),
+    ).fetchone()
+    if not hr_row:
+        return None, None
+    resting_hr = hr_row[0]
+    max_hr = hr_row[1] or 190.0
+
+    daily_trimp = _daily_trimp(conn, window_start, date_str, resting_hr, max_hr)
+    if not daily_trimp:
+        return None, None
+
+    atl = _ewma_load(daily_trimp, as_of, tau_days=7, window_days=28)
+    ctl = _ewma_load(daily_trimp, as_of, tau_days=42, window_days=180)
+    return atl, ctl
+
+
 def compute_readiness(
     hrv: float | None,
     hrv_7d: float | None,
@@ -171,6 +243,7 @@ def compute_readiness(
     rhr_7d: float | None,
     atl: float | None,
     ctl: float | None,
+    load_source: str | None = None,
 ) -> dict:
     """
     Compute a composite readiness score 0-100.
@@ -229,6 +302,8 @@ def compute_readiness(
             "detail": f"{rhr:.0f}bpm vs {rhr_7d:.0f}bpm avg",
         })
 
+    load_suffix = " (self-estimated)" if load_source == "self" else ""
+
     # Training Stress Balance / form (weight 0.10 when available)
     if atl is not None and ctl is not None:
         tsb = ctl - atl
@@ -239,7 +314,7 @@ def compute_readiness(
             "name": "Form (TSB)",
             "score": tsb_score,
             "weight": 0.10,
-            "detail": f"TSB {sign}{tsb:.0f}",
+            "detail": f"TSB {sign}{tsb:.0f}{load_suffix}",
         })
 
     # Acute:Chronic Workload Ratio (weight 0.15 when available)
@@ -257,7 +332,7 @@ def compute_readiness(
             "name": "ACWR",
             "score": acwr_score,
             "weight": 0.15,
-            "detail": f"ATL/CTL {acwr:.2f}",
+            "detail": f"ATL/CTL {acwr:.2f}{load_suffix}",
         })
 
     if not components:
@@ -361,8 +436,20 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
     ).fetchone()
     ctl = load_row[0] if load_row else None
     atl = load_row[1] if load_row else None
+    load_source = "garmin" if (ctl is not None and atl is not None) else None
 
-    return compute_readiness(hrv, hrv_7d, hrv_cv, sleep_debt, rhr, rhr_7d, atl, ctl)
+    # Garmin hasn't synced today's training-status yet (or this is a Fitbit-only
+    # setup): fall back to our own TRIMP-derived ATL/CTL rather than dropping the
+    # TSB/ACWR components entirely, which otherwise biases readiness low until sync
+    # (those components tend to be favorable, so their absence isn't neutral).
+    # Never mix Garmin ATL with self-computed CTL (or vice versa) — same
+    # like-for-like reasoning as the HRV/RHR baseline methodology matching above.
+    if load_source is None:
+        atl, ctl = self_computed_load(conn, date_str)
+        if atl is not None and ctl is not None:
+            load_source = "self"
+
+    return compute_readiness(hrv, hrv_7d, hrv_cv, sleep_debt, rhr, rhr_7d, atl, ctl, load_source)
 
 
 # ── illness / physiological-stress risk ──────────────────────────────────────
