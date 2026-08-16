@@ -13,10 +13,13 @@ from app.readiness import (
     _sleep_debt_score,
     compute_illness_risk,
     compute_readiness,
+    decoupling_trend_from_db,
     illness_risk_from_db,
+    intensity_distribution_from_db,
     readiness_from_db,
     sleep_regularity,
     sleep_regularity_from_db,
+    training_monotony_strain,
     alertness_curve,
     trimp_from_hr_samples,
 )
@@ -476,3 +479,166 @@ def test_alertness_curve_exercise_strain_decays():
     assert curve[-1]["exercise_strain"] < curve[0]["exercise_strain"]
     baseline = alertness_curve(7.0, hours=8)
     assert curve[0]["alertness"] < baseline[0]["alertness"]
+
+
+# ── training_monotony_strain ──────────────────────────────────────────────────
+
+def _insert_activity(conn, date_str, avg_hr=None, duration_s=None, decoupling_pct=None,
+                      garmin_activity_id=None):
+    conn.execute(
+        "INSERT INTO activities(date, type, duration_s, avg_hr, decoupling_pct, garmin_activity_id) "
+        "VALUES (?,?,?,?,?,?)",
+        (date_str, "running", duration_s, avg_hr, decoupling_pct, garmin_activity_id),
+    )
+
+
+def test_monotony_strain_none_without_hr_data(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    result = training_monotony_strain(conn, "2025-04-07")
+    conn.close()
+    assert result == {"monotony": None, "strain": None, "band": None, "detail": "insufficient HR data"}
+
+
+def test_monotony_strain_none_with_no_training(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, max_hr, source_flags_json) VALUES (?,?,?,?)",
+        ("2025-04-01", 50.0, 190.0, "{}"),
+    )
+    conn.commit()
+    result = training_monotony_strain(conn, "2025-04-07")
+    conn.close()
+    assert result == {"monotony": None, "strain": None, "band": None, "detail": "no training in window"}
+
+
+def test_monotony_strain_elevated_for_identical_daily_load(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, max_hr, source_flags_json) VALUES (?,?,?,?)",
+        ("2025-04-01", 50.0, 190.0, "{}"),
+    )
+    for d in ["2025-04-01", "2025-04-02", "2025-04-03", "2025-04-04",
+              "2025-04-05", "2025-04-06", "2025-04-07"]:
+        _insert_activity(conn, d, avg_hr=140, duration_s=1800)
+    conn.commit()
+
+    result = training_monotony_strain(conn, "2025-04-07")
+    conn.close()
+    assert result["monotony"] is None
+    assert result["band"] == "elevated"
+
+
+def test_monotony_strain_normal_for_varied_daily_load(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, max_hr, source_flags_json) VALUES (?,?,?,?)",
+        ("2025-04-01", 50.0, 190.0, "{}"),
+    )
+    # only 3 of 7 days have training -> high day-to-day variance -> low monotony
+    for d in ["2025-04-01", "2025-04-03", "2025-04-05"]:
+        _insert_activity(conn, d, avg_hr=160, duration_s=3600)
+    conn.commit()
+
+    result = training_monotony_strain(conn, "2025-04-07")
+    conn.close()
+    assert result["monotony"] is not None
+    assert result["band"] == "normal"
+    assert result["strain"] is not None
+
+
+# ── decoupling_trend_from_db ──────────────────────────────────────────────────
+
+def test_decoupling_trend_insufficient_runs(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    for i, d in enumerate(["2025-04-01", "2025-04-03", "2025-04-05"]):
+        _insert_activity(conn, d, decoupling_pct=float(i))
+    conn.commit()
+
+    result = decoupling_trend_from_db(conn, "2025-04-07")
+    conn.close()
+    assert result["direction"] is None
+    assert result["detail"] == "fewer than 4 qualifying runs"
+
+
+def test_decoupling_trend_worsening(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    # older (lower decoupling) then more recent (higher decoupling) runs
+    for d, pct in [("2025-04-01", 1.0), ("2025-04-02", 1.5),
+                   ("2025-04-03", 2.0), ("2025-04-04", 1.5),
+                   ("2025-04-05", 6.0), ("2025-04-06", 6.5),
+                   ("2025-04-07", 7.0), ("2025-04-08", 7.5)]:
+        _insert_activity(conn, d, decoupling_pct=pct)
+    conn.commit()
+
+    result = decoupling_trend_from_db(conn, "2025-04-08")
+    conn.close()
+    assert result["direction"] == "worsening"
+    assert result["recent_avg_pct"] > result["prior_avg_pct"]
+
+
+def test_decoupling_trend_improving(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    for d, pct in [("2025-04-01", 7.0), ("2025-04-02", 6.5),
+                   ("2025-04-03", 6.0), ("2025-04-04", 6.5),
+                   ("2025-04-05", 1.5), ("2025-04-06", 1.0),
+                   ("2025-04-07", 1.5), ("2025-04-08", 1.0)]:
+        _insert_activity(conn, d, decoupling_pct=pct)
+    conn.commit()
+
+    result = decoupling_trend_from_db(conn, "2025-04-08")
+    conn.close()
+    assert result["direction"] == "improving"
+
+
+def test_decoupling_trend_stable_within_noise_floor(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    for d in ["2025-04-01", "2025-04-02", "2025-04-03", "2025-04-04"]:
+        _insert_activity(conn, d, decoupling_pct=3.0)
+    conn.commit()
+
+    result = decoupling_trend_from_db(conn, "2025-04-04")
+    conn.close()
+    assert result["direction"] == "stable"
+
+
+# ── intensity_distribution_from_db ────────────────────────────────────────────
+
+def _insert_activity_hr_zones(conn, date_str, garmin_activity_id, seconds_by_zone):
+    _insert_activity(conn, date_str, garmin_activity_id=garmin_activity_id)
+    for zone, seconds in seconds_by_zone.items():
+        conn.execute(
+            "INSERT INTO activity_hr_zones(activity_id, zone, seconds) VALUES (?,?,?)",
+            (garmin_activity_id, zone, seconds),
+        )
+
+
+def test_intensity_distribution_no_zone_data(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    result = intensity_distribution_from_db(conn, "2025-04-07")
+    conn.close()
+    assert result["easy_pct"] is None
+    assert result["grey_zone_flag"] is None
+
+
+def test_intensity_distribution_grey_zone_flag(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    _insert_activity_hr_zones(conn, "2025-04-05", "g1",
+                               {1: 300, 2: 300, 3: 3000, 4: 300, 5: 100})
+    conn.commit()
+
+    result = intensity_distribution_from_db(conn, "2025-04-07")
+    conn.close()
+    assert result["grey_zone_flag"] is True
+    assert result["moderate_pct"] > 30.0
+
+
+def test_intensity_distribution_polarized_no_flag(tmp_db):
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    _insert_activity_hr_zones(conn, "2025-04-05", "g1",
+                               {1: 2000, 2: 2000, 3: 200, 4: 1000, 5: 800})
+    conn.commit()
+
+    result = intensity_distribution_from_db(conn, "2025-04-07")
+    conn.close()
+    assert result["grey_zone_flag"] is False
+    assert result["moderate_pct"] < 20.0

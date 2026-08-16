@@ -14,10 +14,12 @@ import app.db as db_module
 from app.db import init_db, utc_now
 from app.importers.garmin import (
     _compute_decoupling,
+    _fetch_and_store_hr_zones,
     _parse_blood_pressure,
     _parse_body_battery,
     _parse_body_composition,
     _parse_ftp,
+    _parse_hr_zones,
     _parse_hrv,
     _parse_hydration,
     _parse_lactate_threshold,
@@ -501,6 +503,13 @@ def _make_mock_client():
             {"distance": 1000.0, "duration": 300, "averageHR": 150},
         ]
     }
+    client.get_activity_hr_in_timezones.return_value = [
+        {"zoneNumber": 1, "secsInZone": 300.0},
+        {"zoneNumber": 2, "secsInZone": 600.0},
+        {"zoneNumber": 3, "secsInZone": 1200.0},
+        {"zoneNumber": 4, "secsInZone": 500.0},
+        {"zoneNumber": 5, "secsInZone": 100.0},
+    ]
     client.get_scheduled_workouts.return_value = [
         {
             "date": "2025-01-01",
@@ -563,6 +572,64 @@ def test_compute_decoupling_ignores_malformed_laps():
     assert _compute_decoupling(splits) is not None
 
 
+# ── HR time-in-zone ──────────────────────────────────────────────────────────
+
+def test_parse_hr_zones():
+    data = [{"zoneNumber": 1, "secsInZone": 300.0}, {"zoneNumber": 2, "secsInZone": 120.0}]
+    assert _parse_hr_zones(data) == [{"zone": 1, "seconds": 300.0}, {"zone": 2, "seconds": 120.0}]
+
+
+def test_parse_hr_zones_empty():
+    assert _parse_hr_zones({}) == []
+    assert _parse_hr_zones([]) == []
+
+
+def test_parse_hr_zones_ignores_zero_or_missing_zone():
+    data = [{"zoneNumber": 0, "secsInZone": 50.0}, {"secsInZone": 50.0}, {"zoneNumber": 1, "secsInZone": 300.0}]
+    assert _parse_hr_zones(data) == [{"zone": 1, "seconds": 300.0}]
+
+
+def test_fetch_and_store_hr_zones_skips_non_running(tmp_db):
+    client = MagicMock()
+    _fetch_and_store_hr_zones(tmp_db, client, "1", "cycling", 3600)
+    client.get_activity_hr_in_timezones.assert_not_called()
+
+
+def test_fetch_and_store_hr_zones_skips_short_activity(tmp_db):
+    client = MagicMock()
+    _fetch_and_store_hr_zones(tmp_db, client, "1", "running", 60)
+    client.get_activity_hr_in_timezones.assert_not_called()
+
+
+def test_fetch_and_store_hr_zones_stores_zones_and_raw_payload(tmp_db):
+    client = MagicMock()
+    client.get_activity_hr_in_timezones.return_value = [
+        {"zoneNumber": 1, "secsInZone": 300.0},
+        {"zoneNumber": 3, "secsInZone": 900.0},
+    ]
+    _fetch_and_store_hr_zones(tmp_db, client, "42", "running", 1800)
+    tmp_db.commit()
+
+    rows = tmp_db.execute(
+        "SELECT zone, seconds FROM activity_hr_zones WHERE activity_id='42' ORDER BY zone"
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [(1, 300.0), (3, 900.0)]
+
+    payload = tmp_db.execute(
+        "SELECT COUNT(*) FROM raw_import_payloads WHERE endpoint='get_activity_hr_in_timezones'"
+    ).fetchone()[0]
+    assert payload == 1
+
+
+def test_fetch_and_store_hr_zones_skips_if_already_fetched(tmp_db):
+    tmp_db.execute("INSERT INTO activity_hr_zones(activity_id, zone, seconds) VALUES ('42', 1, 100.0)")
+    tmp_db.commit()
+
+    client = MagicMock()
+    _fetch_and_store_hr_zones(tmp_db, client, "42", "running", 1800)
+    client.get_activity_hr_in_timezones.assert_not_called()
+
+
 def test_run_import_no_credentials(tmp_db, monkeypatch):
     monkeypatch.delenv("GARMIN_EMAIL", raising=False)
     monkeypatch.delenv("GARMIN_PASSWORD", raising=False)
@@ -604,6 +671,12 @@ def test_run_import_with_mock_client(tmp_db, monkeypatch):
         "SELECT type FROM garmin_activities WHERE activity_id='999'"
     ).fetchone()
     assert activity is not None and activity[0] == "running"
+
+    # per-activity HR time-in-zone stored alongside decoupling
+    zone_rows = tmp_db.execute(
+        "SELECT zone, seconds FROM activity_hr_zones WHERE activity_id='999' ORDER BY zone"
+    ).fetchall()
+    assert [tuple(r) for r in zone_rows] == [(1, 300.0), (2, 600.0), (3, 1200.0), (4, 500.0), (5, 100.0)]
 
 
 # ── write-back (push_weight / push_blood_pressure) ──────────────────────────

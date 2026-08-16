@@ -47,6 +47,16 @@ CREATE TABLE IF NOT EXISTS garmin_activities (
   fetched_at                TEXT
 );
 
+-- per-activity HR time-in-zone (seconds), fetched alongside decoupling for
+-- qualifying runs. zone numbers/boundaries are Garmin's own account config,
+-- not our derived hr_zones table. Powers intensity_distribution_from_db.
+CREATE TABLE IF NOT EXISTS activity_hr_zones (
+  activity_id TEXT NOT NULL,
+  zone        INTEGER NOT NULL,
+  seconds     REAL,
+  PRIMARY KEY (activity_id, zone)
+);
+
 CREATE TABLE IF NOT EXISTS google_health_activities (
   activity_id TEXT PRIMARY KEY,
   date        TEXT,

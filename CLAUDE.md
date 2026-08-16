@@ -63,6 +63,8 @@ health-data-service/
 - **`source_config`** — per-metric canonical source preference. Absent row = fall back to `DEFAULT_SOURCE_PRIORITY` (Garmin first). Single-source deployments never need to touch this.
 - Activity dedup matches across `garmin_activities` / `fitbit_activities` by `(date, type, start_time ±15 min)`.
 - `manual_logs` is the write target for all MCP logging tools (meal, caffeine, alcohol, note).
+- **`activity_hr_zones(activity_id, zone, seconds)`** — per-activity HR time-in-zone, fetched from Garmin alongside aerobic decoupling for qualifying runs (`_fetch_and_store_hr_zones` in `app/importers/garmin.py`, same pattern as `_fetch_and_store_decoupling`). Exists specifically so intensity-distribution/polarization analysis can classify a session by *where time was actually spent*, not by whole-session avg HR — the latter drags interval workouts' recovery jogs into the "moderate" bucket and hides the grey-zone drift the metric exists to catch.
+- Three running-specific coaching signals — **training monotony/strain** (Foster), **aerobic decoupling trend**, and **intensity distribution/polarization** — are computed read-time in `app/readiness.py` (not persisted columns) and surfaced through `get_workout_context` in `app/mcp_server.py`, which also carries the coaching interpretation guidance (when to favor easy/hard/rest) in its embedded `mainspring://guide` resource. See that guide for the current interpretation bands rather than duplicating them here — they're the source of truth Claude actually reads at plan time.
 
 ## Auth
 

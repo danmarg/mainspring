@@ -838,11 +838,23 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     """Rich context for workout planning: today's metrics, HRV trend, TSB (form),
     training load status, week progress vs targets, next goal event, yesterday's RPE,
     aerobic efficiency trend, Garmin's suggested workout, recent activities,
-    personalized insights from historical correlations, and a trailing-window
+    personalized insights from historical correlations, a trailing-window
     illness/physiological-stress signal (RHR/HRV/skin-temp concordance —
-    heuristic, not a diagnosis)."""
+    heuristic, not a diagnosis), and three running-specific coaching signals
+    ATL/CTL/TSB don't capture: training_monotony_strain (Foster's monotony/
+    strain — load variety across the week, not just how much), decoupling_trend
+    (aerobic-base trend across recent runs, independent of same-day HRV/sleep),
+    and intensity_distribution (real time-in-zone polarization, flagging
+    grey-zone drift that whole-session avg-HR would miss)."""
     from app.analysis import compute_correlations
-    from app.readiness import illness_risk_from_db, readiness_from_db, sleep_regularity_from_db
+    from app.readiness import (
+        decoupling_trend_from_db,
+        illness_risk_from_db,
+        intensity_distribution_from_db,
+        readiness_from_db,
+        sleep_regularity_from_db,
+        training_monotony_strain,
+    )
     from datetime import date as date_cls, timedelta
 
     d = _date_or_today(date)
@@ -948,6 +960,9 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
         readiness = readiness_from_db(conn, d)
         sleep_regularity = sleep_regularity_from_db(conn, d)
         illness_risk = illness_risk_from_db(conn, d)
+        monotony_strain = training_monotony_strain(conn, d)
+        decoupling_trend = decoupling_trend_from_db(conn, d)
+        intensity_distribution = intensity_distribution_from_db(conn, d)
 
     # ── today ────────────────────────────────────────────────────────────────
     today: dict = {}
@@ -1001,6 +1016,9 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     today["readiness"] = readiness
     today["sleep_regularity"] = sleep_regularity
     today["illness_risk"] = illness_risk
+    today["training_monotony_strain"] = monotony_strain
+    today["decoupling_trend"] = decoupling_trend
+    today["intensity_distribution"] = intensity_distribution
     today["hr_zones"] = [
         {"zone": r[0], "min_bpm": r[1], "max_bpm": r[2]} for r in hr_zone_rows
     ]
@@ -1180,6 +1198,19 @@ planning, and recommendations. The server never fetches weather or sends message
    - `sleep_regularity`: night-to-night bed/wake-time consistency over 14 nights
      (independent of duration/score; erratic timing alone predicts worse recovery)
    - `recent_soreness`: soreness/injury logs from the last 3 days
+   - `training_monotony_strain`: Foster's monotony (mean/SD of trailing-7-day daily
+     load) and strain (sum × monotony). `band: "elevated"` means load has been spread
+     too evenly across the week — no easy/hard contrast — a distinct overtraining
+     risk from TSB/ACWR, which only look at load magnitude
+   - `decoupling_trend`: aerobic decoupling (HR:pace drift within a run) trended across
+     the most recent qualifying runs. `direction: "worsening"` = aerobic base eroding,
+     back off intensity regardless of what HRV/sleep say that morning; `"improving"` =
+     base is strengthening, can absorb more intensity
+   - `intensity_distribution`: real time-in-zone % (easy/moderate/hard) across the
+     trailing week, from Garmin's per-activity zone data — not whole-session avg HR,
+     which would hide interval recoveries inside "moderate". `grey_zone_flag: true`
+     means recent training hasn't been polarized (too much moderate-intensity, not
+     enough true easy or true hard)
 
 2. Use `get_correlations()` periodically (weekly / when patterns are unclear) to surface
    which behaviours most affect recovery. Results feed the insights in `get_workout_context`.
@@ -1193,7 +1224,12 @@ planning, and recommendations. The server never fetches weather or sends message
    f. yesterday_rpe: 8–10 → likely need easy day regardless of other signals
    g. recent_soreness: an active entry for the muscle group in question outweighs
       good numbers elsewhere — modify or substitute, don't push through it
-   h. Garmin suggestion as a secondary input, not the primary driver
+   h. training_monotony_strain.band == "elevated" and intensity_distribution.
+      grey_zone_flag == true together: this week has been all moderate, no contrast —
+      push a clearly easy day or a clearly hard day today, not another moderate one
+   i. decoupling_trend.direction == "worsening": bias toward easy volume even if
+      TSB/HRV look fine — it's an earlier, run-specific signal they don't carry
+   j. Garmin suggestion as a secondary input, not the primary driver
 
 ---
 
@@ -1211,6 +1247,9 @@ planning, and recommendations. The server never fetches weather or sends message
 | sleep_regularity.score | >80 | 50–80 | <50 → bed/wake times swinging 2h+, a recovery drag on its own |
 | recovery_hours | 0 (ready now) | a few hours left | still elapsing → favour easy/rest until it hits 0 |
 | skin_temp_deviation | near 0°C | ±0.3°C | >0.5°C above baseline → possible illness, treat other signals cautiously |
+| training_monotony_strain.monotony | ≤1.5 | 1.5–2.0 | >2.0 → "elevated" band, force contrast into the week |
+| intensity_distribution.moderate_pct | <20% | 20–30% | >30% → grey_zone_flag, drifted off polarized training |
+| decoupling_trend.direction | improving/stable | — | worsening → back off intensity |
 
 TSB interpretation: think of it as "form". Positive = rested/sharp (good for racing or
 hard efforts). Negative = accumulated fatigue (fine during a build block, bad near a race).
