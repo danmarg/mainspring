@@ -87,6 +87,11 @@
 </div>
 
 <div class="chart-block">
+  <h3>Training polarization <span style="color:#888;font-size:0.72rem">weekly % of training time by real HR zone · <span style="color:#4e9af1">easy</span> · <span style="color:#f4a261">moderate</span> · <span style="color:#e05c5c">hard</span> — a thick orange band means training has drifted into the unproductive grey zone</span></h3>
+  <div class="vega-wrap" id="polarization-chart"></div>
+</div>
+
+<div class="chart-block">
   <h3>Body battery (high/low range)</h3>
   <div class="vega-wrap" id="battery-chart"></div>
 </div>
@@ -113,6 +118,7 @@ embed('hr-chart',      {{ hr_spec|safe }});
 embed('pmc-chart',     {{ pmc_spec|safe }});
 embed('acwr-chart',    {{ acwr_spec|safe }});
 embed('load-chart',    {{ load_spec|safe }});
+embed('polarization-chart', {{ polarization_spec|safe }});
 embed('battery-chart', {{ battery_spec|safe }});
 embed('steps-chart',   {{ steps_spec|safe }});
 embed('azm-chart',     {{ azm_spec|safe }});

@@ -239,6 +239,40 @@ def _zone_load_chart(rows: list[dict], x_domain: list[str] | None = None) -> str
     return _dark(chart).to_json()
 
 
+def _polarization_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
+    """Stacked bar: weekly training-time polarization (easy/moderate/hard %),
+    from real per-activity HR time-in-zone (activity_hr_zones) rather than
+    whole-session avg HR — the latter drags an interval session's recovery
+    jogs into "moderate" and hides exactly the grey-zone drift this chart is
+    meant to catch. A polarized week reads as thick blue+red, thin orange;
+    a week dominated by orange has drifted into unproductive grey-zone training."""
+    if not rows:
+        return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
+    long = []
+    for r in rows:
+        for zone, key in [("Easy", "easy_pct"), ("Moderate", "moderate_pct"), ("Hard", "hard_pct")]:
+            if r.get(key) is not None:
+                long.append({"week": r["week"], "zone": zone, "pct": r[key]})
+    if not long:
+        return "{}"
+    chart = (
+        alt.Chart(alt.Data(values=long))
+        .mark_bar()
+        .encode(
+            x=alt.X("week:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="week", format="%b %d")),
+            y=alt.Y("pct:Q", title="% of training time", stack="zero", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("zone:N", scale=alt.Scale(
+                domain=["Easy", "Moderate", "Hard"],
+                range=["#4e9af1", "#f4a261", "#e05c5c"],
+            ), title="Intensity"),
+            tooltip=["week:T", "zone:N", alt.Tooltip("pct:Q", format=".0f")],
+        )
+        .properties(width="container", height=200)
+    )
+    return _dark(chart).to_json()
+
+
 def _hr_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
     """Dual line: resting HR (blue) + daily max HR from activities (red) on one chart."""
     if not rows:
@@ -1403,6 +1437,14 @@ async def trends(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
+        zone_time_rows = _rows(conn, """
+            SELECT a.date, z.zone, SUM(z.seconds) AS seconds
+            FROM activities a
+            JOIN activity_hr_zones z ON z.activity_id = a.garmin_activity_id
+            WHERE a.date >= date('now', ?)
+            GROUP BY a.date, z.zone
+        """, (clause,))
+
         steps_rows = _rows(conn, """
             SELECT date, steps FROM daily_metrics
             WHERE date >= date('now', ?) AND steps IS NOT NULL
@@ -1434,6 +1476,30 @@ async def trends(request: Request, days: str = "30",
     acwr_rows = [{"date": r["date"], "training_load_ratio": r["training_load_ratio"]}
                  for r in all_load_rows_acwr]
 
+    # Weekly polarization: bucket per-activity zone-seconds by Monday-start week,
+    # collapse zones 1-2/3/4-5 to easy/moderate/hard, convert to %.
+    week_zone_seconds: dict[str, dict[int, float]] = {}
+    for r in zone_time_rows:
+        d = date.fromisoformat(r["date"])
+        week = (d - timedelta(days=d.weekday())).isoformat()
+        week_zone_seconds.setdefault(week, {}).setdefault(r["zone"], 0.0)
+        week_zone_seconds[week][r["zone"]] += r["seconds"] or 0.0
+    polarization_rows = []
+    for week in sorted(week_zone_seconds):
+        zs = week_zone_seconds[week]
+        total = sum(zs.values())
+        if total <= 0:
+            continue
+        easy = zs.get(1, 0) + zs.get(2, 0)
+        moderate = zs.get(3, 0)
+        hard = zs.get(4, 0) + zs.get(5, 0)
+        polarization_rows.append({
+            "week": week,
+            "easy_pct": round(easy / total * 100, 1),
+            "moderate_pct": round(moderate / total * 100, 1),
+            "hard_pct": round(hard / total * 100, 1),
+        })
+
     fixed_relationships = [
         ("Alcohol → next-day HRV", "alcohol_units", "hrv", 1),
         ("Caffeine → next-day sleep", "caffeine_mg", "sleep_score", 1),
@@ -1462,6 +1528,7 @@ async def trends(request: Request, days: str = "30",
         "relationship_outputs": RELATIONSHIP_OUTPUTS,
         "hrv_spec": _trend_chart(hrv_rows, "hrv", "hrv_7d_avg", "HRV (ms)", x_domain=x_domain),
         "load_spec": _zone_load_chart(load_rows, x_domain=x_domain),
+        "polarization_spec": _polarization_chart(polarization_rows, x_domain=x_domain),
         "pmc_spec": _pmc_chart(pmc_rows, x_domain=x_domain),
         "acwr_spec": _sparse_line_chart(
             acwr_rows, "training_load_ratio", "ACWR (ATL/CTL)", color="#f4a261",
