@@ -15,6 +15,7 @@ from app.dashboard import (
     _daily_bar_chart,
     _diverging_bar_chart,
     _dow_avg_chart,
+    _polarization_chart,
     _running_economy_chart,
     _relationship_chart,
     _sleep_chart,
@@ -221,3 +222,19 @@ def test_running_economy_chart_band_excludes_outlier_paces():
         {"date": "2025-01-15", "pace_min_km": 9.0, "avg_hr": 160},
     ]
     assert _running_economy_chart(rows) == "{}"
+
+
+# ── _polarization_chart ────────────────────────────────────────────────────────
+
+def test_polarization_chart_empty():
+    assert _polarization_chart([]) == "{}"
+
+
+def test_polarization_chart_valid():
+    rows = [
+        {"week": "2025-01-06", "easy_pct": 70.0, "moderate_pct": 10.0, "hard_pct": 20.0},
+        {"week": "2025-01-13", "easy_pct": 50.0, "moderate_pct": 40.0, "hard_pct": 10.0},
+    ]
+    result = _polarization_chart(rows)
+    assert _is_valid_json(result)
+    assert result != "{}"
