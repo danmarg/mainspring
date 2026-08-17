@@ -34,12 +34,21 @@ mcp = FastMCP(
     "mainspring",
     host="0.0.0.0",
     streamable_http_path="/",
-    # Stateless: the app runs on Fly with auto_stop_machines/min_machines_running=0
-    # to save cost, so the process (and any in-memory MCP session) can be torn down
-    # between calls. Stateful sessions would then 404 on the next request carrying
-    # the old Mcp-Session-Id. Stateless mode creates a fresh transport per request
-    # instead, so an autostop between tool calls is invisible to the client.
-    stateless_http=True,
+    # Stateful sessions. Previously ran stateless because Fly's auto_stop_machines
+    # "stop" fully tears down the process between calls, killing any in-memory
+    # session and 404ing the client's next Mcp-Session-Id. But stateless mode has
+    # its own cost: every single call redoes the full initialize -> notifications/
+    # initialized -> tools/call handshake as three independent, unordered HTTP
+    # requests with no shared state between them, which can race and 400 even on
+    # an already-warm machine. Paired with fly.toml's auto_stop_machines =
+    # "suspend" (freezes/thaws the whole process, including in-memory session
+    # state, instead of destroying it), stateful sessions now survive an autostop
+    # cycle without needing that handshake on every call — but this reduces the
+    # exposure rather than eliminating it, since the *first* call of any session
+    # still pays the same handshake and can still race. Duplicate manual_logs
+    # writes recurred after this change (2026-08-17); see tool_call_log below,
+    # added to get real evidence next time instead of guessing.
+    stateless_http=False,
     auth_server_provider=MainspringOAuthProvider(base_url=_base_url),
     auth=AuthSettings(
         issuer_url=f"{_base_url}/mcp",
@@ -47,6 +56,57 @@ mcp = FastMCP(
         client_registration_options=ClientRegistrationOptions(enabled=True),
     ),
 )
+
+
+# ── tool-call diagnostic log ──────────────────────────────────────────────────
+#
+# Wraps every tool invocation to record it in tool_call_log (see schema.sql).
+# Fly's log buffer is short-lived and had already rotated past the relevant
+# window the last two times a client-perceived "server error" turned into a
+# duplicate manual_logs write — this survives on the persistent volume instead,
+# so the next occurrence is diagnosable: was there really an exception, was the
+# call slow enough to explain a client-side timeout, and how far apart (if at
+# all) were the retried calls.
+
+_TOOL_CALL_LOG_RETENTION_DAYS = 30
+
+
+def _install_tool_call_logging(server: FastMCP) -> None:
+    original_call_tool = server._tool_manager.call_tool
+
+    @functools.wraps(original_call_tool)
+    async def logged_call_tool(name, arguments, *args, **kwargs):
+        start = datetime.now(timezone.utc)
+        outcome, error, result, result_val = "ok", None, None, None
+        try:
+            result_val = await original_call_tool(name, arguments, *args, **kwargs)
+            result = result_val
+            return result_val
+        except Exception as e:
+            outcome, error = "error", f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            duration_ms = (datetime.now(timezone.utc) - start).total_seconds() * 1000
+            try:
+                with db() as conn:
+                    conn.execute(
+                        "INSERT INTO tool_call_log(ts, tool, arguments_json, duration_ms, outcome, error, result_repr) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (
+                            start.isoformat(), name, json.dumps(arguments, default=str)[:2000],
+                            round(duration_ms, 1), outcome, error,
+                            repr(result)[:500] if result is not None else None,
+                        ),
+                    )
+                    cutoff = (start - timedelta(days=_TOOL_CALL_LOG_RETENTION_DAYS)).isoformat()
+                    conn.execute("DELETE FROM tool_call_log WHERE ts < ?", (cutoff,))
+            except Exception:
+                pass  # diagnostic logging must never break the actual tool call
+
+    server._tool_manager.call_tool = logged_call_tool
+
+
+_install_tool_call_logging(mcp)
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -284,10 +344,11 @@ def delete_log(log_id: int) -> str:
     """Delete a manual log entry (meal/caffeine/alcohol/note) by id.
     Use get_logs to find the id."""
     with db() as conn:
-        existing = conn.execute("SELECT id FROM manual_logs WHERE id=?", (log_id,)).fetchone()
+        existing = conn.execute("SELECT ts FROM manual_logs WHERE id=?", (log_id,)).fetchone()
         if not existing:
             return f"Error: no log with id {log_id}"
         conn.execute("DELETE FROM manual_logs WHERE id=?", (log_id,))
+    _renormalize_date(existing[0])
     return f"Deleted log {log_id}"
 
 

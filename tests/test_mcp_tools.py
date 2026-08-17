@@ -497,3 +497,38 @@ def test_log_energy_validates_and_stores_ordinal_level():
     row = conn.execute("SELECT type, quantity, unit, description FROM manual_logs").fetchone()
     conn.close()
     assert row == ("energy", 4.0, "/5", "focused")
+
+
+# ── tool_call_log instrumentation ─────────────────────────────────────────────
+
+async def test_tool_call_logging_records_successful_call():
+    from app.mcp_server import mcp
+    await mcp._tool_manager.call_tool("get_source_config", {})
+
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    row = conn.execute(
+        "SELECT tool, outcome, error, duration_ms FROM tool_call_log WHERE tool='get_source_config'"
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "get_source_config"
+    assert row[1] == "ok"
+    assert row[2] is None
+    assert row[3] >= 0
+
+
+async def test_tool_call_logging_records_exception_and_still_raises():
+    from mcp.server.fastmcp.exceptions import ToolError
+    from app.mcp_server import mcp
+
+    with pytest.raises(ToolError):
+        await mcp._tool_manager.call_tool("not_a_real_tool", {})
+
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    row = conn.execute(
+        "SELECT tool, outcome, error FROM tool_call_log WHERE tool='not_a_real_tool'"
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[1] == "error"
+    assert "not_a_real_tool" in row[2] or "Unknown tool" in row[2]
