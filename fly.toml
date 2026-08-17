@@ -12,7 +12,11 @@ HOME_TZ = "Europe/Berlin"
 [http_service]
 internal_port = 8080
 force_https = true
-auto_stop_machines = "stop"
+# "suspend" freezes/thaws the whole VM (memory incl. any in-memory MCP session
+# state) instead of destroying and recreating the process like "stop" does —
+# same idle cost (storage only), much faster resume, and safe to pair with
+# stateful MCP sessions in app/mcp_server.py (see comment there).
+auto_stop_machines = "suspend"
 auto_start_machines = true
 min_machines_running = 0
 

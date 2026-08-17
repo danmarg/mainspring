@@ -298,3 +298,21 @@ CREATE TABLE IF NOT EXISTS training_events (
   result           TEXT,
   created_at       TEXT NOT NULL
 );
+
+-- diagnostic record of every MCP tool call: when transport-level flakiness
+-- causes a client to perceive an error and retry a non-idempotent write (see
+-- the manual_logs duplicate-write investigation), this is the durable trail
+-- that survives Fly's short-lived log buffer. Short retention — this is a
+-- debugging aid, not an audit log.
+CREATE TABLE IF NOT EXISTS tool_call_log (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts             TEXT NOT NULL,   -- UTC ISO-8601, call start
+  tool           TEXT NOT NULL,
+  arguments_json TEXT,
+  duration_ms    REAL,
+  outcome        TEXT NOT NULL,   -- 'ok' | 'error'
+  error          TEXT,
+  result_repr    TEXT             -- truncated repr of the return value, for 'ok' calls
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_call_log_tool_ts ON tool_call_log(tool, ts DESC);
