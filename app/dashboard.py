@@ -260,7 +260,7 @@ def _polarization_chart(rows: list[dict], x_domain: list[str] | None = None) -> 
         alt.Chart(alt.Data(values=long))
         .mark_bar()
         .encode(
-            x=alt.X("week:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="week", format="%b %d")),
+            x=alt.X("week:T", timeUnit="yearweek", title=None, scale=x_scale, axis=alt.Axis(format="%b %d")),
             y=alt.Y("pct:Q", title="% of training time", stack="zero", scale=alt.Scale(domain=[0, 100])),
             color=alt.Color("zone:N", scale=alt.Scale(
                 domain=["Easy", "Moderate", "Hard"],
@@ -411,8 +411,8 @@ def _diverging_bar_chart(rows: list[dict], field: str, title: str,
         alt.Chart(alt.Data(values=rows))
         .mark_bar()
         .encode(
-            x=alt.X("date:T", title=None, scale=x_scale,
-                    axis=alt.Axis(tickCount="day", format="%b %d")),
+            x=alt.X("date:T", timeUnit="yearmonthdate", title=None, scale=x_scale,
+                    axis=alt.Axis(format="%b %d")),
             y=alt.Y(f"{field}:Q", title=title),
             color=alt.condition(
                 alt.datum[field] >= 0,
@@ -558,7 +558,8 @@ def _pmc_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
             alt.Chart(alt.Data(values=tsb_rows))
             .mark_bar(opacity=0.4)
             .encode(
-                x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
+                x=alt.X("date:T", timeUnit="yearmonthdate", title=None, scale=x_scale,
+                        axis=alt.Axis(format="%b %d")),
                 y=alt.Y("tsb:Q", title="Load / TSB", scale=alt.Scale(zero=True)),
                 color=alt.condition(
                     alt.datum.tsb >= 0,
@@ -749,8 +750,8 @@ def _daily_bar_chart(rows: list[dict], field: str, title: str,
         alt.Chart(alt.Data(values=rows))
         .mark_bar(color=color, opacity=0.8)
         .encode(
-            x=alt.X("date:T", title=None, scale=x_scale,
-                    axis=alt.Axis(tickCount="day", format="%b %e")),
+            x=alt.X("date:T", timeUnit="yearmonthdate", title=None, scale=x_scale,
+                    axis=alt.Axis(format="%b %e")),
             y=alt.Y(f"{field}:Q", title=title),
             tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip(f"{field}:Q", title=title, format=".0f")],
         )
