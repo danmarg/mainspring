@@ -1011,6 +1011,64 @@ def _hr_efficiency_chart(rows: list[dict]) -> str:
     return _dark(chart, title=True).to_json()
 
 
+def _ef_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
+    """Efficiency Factor (speed per bpm) over time with 4-week rolling avg.
+    Rising EF = more speed for the same HR cost = improving aerobic fitness,
+    across all runs rather than just those near the median pace."""
+    if not rows:
+        return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
+    base = alt.Chart(alt.Data(values=rows))
+    dots = base.mark_point(size=40, opacity=0.6, color="#4e9af1").encode(
+        x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
+        y=alt.Y("ef:Q", title="Efficiency factor (m/min per bpm)", scale=alt.Scale(zero=False)),
+        tooltip=[
+            alt.Tooltip("date:T", title="Date"),
+            alt.Tooltip("ef:Q", title="EF", format=".3f"),
+            alt.Tooltip("pace_min_km:Q", title="Pace (min/km)", format=".2f"),
+            alt.Tooltip("avg_hr:Q", title="Avg HR"),
+        ],
+    )
+    avg = base.mark_line(color="#f4a261", strokeWidth=2, strokeDash=[4, 4]).encode(
+        x=alt.X("date:T", scale=x_scale),
+        y="ef_4w_avg:Q",
+    )
+    return _dark(
+        alt.layer(dots, avg).properties(width="container", height=200, title="Efficiency factor trend"),
+        title=True,
+    ).to_json()
+
+
+def _training_effect_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
+    """Aerobic vs anaerobic training effect per session (Garmin's 0-5 scale) —
+    shows whether recent training is building base fitness or high-intensity
+    stimulus, and whether the balance matches intent."""
+    if not rows:
+        return "{}"
+    x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
+    base = alt.Chart(alt.Data(values=rows))
+    aerobic = base.mark_point(size=50, opacity=0.8, color="#4e9af1", filled=True).encode(
+        x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
+        y=alt.Y("training_effect_aerobic:Q", title="Training effect (0-5)",
+                scale=alt.Scale(domain=[0, 5])),
+        tooltip=[alt.Tooltip("date:T", title="Date"),
+                 alt.Tooltip("training_effect_aerobic:Q", title="Aerobic", format=".1f")],
+    )
+    anaerobic = base.mark_point(size=50, opacity=0.8, color="#e76f51", filled=True).encode(
+        x=alt.X("date:T", scale=x_scale),
+        y=alt.Y("training_effect_anaerobic:Q", scale=alt.Scale(domain=[0, 5])),
+        tooltip=[alt.Tooltip("date:T", title="Date"),
+                 alt.Tooltip("training_effect_anaerobic:Q", title="Anaerobic", format=".1f")],
+    )
+    return _dark(
+        alt.layer(aerobic, anaerobic).properties(
+            width="container", height=220,
+            title="Training effect — blue = aerobic, orange = anaerobic",
+        ),
+        title=True,
+    ).to_json()
+
+
 # ── login ─────────────────────────────────────────────────────────────────────
 
 @router.get("/login", response_class=HTMLResponse)
@@ -1828,6 +1886,13 @@ async def activities(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
+        training_effect_rows = _rows(conn, """
+            SELECT date, training_effect_aerobic, training_effect_anaerobic FROM activities
+            WHERE date >= date('now', ?)
+              AND (training_effect_aerobic IS NOT NULL OR training_effect_anaerobic IS NOT NULL)
+            ORDER BY date
+        """, (clause,))
+
     # Compute pace (min/km) and rolling 4-week avg in Python
     pace_rows = []
     for r in pace_raw:
@@ -1843,6 +1908,18 @@ async def activities(request: Request, days: str = "30",
 
     # HR efficiency: runs with both avg_hr and pace
     hr_eff_rows = [r for r in pace_rows if r.get("avg_hr")]
+
+    # Efficiency Factor: speed (m/min) per bpm, trended across all runs regardless
+    # of pace — complements running-economy's band-filtered view, which only
+    # covers near-median-pace days and so throws away most sessions.
+    ef_rows = []
+    for r in hr_eff_rows:
+        speed_m_per_min = (r["distance_km"] * 1000) / r["duration_min"]
+        ef_rows.append({**r, "ef": round(speed_m_per_min / r["avg_hr"], 3)})
+    window = 4
+    for i, r in enumerate(ef_rows):
+        window_vals = [p["ef"] for p in ef_rows[max(0, i - window + 1): i + 1]]
+        r["ef_4w_avg"] = round(sum(window_vals) / len(window_vals), 3)
 
     x_domain = _x_domain(days)
 
@@ -1862,6 +1939,8 @@ async def activities(request: Request, days: str = "30",
         "lt_hr_spec": _sparse_line_chart(lt_hr_rows, "lactate_threshold_hr", "LT heart rate (bpm)", color="#e76f51", x_domain=x_domain),
         "lt_pace_spec": _sparse_line_chart(lt_pace_rows, "lactate_threshold_pace_min_per_km", "LT pace (min/km)", color="#4e9af1", x_domain=x_domain),
         "ftp_spec": _sparse_line_chart(ftp_rows, "ftp_watts", "FTP (W)", color="#f4a261", x_domain=x_domain),
+        "ef_spec": _ef_chart(ef_rows, x_domain=x_domain),
+        "training_effect_spec": _training_effect_chart(training_effect_rows, x_domain=x_domain),
     })
 
 

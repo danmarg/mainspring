@@ -656,12 +656,15 @@ def rebuild_activities(conn) -> int:
 
     garmin_rows = conn.execute(
         "SELECT activity_id, date, start_time, type, duration_s, distance_m, "
-        "avg_hr, max_hr, calories, decoupling_pct FROM garmin_activities"
+        "avg_hr, max_hr, calories, decoupling_pct, "
+        "training_effect_aerobic, training_effect_anaerobic FROM garmin_activities"
     ).fetchall()
 
     gh_rows = conn.execute(
         "SELECT activity_id, date, start_time, type, duration_s, distance_m, "
-        "avg_hr, NULL as max_hr, calories, NULL as decoupling_pct FROM google_health_activities"
+        "avg_hr, NULL as max_hr, calories, NULL as decoupling_pct, "
+        "NULL as training_effect_aerobic, NULL as training_effect_anaerobic "
+        "FROM google_health_activities"
     ).fetchall()
 
     canonical_source_row = conn.execute(
@@ -729,17 +732,19 @@ def _find_match(
 
 
 def _insert_activity(conn, row: tuple, source: str, garmin_id: str | None, gh_id: str | None) -> None:
-    _, date_str, start_time, act_type, dur, dist, ahr, mhr, cal, decoupling_pct = row
+    (_, date_str, start_time, act_type, dur, dist, ahr, mhr, cal, decoupling_pct,
+     te_aerobic, te_anaerobic) = row
     conn.execute(
         """
         INSERT INTO activities (
             date, start_time, type, duration_s, distance_m,
             avg_hr, max_hr, calories, decoupling_pct,
+            training_effect_aerobic, training_effect_anaerobic,
             canonical_source, garmin_activity_id, google_health_activity_id
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (date_str, start_time, act_type, dur, dist, ahr, mhr, cal, decoupling_pct,
-         source, garmin_id, gh_id),
+         te_aerobic, te_anaerobic, source, garmin_id, gh_id),
     )
 
 
