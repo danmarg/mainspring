@@ -69,6 +69,12 @@ _ADDED_MANUAL_LOGS_COLUMNS = [
 ]
 
 
+_ADDED_ACTIVITIES_COLUMNS = [
+    ("training_effect_aerobic", "REAL"),
+    ("training_effect_anaerobic", "REAL"),
+]
+
+
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(daily_metrics)")}
     for col, col_type in _ADDED_DAILY_METRICS_COLUMNS:
@@ -79,6 +85,11 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     for col, col_type in _ADDED_MANUAL_LOGS_COLUMNS:
         if col not in existing:
             conn.execute(f"ALTER TABLE manual_logs ADD COLUMN {col} {col_type}")
+
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(activities)")}
+    for col, col_type in _ADDED_ACTIVITIES_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE activities ADD COLUMN {col} {col_type}")
 
     conn.commit()
 
