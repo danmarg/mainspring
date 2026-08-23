@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.db import db, DEFAULT_SOURCE_PRIORITY
-from app.readiness import alertness_curve, average_wake_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db, trimp_from_hr_samples
+from app.readiness import alertness_curve, average_wake_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db, trimp_from_hr_samples, zone_weighted_training_load_rows
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard")
@@ -1039,31 +1039,30 @@ def _ef_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
     ).to_json()
 
 
-def _training_effect_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
-    """Aerobic vs anaerobic training effect per session (Garmin's 0-5 scale) —
+def _training_load_chart(rows: list[dict], x_domain: list[str] | None = None) -> str:
+    """Self-computed aerobic vs anaerobic load per session (zone_weighted_training_load_rows) —
     shows whether recent training is building base fitness or high-intensity
-    stimulus, and whether the balance matches intent."""
+    stimulus, without depending on Garmin's proprietary training-effect score."""
     if not rows:
         return "{}"
     x_scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
     base = alt.Chart(alt.Data(values=rows))
     aerobic = base.mark_point(size=50, opacity=0.8, color="#4e9af1", filled=True).encode(
         x=alt.X("date:T", title=None, scale=x_scale, axis=alt.Axis(tickCount="day", format="%b %d")),
-        y=alt.Y("training_effect_aerobic:Q", title="Training effect (0-5)",
-                scale=alt.Scale(domain=[0, 5])),
+        y=alt.Y("aerobic_load:Q", title="Training load (points)", scale=alt.Scale(zero=True)),
         tooltip=[alt.Tooltip("date:T", title="Date"),
-                 alt.Tooltip("training_effect_aerobic:Q", title="Aerobic", format=".1f")],
+                 alt.Tooltip("aerobic_load:Q", title="Aerobic", format=".0f")],
     )
     anaerobic = base.mark_point(size=50, opacity=0.8, color="#e76f51", filled=True).encode(
         x=alt.X("date:T", scale=x_scale),
-        y=alt.Y("training_effect_anaerobic:Q", scale=alt.Scale(domain=[0, 5])),
+        y=alt.Y("anaerobic_load:Q", scale=alt.Scale(zero=True)),
         tooltip=[alt.Tooltip("date:T", title="Date"),
-                 alt.Tooltip("training_effect_anaerobic:Q", title="Anaerobic", format=".1f")],
+                 alt.Tooltip("anaerobic_load:Q", title="Anaerobic", format=".0f")],
     )
     return _dark(
         alt.layer(aerobic, anaerobic).properties(
             width="container", height=220,
-            title="Training effect — blue = aerobic, orange = anaerobic",
+            title="Training load — blue = aerobic (zones 1-3), orange = anaerobic (zones 4-5)",
         ),
         title=True,
     ).to_json()
@@ -1886,12 +1885,7 @@ async def activities(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
-        training_effect_rows = _rows(conn, """
-            SELECT date, training_effect_aerobic, training_effect_anaerobic FROM activities
-            WHERE date >= date('now', ?)
-              AND (training_effect_aerobic IS NOT NULL OR training_effect_anaerobic IS NOT NULL)
-            ORDER BY date
-        """, (clause,))
+        training_load_rows = zone_weighted_training_load_rows(conn, clause)
 
     # Compute pace (min/km) and rolling 4-week avg in Python
     pace_rows = []
@@ -1940,7 +1934,7 @@ async def activities(request: Request, days: str = "30",
         "lt_pace_spec": _sparse_line_chart(lt_pace_rows, "lactate_threshold_pace_min_per_km", "LT pace (min/km)", color="#4e9af1", x_domain=x_domain),
         "ftp_spec": _sparse_line_chart(ftp_rows, "ftp_watts", "FTP (W)", color="#f4a261", x_domain=x_domain),
         "ef_spec": _ef_chart(ef_rows, x_domain=x_domain),
-        "training_effect_spec": _training_effect_chart(training_effect_rows, x_domain=x_domain),
+        "training_load_spec": _training_load_chart(training_load_rows, x_domain=x_domain),
     })
 
 

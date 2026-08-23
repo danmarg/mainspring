@@ -45,6 +45,11 @@ def _drop_legacy_columns(conn: sqlite3.Connection) -> None:
     for col in ("readiness_score",):
         if col in existing:
             conn.execute(f"ALTER TABLE daily_metrics DROP COLUMN {col}")
+
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(activities)")}
+    for col in ("training_effect_aerobic", "training_effect_anaerobic"):
+        if col in existing:
+            conn.execute(f"ALTER TABLE activities DROP COLUMN {col}")
     conn.commit()
 
 
@@ -69,12 +74,6 @@ _ADDED_MANUAL_LOGS_COLUMNS = [
 ]
 
 
-_ADDED_ACTIVITIES_COLUMNS = [
-    ("training_effect_aerobic", "REAL"),
-    ("training_effect_anaerobic", "REAL"),
-]
-
-
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(daily_metrics)")}
     for col, col_type in _ADDED_DAILY_METRICS_COLUMNS:
@@ -85,11 +84,6 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     for col, col_type in _ADDED_MANUAL_LOGS_COLUMNS:
         if col not in existing:
             conn.execute(f"ALTER TABLE manual_logs ADD COLUMN {col} {col_type}")
-
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(activities)")}
-    for col, col_type in _ADDED_ACTIVITIES_COLUMNS:
-        if col not in existing:
-            conn.execute(f"ALTER TABLE activities ADD COLUMN {col} {col_type}")
 
     conn.commit()
 

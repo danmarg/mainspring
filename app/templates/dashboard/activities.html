@@ -36,10 +36,10 @@
 </div>
 {% endif %}
 
-{% if training_effect_spec != '{}' %}
+{% if training_load_spec != '{}' %}
 <div class="chart-block">
-  <h3>Training effect <span style="color:#888;font-size:0.72rem">— Garmin 0-5 scale, blue = aerobic, orange = anaerobic</span></h3>
-  <div class="vega-wrap" id="training-effect-chart"></div>
+  <h3>Training load <span style="color:#888;font-size:0.72rem">— self-computed from per-zone time, blue = aerobic (zones 1-3), orange = anaerobic (zones 4-5)</span></h3>
+  <div class="vega-wrap" id="training-load-chart"></div>
 </div>
 {% endif %}
 
@@ -131,6 +131,6 @@ embed('lt-hr-chart',    {{ lt_hr_spec|safe }});
 embed('lt-pace-chart',  {{ lt_pace_spec|safe }});
 embed('ftp-chart',      {{ ftp_spec|safe }});
 embed('ef-chart',       {{ ef_spec|safe }});
-embed('training-effect-chart', {{ training_effect_spec|safe }});
+embed('training-load-chart', {{ training_load_spec|safe }});
 </script>
 {% endblock %}
