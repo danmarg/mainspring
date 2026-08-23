@@ -82,8 +82,6 @@ CREATE TABLE IF NOT EXISTS activities (
   max_hr                    INTEGER,
   calories                  INTEGER,
   decoupling_pct            REAL,
-  training_effect_aerobic   REAL,
-  training_effect_anaerobic REAL,
   canonical_source          TEXT,
   garmin_activity_id        TEXT,
   google_health_activity_id TEXT

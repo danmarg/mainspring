@@ -369,6 +369,46 @@ def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, wind
     }
 
 
+# Exponential multipliers approximating Banister TRIMP's HRR-exponential shape,
+# applied to real per-zone time (activity_hr_zones) instead of Garmin's proprietary
+# training-effect score — self-computed so it doesn't depend on Garmin's algorithm.
+_ZONE_LOAD_WEIGHTS = {1: 1.0, 2: 1.5, 3: 2.5, 4: 4.0, 5: 6.0}
+
+
+def zone_weighted_training_load_rows(conn: sqlite3.Connection, since_clause: str) -> list[dict]:
+    """
+    Per-activity aerobic (zones 1-3) vs anaerobic (zones 4-5) load, in points,
+    using real per-zone time so an interval session's recovery jogs don't get
+    averaged into a misleadingly moderate score. Substitutes for Garmin's
+    training-effect chart with a number we compute ourselves; not on Garmin's
+    0-5 scale, so treat it as relative (session-to-session, week-to-week)
+    rather than an absolute target.
+    """
+    rows = conn.execute(
+        """SELECT a.garmin_activity_id, a.date, z.zone, z.seconds
+           FROM activities a
+           JOIN activity_hr_zones z ON z.activity_id = a.garmin_activity_id
+           WHERE a.date >= date('now', ?)""",
+        (since_clause,),
+    ).fetchall()
+
+    by_activity: dict[str, dict] = {}
+    for activity_id, date_str, zone, seconds in rows:
+        if not seconds:
+            continue
+        entry = by_activity.setdefault(activity_id, {"date": date_str, "aerobic": 0.0, "anaerobic": 0.0})
+        points = (seconds / 60.0) * _ZONE_LOAD_WEIGHTS.get(int(zone), 0.0)
+        if int(zone) <= 3:
+            entry["aerobic"] += points
+        else:
+            entry["anaerobic"] += points
+
+    return [
+        {"date": v["date"], "aerobic_load": round(v["aerobic"], 1), "anaerobic_load": round(v["anaerobic"], 1)}
+        for v in sorted(by_activity.values(), key=lambda v: v["date"])
+    ]
+
+
 def compute_readiness(
     hrv: float | None,
     hrv_7d: float | None,
