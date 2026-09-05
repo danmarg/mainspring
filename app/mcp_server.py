@@ -1292,11 +1292,14 @@ planning, and recommendations. The server never fetches weather or sends message
       TSB/HRV look fine — it's an earlier, run-specific signal they don't carry
    j. illness_risk.level: thresholds are already scaled to this person's own trailing
       variability (not a flat cutoff), so treat the levels as calibrated, not raw noise —
-      but weight them by count, not by label alone. "yellow" (a single signal) is common
+      but weight them by count and same-night concordance, not by label alone. "yellow"
+      (a single signal, or several signals spread across different nights) is common
       and NOT a reason on its own to downgrade toward easy/rest — let TSB/HRV/sleep drive
-      the call as usual. Only "red" (2+ concordant or cascading signals within the
-      trailing 3 days, still active as of today) should bias toward easy/rest, and even
-      then as one input among the others above, not an override or a hard veto
+      the call as usual. Only "red" (2+ signals crossing threshold on the SAME night,
+      still active as of today) should bias toward easy/rest, and even then as one input
+      among the others above, not an override or a hard veto — it's not a diagnosis, and
+      is at least as often explained by poor sleep, heat, dehydration, or ordinary
+      training/life stress as by actual illness
    k. Garmin suggestion as a secondary input, not the primary driver
 
 ---
@@ -1314,8 +1317,8 @@ planning, and recommendations. The server never fetches weather or sends message
 | body_battery_high | >70 | 40–70 | <40 suggests poor recovery |
 | sleep_regularity.score | >80 | 50–80 | <50 → bed/wake times swinging 2h+, a recovery drag on its own |
 | recovery_hours | 0 (ready now) | a few hours left | still elapsing → favour easy/rest until it hits 0 |
-| skin_temp_deviation | near 0°C | ±0.3°C | >0.5°C above baseline → possible illness, treat other signals cautiously |
-| illness_risk.level | green/None | yellow (1 signal — informational only, don't act on it alone) | red (2+ concordant/cascading signals, still active) → bias toward easy/rest |
+| skin_temp_deviation | near 0°C | ±0.3°C | >0.5°C above baseline → elevated, could be illness, poor sleep, heat, or dehydration — treat other signals cautiously |
+| illness_risk.level | green/None | yellow (1 signal, or 2+ non-concordant across the window — informational only, don't act on it alone) | red (2+ signals concordant on the SAME night, still active) → bias toward easy/rest. Not a diagnosis — as often driven by poor sleep, heat, dehydration, or ordinary stress as by illness |
 | training_monotony_strain.monotony | ≤1.5 | 1.5–2.0 | >2.0 → "elevated" band, force contrast into the week |
 | intensity_distribution.moderate_pct | <20% | 20–30% | >30% → grey_zone_flag, drifted off polarized training |
 | decoupling_trend.direction | improving/stable | — | worsening → back off intensity |

@@ -277,16 +277,20 @@ def test_compute_illness_risk_red_requires_two_signals_same_day():
     assert len(result["signals"]) == 2
 
 
-def test_compute_illness_risk_red_for_cascade_across_days():
+def test_compute_illness_risk_cascade_across_days_stays_yellow():
     """RHR elevated day 1, skin temp elevated day 2, HRV suppressed day 3 — none
-    concordant on a single day, but the trailing window should still catch it."""
+    concordant on a single day. This used to escalate to red on total count
+    alone, but that over-alerted in practice (3 independent noisy metrics hit
+    "2+ somewhere in 3 days" often by chance) — it should surface as yellow,
+    with all 3 signals visible for context, not read as the stronger same-night
+    claim "red" is reserved for."""
     days = [
         _day("2026-01-01", rhr=54.0),
         _day("2026-01-02", skin_temp=0.5),
         _day("2026-01-03", hrv=50.0),
     ]
     result = compute_illness_risk(days)
-    assert result["level"] == "red"
+    assert result["level"] == "yellow"
     assert len(result["signals"]) == 3
 
 
@@ -340,22 +344,26 @@ def test_compute_illness_risk_downgrades_when_two_signals_reverted():
     assert len(result["signals"]) == 2  # still visible for context
 
 
-def test_compute_illness_risk_stays_red_when_cascade_still_active_today():
-    """The genuine cascade case (RHR day 1, skin temp day 2, HRV day 3) must
-    stay red — today's HRV signal being part of the cascade keeps it active,
-    unlike the fully-reverted case above."""
+def test_compute_illness_risk_active_cascade_still_not_red():
+    """A cascade (RHR day 1, skin temp day 2, HRV day 3) with today's HRV signal
+    still active is NOT red — cascades never concordant on a single night
+    don't meet the same-night-concordance bar red requires, regardless of
+    whether the most recent trigger is still active."""
     days = [
         _day("2026-01-01", rhr=54.0),
         _day("2026-01-02", skin_temp=0.5),
         _day("2026-01-03", hrv=50.0),  # today — still an active trigger
     ]
     result = compute_illness_risk(days)
-    assert result["level"] == "red"
+    assert result["level"] == "yellow"
 
 
 # ── illness_risk_from_db integration ────────────────────────────────────────
 
-def test_illness_risk_from_db_flags_cascade_within_window():
+def test_illness_risk_from_db_cascade_within_window_stays_yellow():
+    """RHR up on day 1, skin temp up on day 2, HRV down on day 3 — no two
+    signals concordant on the same night, so this stays yellow (informational)
+    rather than escalating to red; all 3 signals still surface for context."""
     conn = sqlite3.connect(str(db_module.DB_PATH))
     for d in ["2025-06-01", "2025-06-02", "2025-06-03", "2025-06-04",
               "2025-06-05", "2025-06-06", "2025-06-07"]:
@@ -378,8 +386,36 @@ def test_illness_risk_from_db_flags_cascade_within_window():
     result = illness_risk_from_db(conn, "2025-06-10")
     conn.close()
 
-    assert result["level"] == "red"
+    assert result["level"] == "yellow"
     assert len(result["signals"]) == 3
+
+
+def test_illness_risk_from_db_red_when_same_night_concordant_and_active():
+    """RHR and skin temp both cross threshold on the same night, and that
+    night is today — this is the same-night concordance red requires."""
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    for d in ["2025-06-01", "2025-06-02", "2025-06-03", "2025-06-04",
+              "2025-06-05", "2025-06-06", "2025-06-07"]:
+        conn.execute(
+            "INSERT INTO daily_metrics(date, resting_hr, hrv, source_flags_json) VALUES (?,?,?,?)",
+            (d, 50.0, 60.0, "{}"),
+        )
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, hrv, skin_temp_deviation, source_flags_json) "
+        "VALUES (?,?,?,?,?)", ("2025-06-08", 50.0, 60.0, 0.0, "{}"))
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, hrv, skin_temp_deviation, source_flags_json) "
+        "VALUES (?,?,?,?,?)", ("2025-06-09", 50.0, 60.0, 0.0, "{}"))
+    conn.execute(
+        "INSERT INTO daily_metrics(date, resting_hr, hrv, skin_temp_deviation, source_flags_json) "
+        "VALUES (?,?,?,?,?)", ("2025-06-10", 54.0, 60.0, 0.5, "{}"))  # today: both trigger
+    conn.commit()
+
+    result = illness_risk_from_db(conn, "2025-06-10")
+    conn.close()
+
+    assert result["level"] == "red"
+    assert len(result["signals"]) == 2
 
 
 def test_illness_risk_from_db_downgrades_reverted_single_day_double_trigger():
