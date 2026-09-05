@@ -659,11 +659,23 @@ def compute_illness_risk(
     days: list[dict],
 ) -> dict:
     """
-    days: list of {date, rhr, rhr_baseline, hrv, hrv_baseline, skin_temp_deviation},
-    most recent last. Missing values are fine (per-field None).
+    days: list of {date, rhr, rhr_baseline, rhr_sd, hrv, hrv_baseline, hrv_log_sd,
+    skin_temp_deviation}, most recent last. `rhr_sd`/`hrv_log_sd` are the trailing-
+    baseline-window standard deviations (constant across days, like the baselines
+    themselves) and are optional — missing/zero falls back to a fixed threshold.
 
     Returns {level: "green"|"yellow"|"red"|None, label, color, detail, signals}
     where signals is a list of the individual triggers found in the window.
+
+    Triggers are relative to each person's own trailing variability, not a flat
+    cutoff, because a flat bpm/ratio threshold reads as "possible illness" for
+    someone whose day-to-day RHR/HRV noise is simply larger than that cutoff —
+    that's the over-alerting failure mode this guards against. A day only
+    triggers when it's an unusual outlier *for this person* (>= Z_THRESHOLD
+    trailing SDs from their own baseline), falling back to the flat threshold
+    only when there isn't enough baseline variability data to estimate an SD
+    (as opposed to a genuinely stable baseline, where a real SD of ~0 makes the
+    z-score comparison correctly stricter, not undefined).
 
     The window is scanned for triggers on any day, and severity (red needs 2+
     distinct signals, yellow needs 1) is based on the total found anywhere in
@@ -675,9 +687,10 @@ def compute_illness_risk(
     two-signal blip on one past day doesn't read as an active state days after
     it passed. A past-only trigger still surfaces in `detail`/`signals` either way.
     """
-    RHR_DELTA_BPM = 3.0       # bpm above baseline
-    HRV_RATIO = 0.90          # fraction of baseline
-    SKIN_TEMP_C = 0.3         # degrees C above personal baseline
+    Z_THRESHOLD = 1.5        # trailing SDs from personal baseline to count as a trigger
+    RHR_DELTA_BPM = 3.0       # fallback: bpm above baseline, used only if rhr_sd is unavailable
+    HRV_RATIO = 0.90          # fallback: fraction of baseline, used only if hrv_log_sd is unavailable
+    SKIN_TEMP_C = 0.3         # degrees C above personal baseline (already baseline-relative upstream)
 
     triggers: dict[str, dict] = {}  # signal name -> first/strongest trigger found
     most_recent_date = days[-1].get("date") if days else None
@@ -701,18 +714,22 @@ def compute_illness_risk(
         is_today = d == most_recent_date
 
         rhr, rhr_base = day.get("rhr"), day.get("rhr_baseline")
+        rhr_sd = day.get("rhr_sd")
         if rhr is not None and rhr_base:
             delta = rhr - rhr_base
-            if delta >= RHR_DELTA_BPM:
+            threshold = Z_THRESHOLD * rhr_sd if rhr_sd else RHR_DELTA_BPM
+            if delta >= threshold:
                 if "Resting HR" not in triggers:
                     triggers["Resting HR"] = {"date": d, "detail": f"Resting HR +{delta:.0f}bpm vs baseline ({_recency(d)})"}
                 if is_today:
                     active_today.add("Resting HR")
 
         hrv, hrv_base = day.get("hrv"), day.get("hrv_baseline")
+        hrv_log_sd = day.get("hrv_log_sd")
         if hrv is not None and hrv_base:
             ratio = hrv / hrv_base
-            if ratio <= HRV_RATIO:
+            threshold_ratio = math.exp(-Z_THRESHOLD * hrv_log_sd) if hrv_log_sd else HRV_RATIO
+            if ratio <= threshold_ratio:
                 if "HRV" not in triggers:
                     triggers["HRV"] = {"date": d, "detail": f"HRV {ratio*100:.0f}% of baseline ({_recency(d)})"}
                 if is_today:
@@ -789,13 +806,24 @@ def illness_risk_from_db(conn: sqlite3.Connection, date_str: str | None = None, 
     hrv_baseline = sum(hrv_values) / len(hrv_values) if hrv_values else None
     rhr_baseline = sum(rhr_values) / len(rhr_values) if rhr_values else None
 
+    # Trailing-window SDs, used to scale triggers to this person's own noise
+    # (see compute_illness_risk). Need >=4 samples for either to be meaningful,
+    # same floor as _ln_rmssd_cv.
+    rhr_sd = None
+    if len(rhr_values) >= 4:
+        rhr_mean = rhr_baseline
+        rhr_sd = math.sqrt(sum((v - rhr_mean) ** 2 for v in rhr_values) / len(rhr_values))
+    hrv_log_sd = _ln_rmssd_cv(hrv_values)
+
     days = [
         {
             "date": r[0],
             "rhr": r[1],
             "rhr_baseline": rhr_baseline,
+            "rhr_sd": rhr_sd,
             "hrv": r[2],
             "hrv_baseline": hrv_baseline,
+            "hrv_log_sd": hrv_log_sd,
             "skin_temp_deviation": r[3],
         }
         for r in window_rows
