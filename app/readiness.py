@@ -641,14 +641,20 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
 #     Reference: Kamišalić, A. et al. (2022). "The role of wearable devices
 #     in detecting SARS-CoV-2: A systematic review." IJERPH / PMC9020803.
 #
-#   - The signals don't move together — they cascade over a few days rather
-#     than all shifting on the same day (RHR first, skin temp next, HRV
-#     later, symptoms after). That pattern is well-documented in consumer
-#     wearable illness-detection write-ups but not itself peer-reviewed, so
-#     it's treated here as a design constraint rather than a cited finding:
-#     requiring same-day concordance across all three signals would miss it,
-#     so this looks for signals crossing threshold at any point within a
-#     trailing window instead of on a single day.
+#   - The signals don't always move together — they can cascade over a few
+#     days rather than all shifting on the same day (RHR first, skin temp
+#     next, HRV later, symptoms after). That pattern is well-documented in
+#     consumer wearable illness-detection write-ups but not itself peer-
+#     reviewed, so a slower cascade across the trailing window still
+#     surfaces (in `signals`/`detail`) rather than being discarded. But it
+#     caps at "yellow" rather than "red": in practice, requiring only *some*
+#     2+ signals anywhere in a 3-day window (rather than concordant on the
+#     same night) turned out to over-alert in the field — three fairly
+#     independent metrics each have their own day-to-day noise, so "2+
+#     somewhere in 3 days" is hit by chance far more often than "2+ on the
+#     same night" is, without being meaningfully better evidence of an
+#     actual physiological event. Same-night concordance is the harder,
+#     more specific bar reserved for "red".
 #
 # Each signal is evaluated against the athlete's own trailing baseline (same
 # 7-day HRV/RHR baselines as compute_readiness, methodology-matched via the
@@ -677,15 +683,23 @@ def compute_illness_risk(
     (as opposed to a genuinely stable baseline, where a real SD of ~0 makes the
     z-score comparison correctly stricter, not undefined).
 
-    The window is scanned for triggers on any day, and severity (red needs 2+
-    distinct signals, yellow needs 1) is based on the total found anywhere in
-    the window — that's what makes a genuine cascade (RHR up day 1, skin temp
-    up day 2, HRV down day 3, none concordant on a single day) still read red.
-    But if *none* of those triggers are still active on the most recent day —
-    everything that crossed threshold has since reverted — the level is capped
-    at yellow with a distinct "resolved" label instead of red/yellow, so a
-    two-signal blip on one past day doesn't read as an active state days after
-    it passed. A past-only trigger still surfaces in `detail`/`signals` either way.
+    Red requires same-day concordance: 2+ signals crossing threshold on the
+    exact same night, not merely somewhere within the trailing window. An
+    earlier version treated any 2+ signals found anywhere in the window as
+    red, including a slow cascade (RHR up day 1, skin temp up day 2, HRV down
+    day 3, none concordant on a single day) — that reads as a strong claim
+    ("possible stress/illness") from evidence that's actually just multiple
+    separate, weaker single-signal observations. Same-day concordance is
+    harder to produce by chance across three fairly independent metrics, so
+    it's a meaningfully stronger claim than a cascade and is the only thing
+    that should carry the "red" label. A non-concordant cascade still counts
+    toward `signals`/`detail` (context worth surfacing) but caps at yellow.
+
+    If the concordant day's signals aren't still active as of the most recent
+    day — everything has since reverted — the level is capped at yellow with
+    a distinct "resolved" label instead of red, so a same-day double-trigger
+    on a past day doesn't read as an active state days after it passed. A
+    past-only trigger still surfaces in `detail`/`signals` either way.
     """
     Z_THRESHOLD = 1.5        # trailing SDs from personal baseline to count as a trigger
     RHR_DELTA_BPM = 3.0       # fallback: bpm above baseline, used only if rhr_sd is unavailable
@@ -695,6 +709,7 @@ def compute_illness_risk(
     triggers: dict[str, dict] = {}  # signal name -> first/strongest trigger found
     most_recent_date = days[-1].get("date") if days else None
     active_today: set[str] = set()  # signal names currently crossed on most_recent_date
+    day_signals: dict[str, set[str]] = {}  # date -> signal names triggered that day
 
     def _recency(d: str | None) -> str:
         if not d or not most_recent_date:
@@ -721,6 +736,7 @@ def compute_illness_risk(
             if delta >= threshold:
                 if "Resting HR" not in triggers:
                     triggers["Resting HR"] = {"date": d, "detail": f"Resting HR +{delta:.0f}bpm vs baseline ({_recency(d)})"}
+                day_signals.setdefault(d, set()).add("Resting HR")
                 if is_today:
                     active_today.add("Resting HR")
 
@@ -732,6 +748,7 @@ def compute_illness_risk(
             if ratio <= threshold_ratio:
                 if "HRV" not in triggers:
                     triggers["HRV"] = {"date": d, "detail": f"HRV {ratio*100:.0f}% of baseline ({_recency(d)})"}
+                day_signals.setdefault(d, set()).add("HRV")
                 if is_today:
                     active_today.add("HRV")
 
@@ -739,6 +756,7 @@ def compute_illness_risk(
         if skin_temp is not None and skin_temp >= SKIN_TEMP_C:
             if "Skin temp" not in triggers:
                 triggers["Skin temp"] = {"date": d, "detail": f"Skin temp +{skin_temp:.1f}°C vs baseline ({_recency(d)})"}
+            day_signals.setdefault(d, set()).add("Skin temp")
             if is_today:
                 active_today.add("Skin temp")
 
@@ -753,13 +771,24 @@ def compute_illness_risk(
     if not have_any_data:
         return {"level": None, "label": "No data", "color": "#888", "detail": "", "signals": []}
 
-    if n >= 1 and n_today == 0:
+    concordant_days = [d for d, sigs in day_signals.items() if len(sigs) >= 2]
+    # A concordant day only counts as still "active" if its own signals (not
+    # some other unrelated signal that happens to be active today) are still
+    # crossed as of the most recent day — otherwise a same-night double
+    # trigger from days ago would read as red forever just because something
+    # else, unrelated, is mildly elevated today.
+    concordant_still_active = any(
+        d == most_recent_date or (day_signals[d] & active_today)
+        for d in concordant_days
+    )
+
+    if concordant_still_active:
+        level, label, color = "red", "Elevated recovery signal", "#e74c3c"
+    elif n >= 1 and n_today == 0:
         # Everything that crossed threshold in the window has since reverted —
         # don't read as an active state days after it passed.
         level, label, color = "yellow", "Recent deviation (resolved)", "#f39c12"
-    elif n >= 2:
-        level, label, color = "red", "Possible stress/illness signal", "#e74c3c"
-    elif n == 1:
+    elif n >= 1:
         level, label, color = "yellow", "Mild deviation", "#f39c12"
     else:
         level, label, color = "green", "Normal range", "#2ecc71"
