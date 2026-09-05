@@ -297,6 +297,27 @@ def test_compute_illness_risk_no_data_when_no_baselines():
     assert result["level"] is None
 
 
+def test_compute_illness_risk_noisy_baseline_not_flagged_by_small_delta():
+    """Someone with naturally noisy RHR (sd=4bpm) shouldn't trip the fixed
+    +3bpm cutoff — that's exactly the over-alerting the SD-relative
+    threshold (1.5x trailing SD) exists to fix."""
+    day = _day("2026-01-01", rhr=54.0)  # +4bpm, would trigger under the old flat rule
+    day["rhr_sd"] = 4.0  # 1.5 * 4.0 = 6bpm threshold, so +4bpm shouldn't trigger
+    result = compute_illness_risk([day])
+    assert result["level"] == "green"
+    assert result["signals"] == []
+
+
+def test_compute_illness_risk_stable_baseline_flagged_by_small_delta():
+    """Someone with a very stable RHR (sd=1bpm) should be flagged by a
+    smaller absolute delta than the flat +3bpm default would require."""
+    day = _day("2026-01-01", rhr=52.0)  # +2bpm, below the old flat +3bpm cutoff
+    day["rhr_sd"] = 1.0  # 1.5 * 1.0 = 1.5bpm threshold, so +2bpm should trigger
+    result = compute_illness_risk([day])
+    assert result["level"] == "yellow"
+    assert len(result["signals"]) == 1
+
+
 def test_compute_illness_risk_hard_training_day_not_flagged_by_rhr_alone():
     """A single elevated RHR from hard training shouldn't read as 'possible
     illness' on its own — that's exactly why red requires 2+ concordant signals."""
