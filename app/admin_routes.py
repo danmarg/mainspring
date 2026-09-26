@@ -1,7 +1,7 @@
 import logging
 import os
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -30,6 +30,35 @@ _import_auth = _require_token("ADMIN_TOKEN")
 _export_auth = _require_token("EXPORT_TOKEN")
 
 MORNING_WEBHOOK_EARLIEST_HOUR = int(os.getenv("MORNING_WEBHOOK_EARLIEST_HOUR", "5"))
+WAKE_CONFIRM_WINDOW_MIN = int(os.getenv("MORNING_WEBHOOK_CONFIRM_WINDOW_MIN", "20"))
+WAKE_CONFIRM_HR_MARGIN = float(os.getenv("MORNING_WEBHOOK_CONFIRM_HR_MARGIN", "8"))
+
+
+def _recently_active(conn, today: str) -> bool | None:
+    """Whether recent intraday HR shows the user is actually up and moving,
+    vs. still resting — distinguishes a real wake-up from a brief nighttime
+    wake that made Garmin finalize sleepEndTimestampLocal early (e.g. a
+    bathroom trip at 5am) before going back to sleep. Returns None when there
+    isn't enough recent data to judge (e.g. import ran right as they woke,
+    before the watch has synced fresh samples, or resting_hr hasn't resolved
+    yet) — callers should not block firing on a None, only on an explicit
+    False, since missing data is common and shouldn't suppress a real wake.
+    """
+    resting_hr, _ = resolve_metric(conn, today, "resting_hr")
+    if resting_hr is None:
+        return None
+
+    window_start = (datetime.now(timezone.utc) - timedelta(minutes=WAKE_CONFIRM_WINDOW_MIN)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    rows = conn.execute(
+        "SELECT bpm FROM intraday_hr WHERE ts >= ? ORDER BY ts", (window_start,)
+    ).fetchall()
+    if not rows:
+        return None
+
+    avg_bpm = sum(r[0] for r in rows) / len(rows)
+    return avg_bpm >= resting_hr + WAKE_CONFIRM_HR_MARGIN
 
 
 def _is_morning_locally(conn, today: str) -> bool:
@@ -43,6 +72,16 @@ def _is_morning_locally(conn, today: str) -> bool:
     absolute floor — never fire before it even if a detected wake_hour is
     implausibly early (bad sample, timezone glitch, etc) — and as the fallback
     heuristic when no wake_hour has resolved yet for today.
+
+    A detected wake_hour on its own still isn't enough: Garmin finalizes
+    sleepEndTimestampLocal on the first sustained movement, which a brief
+    nighttime wake (bathroom trip, checking the time) can trigger even though
+    the user goes right back to sleep for another hour or two. So once
+    wake_hour has passed, cross-check against recent intraday HR via
+    _recently_active — if it clearly shows them still at resting HR right
+    now, treat wake_hour as a false start rather than firing. Absence of
+    recent HR data (None) doesn't block firing, since that's the common case
+    right after a real wake, before fresh samples have synced.
     """
     row = conn.execute("SELECT tz FROM day_timezone WHERE date=?", (today,)).fetchone()
     tz_name = row[0] if row else HOME_TZ
@@ -58,7 +97,9 @@ def _is_morning_locally(conn, today: str) -> bool:
 
     wake_hour, _ = resolve_metric(conn, today, "sleep_wake_hour")
     if wake_hour is not None:
-        return local_now_hour >= wake_hour
+        if local_now_hour < wake_hour:
+            return False
+        return _recently_active(conn, today) is not False
 
     return True
 
