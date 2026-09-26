@@ -7,7 +7,7 @@ together. The fix claims the date via INSERT OR IGNORE (PRIMARY KEY) before
 firing, so only one of two concurrent-ish calls can win.
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -186,6 +186,72 @@ def test_waits_for_detected_wake_hour_past_floor(tmp_db):
 
     with patch("app.admin_routes.datetime") as mock_dt:
         mock_dt.now.return_value = _frozen_utc(8, 0)  # at detected wake time
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert _is_morning_locally(tmp_db, today) is True
+
+
+def _seed_resting_hr(conn, date_str: str, resting_hr: float, source: str = "garmin"):
+    conn.execute(
+        "INSERT INTO raw_daily_metrics(date, source, metric, value, fetched_at) VALUES (?,?,?,?,?)",
+        (date_str, source, "resting_hr", resting_hr, utc_now()),
+    )
+    conn.commit()
+
+
+def _seed_recent_hr(conn, minutes_ago_to_bpm: dict[int, float], now: datetime):
+    for minutes_ago, bpm in minutes_ago_to_bpm.items():
+        ts = (now - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute(
+            "INSERT INTO intraday_hr(ts, source, bpm) VALUES (?,?,?)", (ts, "garmin", bpm)
+        )
+    conn.commit()
+
+
+def test_brief_nighttime_wake_does_not_fire_if_still_resting(tmp_db):
+    """Garmin finalized sleepEndTimestampLocal at 5am (a bathroom trip), but
+    the user went right back to sleep — recent HR is still at resting level,
+    so the wake should be treated as a false start, not a real wake-up."""
+    today = "2026-08-08"
+    _set_day_tz(tmp_db, today)
+    _seed_wake_hour(tmp_db, today, 5.0)
+    _seed_resting_hr(tmp_db, today, 52.0)
+
+    now = _frozen_utc(5, 15)
+    _seed_recent_hr(tmp_db, {2: 51.0, 8: 53.0, 15: 50.0}, now)
+
+    with patch("app.admin_routes.datetime") as mock_dt:
+        mock_dt.now.return_value = now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert _is_morning_locally(tmp_db, today) is False
+
+
+def test_fires_once_recent_hr_confirms_actually_awake(tmp_db):
+    """Same false-start wake at 5am, but by 7am recent HR is clearly elevated
+    — the user is actually up now, so it should fire."""
+    today = "2026-08-08"
+    _set_day_tz(tmp_db, today)
+    _seed_wake_hour(tmp_db, today, 5.0)
+    _seed_resting_hr(tmp_db, today, 52.0)
+
+    now = _frozen_utc(7, 0)
+    _seed_recent_hr(tmp_db, {2: 78.0, 8: 82.0, 15: 75.0}, now)
+
+    with patch("app.admin_routes.datetime") as mock_dt:
+        mock_dt.now.return_value = now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert _is_morning_locally(tmp_db, today) is True
+
+
+def test_no_recent_hr_data_does_not_block_firing(tmp_db):
+    """No intraday HR synced yet right after a real wake shouldn't suppress
+    the webhook — absence of data isn't evidence of still sleeping."""
+    today = "2026-08-08"
+    _set_day_tz(tmp_db, today)
+    _seed_wake_hour(tmp_db, today, 7.0)
+    _seed_resting_hr(tmp_db, today, 52.0)
+
+    with patch("app.admin_routes.datetime") as mock_dt:
+        mock_dt.now.return_value = _frozen_utc(7, 0)
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
         assert _is_morning_locally(tmp_db, today) is True
 
