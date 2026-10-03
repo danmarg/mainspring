@@ -19,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 
 from app import auth
 from app.db import db, DEFAULT_SOURCE_PRIORITY
-from app.readiness import alertness_curve, average_wake_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db, trimp_from_hr_samples, zone_weighted_training_load_rows
+from app.readiness import alertness_curve, average_wake_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db, hr_ceiling, trimp_from_hr_samples, zone_weighted_training_load_rows
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard")
@@ -1363,8 +1363,10 @@ def overview(request: Request,
                 pass
 
     # Exercise boosts: (intensity 0-1, local end hour) per activity today.
-    # Intensity = RPE/10 if logged, else (avg_hr - resting_hr) / (190 - resting_hr).
+    # Intensity = RPE/10 if logged, else (avg_hr - resting_hr) / (max_hr - resting_hr),
+    # with the same personal HR ceiling the load model uses (not a flat 190).
     resting_hr_for_calc = float(today_row[2]) if today_row and today_row[2] else 55.0
+    max_hr_for_calc = hr_ceiling(conn, today)
     activity_boosts: list[tuple[float, float]] = []
     strain_events: list[tuple[float, float]] = []
     for index, act in enumerate(activity_rows):
@@ -1374,14 +1376,14 @@ def overview(request: Request,
         if today_rpe is not None:
             intensity = min(1.0, today_rpe / 10.0)
         elif act["avg_hr"] and act["avg_hr"] > 0:
-            denom = max(1.0, 190.0 - resting_hr_for_calc)
+            denom = max(1.0, max_hr_for_calc - resting_hr_for_calc)
             intensity = max(0.0, min(1.0, (act["avg_hr"] - resting_hr_for_calc) / denom))
         else:
             intensity = 0.4  # moderate default when no HR data
         if intensity >= 0.1:
             activity_boosts.append((intensity, end_h))
         trimp = trimp_from_hr_samples(activity_hr_samples[index], (act["duration_s"] or 0) / 60,
-                                      resting_hr_for_calc)
+                                      resting_hr_for_calc, max_hr_for_calc)
         if trimp is not None and wake_hour is not None:
             strain_events.append((trimp, (end_h - wake_hour) % 24))
 

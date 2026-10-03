@@ -162,7 +162,7 @@ def _sleep_debt_score(nights: list[tuple[str, float]], half_life_days: float = 2
     return weighted_sum / total_weight if total_weight > 0 else None
 
 
-def _hr_ceiling(conn: sqlite3.Connection, date_str: str) -> float:
+def hr_ceiling(conn: sqlite3.Connection, date_str: str) -> float:
     """HR ceiling for HRR-based load: the 95th percentile of daily max_hr over the
     trailing 180 days. The latest day's max_hr is often an easy/rest day at ~105-115
     bpm, which collapses heart-rate reserve and pins every session to the top weight;
@@ -179,6 +179,9 @@ def _hr_ceiling(conn: sqlite3.Connection, date_str: str) -> float:
         return 190.0
     peak = values[min(len(values) - 1, math.ceil(0.95 * (len(values) - 1)))]
     return float(peak) if peak >= 150 else 190.0
+
+
+_hr_ceiling = hr_ceiling  # back-compat alias
 
 
 def _daily_trimp(
@@ -242,7 +245,7 @@ def self_computed_load(conn: sqlite3.Connection, date_str: str) -> tuple[float |
     if not hr_row:
         return None, None
     resting_hr = hr_row[0]
-    max_hr = _hr_ceiling(conn, date_str)
+    max_hr = hr_ceiling(conn, date_str)
 
     daily_trimp = _daily_trimp(conn, window_start, date_str, resting_hr, max_hr)
     if not daily_trimp:
@@ -289,7 +292,7 @@ def training_monotony_strain(conn: sqlite3.Connection, date_str: str, window_day
     ).fetchone()
     if not hr_row:
         return {"monotony": None, "strain": None, "band": None, "detail": "insufficient HR data"}
-    resting_hr, max_hr = hr_row[0], _hr_ceiling(conn, date_str)
+    resting_hr, max_hr = hr_row[0], hr_ceiling(conn, date_str)
 
     daily_trimp = _daily_trimp(conn, window_start, date_str, resting_hr, max_hr)
     loads = [daily_trimp.get((as_of - timedelta(days=d)).isoformat(), 0.0) for d in range(window_days)]
