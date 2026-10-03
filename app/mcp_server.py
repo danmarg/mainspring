@@ -15,6 +15,8 @@ The login page lives at /mcp-auth/login on the main FastAPI app.
 
 import asyncio
 import functools
+from concurrent.futures import ThreadPoolExecutor
+import logging
 import json
 import math
 import os
@@ -26,6 +28,8 @@ from mcp.server import FastMCP
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 
 from app.db import db, get_connection, utc_now
+
+log = logging.getLogger(__name__)
 
 _base_url = os.getenv("APP_BASE_URL", "https://your-app.fly.dev")
 
@@ -71,6 +75,13 @@ mcp = FastMCP(
 
 _TOOL_CALL_LOG_RETENTION_DAYS = 30
 
+# Dedicated pools. The default asyncio executor is tiny (min(32, cpus+4) = 5 on
+# this 1-vCPU machine): a handful of write tools all waiting behind an import's
+# write lock would exhaust it and queue every later call — reads included.
+# Logging gets its own pool so diagnostics can never starve real tool calls.
+_TOOL_POOL = ThreadPoolExecutor(max_workers=32, thread_name_prefix="mcp-tool")
+_LOG_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mcp-log")
+
 
 def _write_tool_call_log(start, name, arguments, duration_ms, outcome, error, result) -> None:
     conn = get_connection()
@@ -94,6 +105,13 @@ def _write_tool_call_log(start, name, arguments, duration_ms, outcome, error, re
         conn.close()
 
 
+def _write_tool_call_log_safe(*args) -> None:
+    try:
+        _write_tool_call_log(*args)
+    except Exception:
+        pass  # diagnostics only; dropped on lock contention or any other failure
+
+
 def _install_tool_call_logging(server: FastMCP) -> None:
     original_call_tool = server._tool_manager.call_tool
 
@@ -112,9 +130,12 @@ def _install_tool_call_logging(server: FastMCP) -> None:
             duration_ms = (datetime.now(timezone.utc) - start).total_seconds() * 1000
             # Off the event loop, and best-effort: a write blocked behind an import
             # must neither freeze the server nor delay the tool's response.
+            # Fire-and-forget: not awaited, so even the 1s lock wait never delays
+            # the response (and a cancelled request doesn't abandon the row).
             try:
-                await asyncio.to_thread(
-                    _write_tool_call_log, start, name, arguments, duration_ms, outcome, error, result,
+                asyncio.get_running_loop().run_in_executor(
+                    _LOG_POOL, _write_tool_call_log_safe,
+                    start, name, arguments, duration_ms, outcome, error, result,
                 )
             except Exception:
                 pass  # diagnostic logging must never break the actual tool call
@@ -211,14 +232,23 @@ def _clean_and_prune(fn):
 
 
 def _renormalize_date(ts_iso: str) -> None:
-    """Run normalization for the UTC date of ts_iso so daily_metrics is immediately current."""
+    """Refresh daily_metrics for the UTC date of ts_iso so it's immediately current.
+
+    Deliberately only rebuild_daily_metrics for that one date — not the full
+    run_normalization. A manual log can't change day_timezone or activities, and
+    the full job deletes + rebuilds every activity and prunes raw payloads, all in
+    one write transaction: that made every log_hydration/weight/BP call slow and
+    lock-prone (a multi-second hold behind any import) for no benefit."""
     try:
-        from app.normalize import run_normalization
-        date_str = ts_iso[:10]
+        from app.normalize import rebuild_daily_metrics
+        # Aggregation buckets manual logs by SQL DATE(ts), which normalizes to UTC;
+        # slicing the raw string would miss the day for a non-UTC offset ts.
         with db() as conn:
-            run_normalization(conn, dates={date_str})
+            utc_date = conn.execute("SELECT DATE(?)", (ts_iso,)).fetchone()[0] or ts_iso[:10]
+            rebuild_daily_metrics(conn, dates={utc_date})
     except Exception:
-        pass  # normalization is best-effort; the next import run will catch it
+        # best-effort; the next import run's normalization will catch it
+        log.exception("renormalize after manual log failed for %s", ts_iso)
 
 
 # ── log tools ───────────────────────────────────────────────────────────────
@@ -1440,7 +1470,9 @@ def _offload_sync_tools(server: FastMCP) -> None:
         def make(fn):
             @functools.wraps(fn)
             async def run_in_thread(*args, **kwargs):
-                return await asyncio.to_thread(fn, *args, **kwargs)
+                return await asyncio.get_running_loop().run_in_executor(
+                    _TOOL_POOL, functools.partial(fn, *args, **kwargs)
+                )
             return run_in_thread
 
         tool.fn = make(tool.fn)
