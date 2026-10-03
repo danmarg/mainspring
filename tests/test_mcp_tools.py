@@ -532,3 +532,12 @@ async def test_tool_call_logging_records_exception_and_still_raises():
     assert row is not None
     assert row[1] == "error"
     assert "not_a_real_tool" in row[2] or "Unknown tool" in row[2]
+
+
+def test_sync_tools_are_offloaded_from_event_loop():
+    """FastMCP runs sync tools inline on the loop; _offload_sync_tools must have
+    wrapped every tool so a slow/lock-blocked call can't freeze /healthz."""
+    from app.mcp_server import mcp
+
+    tools = mcp._tool_manager._tools
+    assert tools and all(t.is_async for t in tools.values())

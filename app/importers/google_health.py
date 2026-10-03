@@ -124,6 +124,10 @@ def _refresh(conn, tokens: dict) -> dict:
 
 def _post(conn, path: str, body: dict, tokens: dict) -> Any | None:
     """POST to Google Health API, auto-refreshing on 401."""
+    # Release any write lock before the network call — sqlite3's implicit BEGIN holds
+    # it from the first INSERT until commit, which would otherwise span the HTTP
+    # round-trip and stall other writers (MCP logging tools).
+    conn.commit()
     for attempt in range(2):
         req = urllib.request.Request(
             f"{API_BASE}{path}",
@@ -165,6 +169,10 @@ def _post(conn, path: str, body: dict, tokens: dict) -> Any | None:
 
 def _get(conn, path: str, params: dict, tokens: dict) -> Any | None:
     """GET from Google Health API, auto-refreshing on 401."""
+    # Release any write lock before the network call — sqlite3's implicit BEGIN holds
+    # it from the first INSERT until commit, which would otherwise span the HTTP
+    # round-trip and stall other writers (MCP logging tools).
+    conn.commit()
     for attempt in range(2):
         query = urllib.parse.urlencode(params)
         req = urllib.request.Request(

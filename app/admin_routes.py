@@ -196,7 +196,7 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
 
 
 @router.post("/import/garmin", dependencies=[Depends(_import_auth)])
-async def import_garmin(
+def import_garmin(
     background_tasks: BackgroundTasks,
     days: int = Query(default=7, ge=1, le=3650),
     start_date: date | None = Query(default=None),
@@ -220,7 +220,7 @@ async def import_garmin(
 
 
 @router.get("/import/status/{run_id}", dependencies=[Depends(_import_auth)])
-async def import_status(run_id: int):
+def import_status(run_id: int):
     with db() as conn:
         row = conn.execute(
             "SELECT source, started_at, finished_at, status, rows_upserted, error "
@@ -242,7 +242,7 @@ async def import_status(run_id: int):
 
 
 @router.post("/google_health/init_tokens", dependencies=[Depends(_import_auth)])
-async def google_health_init_tokens(body: dict):
+def google_health_init_tokens(body: dict):
     """Store initial Google Health OAuth tokens from google_health_get_tokens.py output."""
     access_token = body.get("access_token")
     refresh_token = body.get("refresh_token")
@@ -266,7 +266,7 @@ async def google_health_init_tokens(body: dict):
 
 
 @router.post("/import/google_health", dependencies=[Depends(_import_auth)])
-async def import_google_health(
+def import_google_health(
     background_tasks: BackgroundTasks,
     days: int = Query(default=7, ge=1, le=3650),
     start_date: date | None = Query(default=None),
@@ -289,14 +289,14 @@ async def import_google_health(
 
 
 @router.get("/calibration/energy", dependencies=[Depends(_import_auth)])
-async def energy_calibration_status():
+def energy_calibration_status():
     """Return the latest suggestion; this endpoint never changes the live model."""
     from app.calibration import latest_energy_calibration
     return latest_energy_calibration() or {"status": "not_run"}
 
 
 @router.get("/export/db", dependencies=[Depends(_export_auth)])
-async def export_db():
+def export_db():
     import sqlite3
     import tempfile
     from pathlib import Path

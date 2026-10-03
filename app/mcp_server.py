@@ -13,6 +13,7 @@ built-in auth machinery (MainspringOAuthProvider in mcp_oauth.py).
 The login page lives at /mcp-auth/login on the main FastAPI app.
 """
 
+import asyncio
 import functools
 import json
 import math
@@ -24,7 +25,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from mcp.server import FastMCP
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 
-from app.db import db, utc_now
+from app.db import db, get_connection, utc_now
 
 _base_url = os.getenv("APP_BASE_URL", "https://your-app.fly.dev")
 
@@ -71,6 +72,28 @@ mcp = FastMCP(
 _TOOL_CALL_LOG_RETENTION_DAYS = 30
 
 
+def _write_tool_call_log(start, name, arguments, duration_ms, outcome, error, result) -> None:
+    conn = get_connection()
+    try:
+        # Short timeout (db() defaults to 5min): drop the row rather than wait on
+        # a long-held import write lock — this is diagnostics only.
+        conn.execute("PRAGMA busy_timeout=1000")
+        conn.execute(
+            "INSERT INTO tool_call_log(ts, tool, arguments_json, duration_ms, outcome, error, result_repr) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                start.isoformat(), name, json.dumps(arguments, default=str)[:2000],
+                round(duration_ms, 1), outcome, error,
+                repr(result)[:500] if result is not None else None,
+            ),
+        )
+        cutoff = (start - timedelta(days=_TOOL_CALL_LOG_RETENTION_DAYS)).isoformat()
+        conn.execute("DELETE FROM tool_call_log WHERE ts < ?", (cutoff,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _install_tool_call_logging(server: FastMCP) -> None:
     original_call_tool = server._tool_manager.call_tool
 
@@ -87,19 +110,12 @@ def _install_tool_call_logging(server: FastMCP) -> None:
             raise
         finally:
             duration_ms = (datetime.now(timezone.utc) - start).total_seconds() * 1000
+            # Off the event loop, and best-effort: a write blocked behind an import
+            # must neither freeze the server nor delay the tool's response.
             try:
-                with db() as conn:
-                    conn.execute(
-                        "INSERT INTO tool_call_log(ts, tool, arguments_json, duration_ms, outcome, error, result_repr) "
-                        "VALUES (?,?,?,?,?,?,?)",
-                        (
-                            start.isoformat(), name, json.dumps(arguments, default=str)[:2000],
-                            round(duration_ms, 1), outcome, error,
-                            repr(result)[:500] if result is not None else None,
-                        ),
-                    )
-                    cutoff = (start - timedelta(days=_TOOL_CALL_LOG_RETENTION_DAYS)).isoformat()
-                    conn.execute("DELETE FROM tool_call_log WHERE ts < ?", (cutoff,))
+                await asyncio.to_thread(
+                    _write_tool_call_log, start, name, arguments, duration_ms, outcome, error, result,
+                )
             except Exception:
                 pass  # diagnostic logging must never break the actual tool call
 
@@ -1404,6 +1420,34 @@ no data. Garmin data often arrives 1–2 hours after waking/syncing.
 `get_source_config()` shows which source wins per metric. Override with
 `set_source_preference('hrv', 'garmin')`. Default priority: garmin → google_health.
 """
+
+
+# ── run sync tools off the event loop ─────────────────────────────────────────
+#
+# FastMCP calls sync tool functions inline on the event loop (no thread), so a
+# slow query — or a write waiting up to busy_timeout (5min) behind an import's
+# write lock — froze the whole process: other tool calls, /healthz (Fly then
+# marked the machine unhealthy), admin routes. Swap each sync tool's fn for an
+# async wrapper that runs it in a worker thread. Schemas are already derived
+# from the original signature, so they're unchanged. db() opens a connection per
+# call, so threads share nothing.
+
+def _offload_sync_tools(server: FastMCP) -> None:
+    for tool in server._tool_manager._tools.values():
+        if tool.is_async:
+            continue
+
+        def make(fn):
+            @functools.wraps(fn)
+            async def run_in_thread(*args, **kwargs):
+                return await asyncio.to_thread(fn, *args, **kwargs)
+            return run_in_thread
+
+        tool.fn = make(tool.fn)
+        tool.is_async = True
+
+
+_offload_sync_tools(mcp)
 
 
 # ── ASGI app ─────────────────────────────────────────────────────────────────
