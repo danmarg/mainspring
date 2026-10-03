@@ -248,10 +248,14 @@ def _parse_stats(conn, date_str: str, data: dict) -> int:
 def _parse_hrv(conn, date_str: str, data: dict) -> int:
     now = utc_now()
     rows = 0
-    # lastNight is the primary summary; weekly avg also available
+    # Deliberately NOT falling back to weeklyAvg: before Garmin finishes computing
+    # last night, the nightly value is null while weeklyAvg is populated, and storing the
+    # smoothed weekly figure as tonight's HRV hides a bad night from readiness.
     last_night = data.get("hrvSummary") or data.get("lastNight") or {}
-    val = last_night.get("lastNight") or last_night.get("weeklyAvg")
-    if val is not None:
+    # The real payload names it lastNightAvg (python-garminconnect's HRV model);
+    # `lastNight` is kept as a fallback for older/mocked shapes.
+    val = last_night.get("lastNightAvg") or last_night.get("lastNight")
+    if val:
         upsert_raw_metric(conn, date_str, SOURCE, "hrv", float(val), now)
         rows += 1
     return rows
@@ -816,8 +820,13 @@ def _upsert_activity(conn, activity: dict) -> bool:
     if not activity_id:
         return False
 
-    start_time = activity.get("startTimeLocal") or activity.get("startTimeGMT")
-    date_str = start_time[:10] if start_time else None
+    # date is the activity's local calendar day (startTimeLocal); start_time is the
+    # UTC instant (startTimeGMT, tz-aware) so it compares correctly with Google
+    # Health's UTC starts and with consumers that read naive timestamps as UTC.
+    local_start = activity.get("startTimeLocal") or activity.get("startTimeGMT")
+    date_str = local_start[:10] if local_start else None
+    gmt_start = activity.get("startTimeGMT")
+    start_time = f"{gmt_start.replace(' ', 'T')}+00:00" if gmt_start else local_start
 
     conn.execute(
         """

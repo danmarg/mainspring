@@ -9,7 +9,7 @@ Usage:
 
 Then upload the result to your app:
     curl -X POST $APP_BASE_URL/admin/google_health/init_tokens \
-        -H "Authorization: Bearer $ADMIN_TOKEN" \
+        -H "Authorization: Bearer $MAINSPRING_PASSWORD" \
         -H "Content-Type: application/json" \
         -d @google_health_tokens.json
 """
@@ -121,7 +121,7 @@ def main():
     print(f"\nTokens written to {args.output}")
     print(f"\nUpload with:")
     print(f'  curl -X POST ${{APP_BASE_URL}}/admin/google_health/init_tokens \\')
-    print(f'    -H "Authorization: Bearer $ADMIN_TOKEN" \\')
+    print(f'    -H "Authorization: Bearer $MAINSPRING_PASSWORD" \\')
     print(f'    -H "Content-Type: application/json" \\')
     print(f'    -d @{args.output}')
 

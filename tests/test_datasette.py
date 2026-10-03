@@ -10,13 +10,22 @@ import sqlite3
 import tempfile
 import pathlib
 
+import pytest
+
 import app.db as db_module
 from app.db import init_db, utc_now
 
 
-# ── token middleware (bearer / basic / cookie / ?token=) ─────────────────────
+# ── token middleware (bearer / basic / cookie) ───────────────────────────────
 
 from app.datasette_mount import _TokenMiddleware
+
+
+@pytest.fixture(autouse=True)
+def _password(monkeypatch):
+    for legacy in ("ADMIN_TOKEN", "EXPORT_TOKEN", "DATASETTE_TOKEN", "MCP_TOKEN"):
+        monkeypatch.delenv(legacy, raising=False)
+    monkeypatch.setenv("MAINSPRING_PASSWORD", "ds-secret")
 
 
 async def _call(mw, auth_header=None, query_string=b""):
@@ -37,46 +46,55 @@ async def _call(mw, auth_header=None, query_string=b""):
 def test_datasette_bearer_allows_valid():
     passed = []
     async def inner(s, r, send): passed.append(True)
-    mw = _TokenMiddleware(inner, token="ds-secret")
+    mw = _TokenMiddleware(inner)
     asyncio.run(_call(mw, auth_header=b"Bearer ds-secret"))
     assert passed == [True]
 
 
 def test_datasette_bearer_rejects_wrong():
     async def inner(s, r, send): pass
-    mw = _TokenMiddleware(inner, token="ds-secret")
+    mw = _TokenMiddleware(inner)
     resp = asyncio.run(_call(mw, auth_header=b"Bearer wrong"))
     assert any(r.get("status") == 401 for r in resp)
 
 
 def test_datasette_bearer_rejects_missing():
     async def inner(s, r, send): pass
-    mw = _TokenMiddleware(inner, token="ds-secret")
+    mw = _TokenMiddleware(inner)
     resp = asyncio.run(_call(mw))
     assert any(r.get("status") == 401 for r in resp)
 
 
 def test_datasette_bearer_www_authenticate_header():
     async def inner(s, r, send): pass
-    mw = _TokenMiddleware(inner, token="ds-secret")
+    mw = _TokenMiddleware(inner)
     resp = asyncio.run(_call(mw))
     start = next(r for r in resp if r.get("type") == "http.response.start")
     header_names = [k.lower() for k, v in start.get("headers", [])]
     assert b"www-authenticate" in header_names
 
 
-def test_datasette_token_query_param():
+def test_datasette_rejects_token_query_param():
+    """?token= put the secret in URLs/logs/history, so it's no longer accepted."""
+    async def inner(s, r, send): pass
+    mw = _TokenMiddleware(inner)
+    resp = asyncio.run(_call(mw, query_string=b"token=ds-secret"))
+    assert any(r.get("status") == 401 for r in resp)
+
+
+def test_datasette_accepts_legacy_token_while_set(monkeypatch):
+    monkeypatch.delenv("MAINSPRING_PASSWORD")
+    monkeypatch.setenv("DATASETTE_TOKEN", "old-ds")
     passed = []
     async def inner(s, r, send): passed.append(True)
-    mw = _TokenMiddleware(inner, token="ds-secret")
-    asyncio.run(_call(mw, query_string=b"token=ds-secret"))
+    asyncio.run(_call(_TokenMiddleware(inner), auth_header=b"Bearer old-ds"))
     assert passed == [True]
 
 
 # ── build_datasette_app returns None without token ────────────────────────────
 
 def test_build_datasette_app_none_without_token(monkeypatch):
-    monkeypatch.delenv("DATASETTE_TOKEN", raising=False)
+    monkeypatch.delenv("MAINSPRING_PASSWORD", raising=False)
     from app.datasette_mount import build_datasette_app
     assert build_datasette_app() is None
 

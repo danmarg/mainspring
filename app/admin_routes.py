@@ -4,30 +4,17 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app.auth import ADMIN, EXPORT, require_bearer
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.db import HOME_TZ, db, resolve_metric, utc_now
+from app.db import HOME_TZ, SECRET_TABLES, db, resolve_metric, utc_now
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin")
 
-_bearer = HTTPBearer()
-
-
-def _require_token(env_var: str):
-    def dependency(creds: HTTPAuthorizationCredentials = Depends(_bearer)):
-        expected = (os.getenv(env_var) or "").strip()
-        if not expected:
-            raise HTTPException(status_code=503, detail=f"{env_var} not configured")
-        if creds.credentials != expected:
-            raise HTTPException(status_code=401, detail="invalid token")
-    return dependency
-
-
-_import_auth = _require_token("ADMIN_TOKEN")
-_export_auth = _require_token("EXPORT_TOKEN")
+_import_auth = require_bearer(ADMIN)
+_export_auth = require_bearer(EXPORT)
 
 MORNING_WEBHOOK_EARLIEST_HOUR = int(os.getenv("MORNING_WEBHOOK_EARLIEST_HOUR", "5"))
 WAKE_CONFIRM_WINDOW_MIN = int(os.getenv("MORNING_WEBHOOK_CONFIRM_WINDOW_MIN", "20"))
@@ -308,11 +295,27 @@ def export_db():
     tmp_path = Path(tmp.name)
     tmp.close()
 
-    conn = sqlite3.connect(str(DB_PATH))
     try:
-        conn.execute(f"VACUUM INTO '{tmp_path}'")
-    finally:
-        conn.close()
+        conn = sqlite3.connect(str(DB_PATH))
+        try:
+            conn.execute(f"VACUUM INTO '{tmp_path}'")
+        finally:
+            conn.close()
+
+        # Credentials never leave the server: scrub them from the snapshot and
+        # VACUUM again so the deleted rows aren't recoverable from free pages.
+        snap = sqlite3.connect(str(tmp_path), isolation_level=None)
+        try:
+            snap.execute("PRAGMA secure_delete=ON")
+            for table in sorted(SECRET_TABLES):
+                snap.execute(f"DELETE FROM {table}")
+            snap.execute("VACUUM")
+        finally:
+            snap.close()
+    except Exception:
+        # an unscrubbed (or partial) snapshot must never be left in /tmp
+        tmp_path.unlink(missing_ok=True)
+        raise
 
     def cleanup():
         try:

@@ -7,11 +7,13 @@ All state lives in the SQLite DB.
 
 import asyncio
 import functools
+import html
 import json
 import os
 import secrets
 import time
 from typing import Any
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -24,6 +26,7 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
+from app import auth
 from app.db import get_connection, utc_now
 
 router = APIRouter(prefix="/mcp-auth")
@@ -53,11 +56,11 @@ def _callback_page(callback_url: str) -> str:
 <body>
   <h1>Authorized ✓</h1>
   <p>Tap the button below to return to Claude and complete the connection.</p>
-  <a href="{callback_url}">Return to Claude</a>
+  <a href="{html.escape(callback_url, quote=True)}">Return to Claude</a>
   <script>
     // attempt automatic redirect; if iOS opens the native app instead,
     // the user can tap the button above to retry in the browser
-    setTimeout(function() {{ window.location.href = "{callback_url}"; }}, 500);
+    setTimeout(function() {{ window.location.href = {json.dumps(callback_url).replace("</", "<\\/")}; }}, 500);
   </script>
 </body>
 </html>"""
@@ -304,11 +307,11 @@ _LOGIN_PAGE = """<!doctype html>
 </head>
 <body>
   <h1>Authorize Claude</h1>
-  <p>Enter your Mainspring access token to allow Claude to read and log your health data.</p>
+  <p>Enter your Mainspring password to allow Claude to read and log your health data.</p>
   {error}
   <form method="post">
     <input type="hidden" name="session" value="{session}">
-    <input type="password" name="pin" placeholder="Access token" autofocus>
+    <input type="password" name="pin" placeholder="Password" autofocus>
     <button type="submit">Authorize</button>
   </form>
 </body>
@@ -317,18 +320,22 @@ _LOGIN_PAGE = """<!doctype html>
 
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(session: str, error: str = ""):
-    err_html = f'<p class="error">{error}</p>' if error else ""
-    return _LOGIN_PAGE.format(session=session, error=err_html)
+    err_html = f'<p class="error">{html.escape(error)}</p>' if error else ""
+    return _LOGIN_PAGE.format(session=html.escape(session, quote=True), error=err_html)
 
 
 @router.post("/login")
 def login_submit(request: Request, session: str = Form(...), pin: str = Form(...)):
-    expected = os.getenv("MCP_TOKEN")
-    if not expected or pin != expected:
+    key = auth.client_key(request)
+    if auth.limiter.blocked(key):
+        return HTMLResponse("Too many failed attempts. Try again later.", status_code=429)
+    if not auth.verify(pin, auth.MCP):
+        auth.limiter.fail(key)
         return RedirectResponse(
-            f"/mcp-auth/login?session={session}&error=Invalid+token",
+            f"/mcp-auth/login?session={quote(session)}&error=Invalid+password",
             status_code=303,
         )
+    auth.limiter.reset(key)
 
     # look up pending auth session
     conn = _db()
@@ -371,10 +378,13 @@ def login_submit(request: Request, session: str = Form(...), pin: str = Form(...
 
     # build the callback URL
     redirect_uri = str(params.redirect_uri)
+    if redirect_uri.split(":", 1)[0].strip().lower() in {"javascript", "data", "vbscript"}:
+        return HTMLResponse("Invalid redirect URI.", status_code=400)
     sep = "&" if "?" in redirect_uri else "?"
-    callback_url = f"{redirect_uri}{sep}code={code}"
+    query = {"code": code}
     if params.state:
-        callback_url += f"&state={params.state}"
+        query["state"] = params.state
+    callback_url = f"{redirect_uri}{sep}{urlencode(query)}"
 
     # Use JS redirect + manual link instead of a server 303 redirect.
     # On iOS, a server-side redirect to claude.ai triggers Universal Links

@@ -68,12 +68,18 @@ health-data-service/
 
 ## Auth
 
-Three separate bearer tokens as Fly secrets:
-- Admin/import endpoints (`/admin/import/*`)
-- Export endpoint (`/export/db`)
-- MCP server (per current Claude remote-MCP connector spec — **verify current docs before implementing**, this has been a moving target)
+One password (`MAINSPRING_PASSWORD`, Fly secret) for every protected surface — see `app/auth.py`:
+- Admin/import endpoints (`/admin/import/*`) and export (`/export/db`): `Authorization: Bearer <password>`
+- Dashboard and `/datasette`: login form / Basic / Bearer, then an HMAC'd per-surface session cookie (no `?token=` URLs)
+- MCP: the password is entered on the OAuth authorization page (`/mcp-auth/login`)
 
-`/datasette` must also be gated (reverse-proxy/bearer or a `datasette` auth plugin) — it is not public.
+All comparisons are constant-time; failed attempts are rate-limited per client IP. The legacy per-surface variables
+(`ADMIN_TOKEN`, `EXPORT_TOKEN`, `DATASETTE_TOKEN`, `MCP_TOKEN`) are still accepted for their own surface while set, so
+cron jobs keep working during migration — unset them to finish.
+
+**Credential tables never leave the server.** `app.db.SECRET_TABLES` (OAuth clients/codes/tokens, Google refresh token)
+read as NULL through Datasette (a sqlite authorizer, so arbitrary SQL is covered) and are scrubbed from the `/export/db`
+snapshot. A new credential table must be added to that set.
 
 Import endpoints gracefully no-op if the corresponding source's credentials are not configured, so the homelab cron can always call both unconditionally.
 
