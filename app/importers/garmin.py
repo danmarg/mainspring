@@ -99,6 +99,15 @@ def _with_retry(fn, label: str) -> bool:
     return False
 
 
+def _safe_c(conn, fn, label: str) -> Any | None:
+    """_safe, but commit first. sqlite3's implicit BEGIN opens the write lock at
+    the first INSERT and holds it until commit, so without this every upstream
+    HTTP call after a write ran with the lock held and stalled every other
+    writer (MCP logging tools) for as long as the fetches took."""
+    conn.commit()
+    return _safe(fn, label)
+
+
 def _safe(fn, label: str) -> Any | None:
     try:
         return fn()
@@ -188,12 +197,14 @@ def push_pending_manual_logs(conn) -> int:
                 conn.execute(
                     "UPDATE manual_logs SET garmin_synced_at=? WHERE id=?", (utc_now(), log_id)
                 )
+                conn.commit()
                 continue
             ok = push_blood_pressure(macros["systolic"], macros["diastolic"], pulse, ts)
         if ok:
             conn.execute(
                 "UPDATE manual_logs SET garmin_synced_at=? WHERE id=?", (utc_now(), log_id)
             )
+            conn.commit()  # don't hold the write lock across the next push's HTTP call
             pushed += 1
     if pushed:
         conn.commit()
@@ -736,7 +747,7 @@ def _fetch_and_store_decoupling(
     if existing and existing[0] is not None:
         return
 
-    data = _safe(lambda: client.get_activity_splits(activity_id), f"get_activity_splits({activity_id})")
+    data = _safe_c(conn, lambda: client.get_activity_splits(activity_id), f"get_activity_splits({activity_id})")
     if not data:
         return
     _store_raw(conn, "get_activity_splits", data, None)
@@ -783,7 +794,7 @@ def _fetch_and_store_hr_zones(
     if existing:
         return
 
-    data = _safe(
+    data = _safe_c(conn, 
         lambda: client.get_activity_hr_in_timezones(activity_id),
         f"get_activity_hr_in_timezones({activity_id})",
     )
@@ -899,80 +910,80 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
         ds = d.isoformat()
 
         # daily stats (steps, resting HR, calories, floors)
-        data = _safe(lambda: client.get_stats(ds), f"get_stats({ds})")
+        data = _safe_c(conn, lambda: client.get_stats(ds), f"get_stats({ds})")
         if data:
             _store_raw(conn, "get_stats", data, ds)
             rows_upserted += _parse_stats(conn, ds, data)
 
         # HRV
-        data = _safe(lambda: client.get_hrv_data(ds), f"get_hrv_data({ds})")
+        data = _safe_c(conn, lambda: client.get_hrv_data(ds), f"get_hrv_data({ds})")
         if data:
             _store_raw(conn, "get_hrv_data", data, ds)
             rows_upserted += _parse_hrv(conn, ds, data)
 
         # sleep (provider-assigned night-of date; we trust it as-is)
-        data = _safe(lambda: client.get_sleep_data(ds), f"get_sleep_data({ds})")
+        data = _safe_c(conn, lambda: client.get_sleep_data(ds), f"get_sleep_data({ds})")
         if data:
             _store_raw(conn, "get_sleep_data", data, ds)
             rows_upserted += _parse_sleep(conn, ds, data)
 
         # stress (daily aggregates + intraday timeseries)
-        data = _safe(lambda: client.get_stress_data(ds), f"get_stress_data({ds})")
+        data = _safe_c(conn, lambda: client.get_stress_data(ds), f"get_stress_data({ds})")
         if data:
             _store_raw(conn, "get_stress_data", data, ds)
             rows_upserted += _parse_stress(conn, ds, data)
 
         # intraday HR (limited to last 2 days on default runs — not late-corrected)
         if d in hr_dates:
-            data = _safe(lambda: client.get_heart_rates(ds), f"get_heart_rates({ds})")
+            data = _safe_c(conn, lambda: client.get_heart_rates(ds), f"get_heart_rates({ds})")
             if data:
                 _store_raw(conn, "get_heart_rates", data, ds)
                 rows_upserted += _parse_intraday_hr(conn, data)
 
         # training readiness
-        data = _safe(lambda: client.get_training_readiness(ds), f"get_training_readiness({ds})")
+        data = _safe_c(conn, lambda: client.get_training_readiness(ds), f"get_training_readiness({ds})")
         if data:
             _store_raw(conn, "get_training_readiness", data, ds)
             rows_upserted += _parse_training_readiness(conn, ds, data)
 
         # training status (VO2max, training load)
-        data = _safe(lambda: client.get_training_status(ds), f"get_training_status({ds})")
+        data = _safe_c(conn, lambda: client.get_training_status(ds), f"get_training_status({ds})")
         if data:
             _store_raw(conn, "get_training_status", data, ds)
             rows_upserted += _parse_training_status(conn, ds, data)
 
         # SpO2
-        data = _safe(lambda: client.get_spo2_data(ds), f"get_spo2_data({ds})")
+        data = _safe_c(conn, lambda: client.get_spo2_data(ds), f"get_spo2_data({ds})")
         if data:
             _store_raw(conn, "get_spo2_data", data, ds)
             rows_upserted += _parse_spo2(conn, ds, data)
 
         # respiration / breathing rate
-        data = _safe(lambda: client.get_respiration_data(ds), f"get_respiration_data({ds})")
+        data = _safe_c(conn, lambda: client.get_respiration_data(ds), f"get_respiration_data({ds})")
         if data:
             _store_raw(conn, "get_respiration_data", data, ds)
             rows_upserted += _parse_respiration(conn, ds, data)
 
         # intensity minutes (active zone minutes)
-        data = _safe(lambda: client.get_intensity_minutes_data(ds), f"get_intensity_minutes_data({ds})")
+        data = _safe_c(conn, lambda: client.get_intensity_minutes_data(ds), f"get_intensity_minutes_data({ds})")
         if data:
             _store_raw(conn, "get_intensity_minutes_data", data, ds)
             rows_upserted += _parse_intensity_minutes(conn, ds, data)
 
         # weigh-ins (weight, from a synced smart scale)
-        data = _safe(lambda: client.get_daily_weigh_ins(ds), f"get_daily_weigh_ins({ds})")
+        data = _safe_c(conn, lambda: client.get_daily_weigh_ins(ds), f"get_daily_weigh_ins({ds})")
         if data:
             _store_raw(conn, "get_daily_weigh_ins", data, ds)
             rows_upserted += _parse_body_composition(conn, ds, data)
 
         # blood pressure (from a synced BP monitor)
-        data = _safe(lambda: client.get_blood_pressure(ds), f"get_blood_pressure({ds})")
+        data = _safe_c(conn, lambda: client.get_blood_pressure(ds), f"get_blood_pressure({ds})")
         if data:
             _store_raw(conn, "get_blood_pressure", data, ds)
             rows_upserted += _parse_blood_pressure(conn, ds, data)
 
         # hydration
-        data = _safe(lambda: client.get_hydration_data(ds), f"get_hydration_data({ds})")
+        data = _safe_c(conn, lambda: client.get_hydration_data(ds), f"get_hydration_data({ds})")
         if data:
             _store_raw(conn, "get_hydration_data", data, ds)
             rows_upserted += _parse_hydration(conn, ds, data)
@@ -989,18 +1000,18 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
     # lactate threshold / cycling FTP — point-in-time snapshots (Garmin recomputes
     # these occasionally, not daily), so fetched once per run and stored at the
     # most recent date in the window rather than per-day.
-    data = _safe(lambda: client.get_lactate_threshold(latest=True), "get_lactate_threshold")
+    data = _safe_c(conn, lambda: client.get_lactate_threshold(latest=True), "get_lactate_threshold")
     if data:
         _store_raw(conn, "get_lactate_threshold", data, end_str)
         rows_upserted += _parse_lactate_threshold(conn, end_str, data)
 
-    data = _safe(lambda: client.get_cycling_ftp(), "get_cycling_ftp")
+    data = _safe_c(conn, lambda: client.get_cycling_ftp(), "get_cycling_ftp")
     if data:
         _store_raw(conn, "get_cycling_ftp", data, end_str)
         rows_upserted += _parse_ftp(conn, end_str, data)
 
     # body battery (returns a list across the range)
-    data = _safe(
+    data = _safe_c(conn, 
         lambda: client.get_body_battery(start_str, end_str),
         f"get_body_battery({start_str},{end_str})",
     )
@@ -1014,7 +1025,7 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
                 rows_upserted += _parse_body_battery(conn, item_date, [item])
 
     # activities
-    data = _safe(
+    data = _safe_c(conn, 
         lambda: client.get_activities_by_date(start_str, end_str),
         f"get_activities_by_date({start_str},{end_str})",
     )
@@ -1041,7 +1052,7 @@ def run_import(conn, days: int = WINDOW_DAYS, start_date=None, end_date=None) ->
     year_months = sorted({(d.year, d.month) for d in dates})
     for year, month in year_months:
         ym_label = f"{year}-{month:02d}"
-        data = _safe(
+        data = _safe_c(conn, 
             lambda y=year, m=month: client.get_scheduled_workouts(y, m),
             f"get_scheduled_workouts({ym_label})",
         )

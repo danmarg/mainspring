@@ -1156,7 +1156,7 @@ def _utc_to_local_hour(ts_str: str, browser_tz: str | None = None) -> float | No
 
 @router.get("/", response_class=HTMLResponse)
 @router.get("", response_class=HTMLResponse)
-async def overview(request: Request,
+def overview(request: Request,
                    ms_dash_auth: str | None = Cookie(default=None),
                    ms_tz: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
@@ -1426,7 +1426,7 @@ async def overview(request: Request,
 # ── trends ────────────────────────────────────────────────────────────────────
 
 @router.get("/trends", response_class=HTMLResponse)
-async def trends(request: Request, days: str = "30",
+def trends(request: Request, days: str = "30",
                  input: str = "alcohol_units", output: str = "hrv", lag: int = 1,
                  ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
@@ -1602,7 +1602,7 @@ async def trends(request: Request, days: str = "30",
 # ── behavior ──────────────────────────────────────────────────────────────────
 
 @router.get("/behavior", response_class=HTMLResponse)
-async def behavior(request: Request, days: str = "30",
+def behavior(request: Request, days: str = "30",
                    ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
@@ -1670,7 +1670,7 @@ DOW_NAMES = {"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed", "4": "Thu", "5": "F
 
 
 @router.get("/nutrition", response_class=HTMLResponse)
-async def nutrition(request: Request, days: str = "30",
+def nutrition(request: Request, days: str = "30",
                     ms_dash_auth: str | None = Cookie(default=None),
                     ms_tz: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
@@ -1803,7 +1803,7 @@ async def nutrition(request: Request, days: str = "30",
 # ── activities ────────────────────────────────────────────────────────────────
 
 @router.get("/activities", response_class=HTMLResponse)
-async def activities(request: Request, days: str = "30",
+def activities(request: Request, days: str = "30",
                      ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
@@ -1941,7 +1941,7 @@ async def activities(request: Request, days: str = "30",
 # ── vitals ────────────────────────────────────────────────────────────────────
 
 @router.get("/vitals", response_class=HTMLResponse)
-async def vitals(request: Request, days: str = "30",
+def vitals(request: Request, days: str = "30",
                  ms_dash_auth: str | None = Cookie(default=None)):
     if not _is_authed(request, ms_dash_auth):
         return _auth_redirect()
