@@ -16,6 +16,7 @@ every subsequent request.
 """
 
 import base64
+import types
 
 from app import auth
 from app.db import DB_PATH, SECRET_TABLES, deny_secret_reads
@@ -132,13 +133,10 @@ def make_datasette():
     from datasette import hookimpl
     from datasette.app import Datasette
 
-    class DenySecretsPlugin:
-        """Every connection (incl. arbitrary SQL) reads credential tables as NULL."""
-
-        @staticmethod
-        @hookimpl
-        def prepare_connection(conn):
-            conn.set_authorizer(deny_secret_reads)
+    # A module-shaped plugin: newer Datasette (0.65.5+) reads plugin.__name__ for
+    # every registered plugin, which a plain class instance doesn't have.
+    deny_secrets = types.ModuleType("mainspring_deny_secrets")
+    deny_secrets.prepare_connection = hookimpl(lambda conn: conn.set_authorizer(deny_secret_reads))
 
     ds = Datasette(
         files=[str(DB_PATH)],
@@ -162,7 +160,7 @@ def make_datasette():
     # Datasette's plugin manager is process-global; register once.
     from datasette.plugins import pm
     if not pm.has_plugin("mainspring_deny_secrets"):
-        pm.register(DenySecretsPlugin(), name="mainspring_deny_secrets")
+        pm.register(deny_secrets, name="mainspring_deny_secrets")
     return ds
 
 

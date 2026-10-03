@@ -279,3 +279,30 @@ def test_export_failure_leaves_no_snapshot_behind(monkeypatch, tmp_db, tmp_path)
     with pytest.raises(sqlite3.OperationalError):
         admin_routes.export_db()
     assert glob.glob(str(snap_dir / "*.db")) == []
+
+
+def test_datasette_app_builds_and_serves_plugin_listing(tmp_db, monkeypatch):
+    """Production crashed at import because Datasette 0.65.5 reads plugin.__name__
+    for every registered plugin. Exercise the same path the mount takes."""
+    monkeypatch.setenv("MAINSPRING_PASSWORD", "pw")
+    from app.datasette_mount import build_datasette_app, make_datasette
+    assert build_datasette_app() is not None
+
+    async def run():
+        ds = make_datasette()
+        await ds.invoke_startup()
+        r = await ds.client.get("/-/plugins.json")
+        return r.status_code, r.text
+
+    status, text = asyncio.run(run())
+    assert status == 200 and "mainspring_deny_secrets" in text
+
+
+def test_app_main_imports_with_everything_mounted(tmp_path):
+    """Startup smoke test: import the real app with a password configured so the
+    MCP and Datasette mounts (the parts that crashed prod) are actually built."""
+    import os, subprocess, sys
+    env = {**os.environ, "MAINSPRING_PASSWORD": "pw", "DB_PATH": str(tmp_path / "x.db"),
+           "APP_BASE_URL": "https://example.test"}
+    out = subprocess.run([sys.executable, "-c", "import app.main"], env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-800:]
