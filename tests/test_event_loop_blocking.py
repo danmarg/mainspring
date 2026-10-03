@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import app.db as db_module
-from app.db import get_connection, init_db, utc_now
+from app.db import db, get_connection, init_db, utc_now
 
 
 @pytest.fixture
@@ -322,3 +322,49 @@ def test_tool_pool_is_not_exhausted_by_lock_waiters(tmp_db):
         return read_elapsed
 
     assert asyncio.run(scenario()) < 1.0
+
+
+# ── write-lock diagnostics ───────────────────────────────────────────────────
+
+def test_long_write_transaction_is_logged_with_its_holder(tmp_db, monkeypatch, caplog):
+    monkeypatch.setattr(db_module, "LOCK_HOLD_WARN_S", 0.05)
+    with caplog.at_level("WARNING", logger="app.db"):
+        with db_module.db() as conn:
+            conn.execute("INSERT INTO import_runs(source, started_at, status) VALUES ('x','x','x')")
+            time.sleep(0.12)
+    assert any(
+        "write transaction held" in r.message and "test_event_loop_blocking" in r.message
+        for r in caplog.records
+    )
+
+
+def test_short_write_transaction_is_not_logged(tmp_db, caplog):
+    with caplog.at_level("WARNING", logger="app.db"):
+        with db_module.db() as conn:
+            conn.execute("INSERT INTO import_runs(source, started_at, status) VALUES ('x','x','x')")
+    assert not [r for r in caplog.records if "write transaction held" in r.message]
+
+
+def test_locked_error_names_the_open_write_transactions(tmp_db, caplog):
+    holder = db_module.get_connection()
+    holder.execute("INSERT INTO import_runs(source, started_at, status) VALUES ('held','x','x')")  # lock held
+    try:
+        with caplog.at_level("ERROR", logger="app.db"):
+            with pytest.raises(sqlite3.OperationalError):
+                with db_module.db() as conn:
+                    conn.execute("PRAGMA busy_timeout=50")
+                    conn.execute("INSERT INTO import_runs(source, started_at, status) VALUES ('y','x','x')")
+    finally:
+        holder.rollback()
+        holder.close()
+    msg = next(r.message for r in caplog.records if "database is locked" in r.message)
+    assert "test_event_loop_blocking" in msg and "open" in msg  # the holder is identified
+
+
+def test_open_transaction_registry_clears_on_commit(tmp_db):
+    conn = db_module.get_connection()
+    conn.execute("INSERT INTO import_runs(source, started_at, status) VALUES ('x','x','x')")
+    assert db_module.open_write_transactions()
+    conn.commit()
+    assert db_module.open_write_transactions() == []
+    conn.close()

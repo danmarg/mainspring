@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -114,9 +115,11 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
     """Run an import synchronously in a background thread and update import_runs."""
     try:
         today = date.today().isoformat()
+        t_start = time.monotonic()
 
         with db() as conn:
             result = import_fn(conn, **import_kwargs)
+        t_imported = time.monotonic()
 
         imported_dates = set(result.get("dates") or [])
 
@@ -124,6 +127,11 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
             from app.normalize import run_normalization
             with db() as conn:
                 run_normalization(conn, imported_dates or None)
+            log.info(
+                "%s import run_id=%d timing: fetch+parse %.1fs, normalization %.1fs (%d dates)",
+                source, run_id, t_imported - t_start, time.monotonic() - t_imported,
+                len(imported_dates) or -1,
+            )
 
         status = "skipped" if result.get("skipped") else "ok"
         rows = result.get("rows_upserted", 0)

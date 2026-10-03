@@ -1,10 +1,16 @@
+import logging
 import os
 import re
 import sqlite3
+import sys
+import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+log = logging.getLogger(__name__)
 
 DB_PATH = Path("/data/health.db")
 SCHEMA_PATH = Path(__file__).parent.parent / "schema.sql"
@@ -31,6 +37,79 @@ def deny_secret_reads(action, arg1, arg2, dbname, source):
 DEFAULT_SOURCE_PRIORITY = ["garmin", "google_health"]
 
 
+# ── write-lock diagnostics ────────────────────────────────────────────────────
+#
+# SQLite has one writer. sqlite3's implicit BEGIN opens the write lock at the first
+# INSERT/UPDATE/DELETE and holds it until COMMIT/ROLLBACK, so a long-lived writer
+# makes every other writer wait up to busy_timeout (5min) and then fail with
+# "database is locked". When that happened in production nothing recorded *who*
+# held the lock. Each connection now traces its own transactions: a held-too-long
+# warning names the holder, and a "locked" error dumps every write transaction
+# open at that moment.
+
+LOCK_HOLD_WARN_S = float(os.getenv("LOCK_HOLD_WARN_S", "2"))
+
+_open_txns: dict[int, tuple[str, str, float]] = {}  # id -> (label, thread, begin)
+_open_txns_lock = threading.Lock()
+
+
+def _caller_label() -> str:
+    """module:function:line of the first caller outside this file."""
+    frame = sys._getframe(1)
+    while frame and (frame.f_code.co_filename == __file__ or frame.f_globals.get("__name__") == "contextlib"):
+        frame = frame.f_back
+    if frame is None:
+        return "unknown"
+    return f"{frame.f_globals.get('__name__', '?')}:{frame.f_code.co_name}:{frame.f_lineno}"
+
+
+def open_write_transactions() -> list[str]:
+    now = time.monotonic()
+    with _open_txns_lock:
+        held = sorted(_open_txns.values(), key=lambda t: t[2])
+    return [f"{label} [{thread}] open {now - begin:.1f}s" for label, thread, begin in held]
+
+
+class _TracedConnection(sqlite3.Connection):
+    """Closing with an open transaction (an implicit rollback) emits no COMMIT/
+    ROLLBACK statement, so end the trace here or the registry would keep a ghost."""
+
+    _tracer: "_TxnTracer | None" = None
+
+    def close(self):
+        if self._tracer is not None:
+            self._tracer.finish()
+        super().close()
+
+
+class _TxnTracer:
+    """sqlite3 trace callback: times each write transaction (implicit BEGIN → COMMIT)."""
+
+    def __init__(self, label: str):
+        self.label = label
+        self.thread = threading.current_thread().name
+        self.begin: float | None = None
+
+    def __call__(self, statement: str) -> None:
+        head = statement[:8].lstrip().upper()
+        if head.startswith("BEGIN"):
+            self.begin = time.monotonic()
+            with _open_txns_lock:
+                _open_txns[id(self)] = (self.label, self.thread, self.begin)
+        elif head.startswith(("COMMIT", "ROLLBACK", "END")):
+            self.finish()
+
+    def finish(self) -> None:
+        if self.begin is None:
+            return
+        held = time.monotonic() - self.begin
+        self.begin = None
+        with _open_txns_lock:
+            _open_txns.pop(id(self), None)
+        if held >= LOCK_HOLD_WARN_S:
+            log.warning("write transaction held %.1fs by %s [%s]", held, self.label, self.thread)
+
+
 def _configure(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -39,8 +118,10 @@ def _configure(conn: sqlite3.Connection) -> None:
 
 
 def get_connection(path: Path | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path or DB_PATH))
+    conn = sqlite3.connect(str(path or DB_PATH), factory=_TracedConnection)
     _configure(conn)
+    conn._tracer = _TxnTracer(_caller_label())
+    conn.set_trace_callback(conn._tracer)
     return conn
 
 
@@ -50,7 +131,13 @@ def db(path: Path | None = None):
     try:
         yield conn
         conn.commit()
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc):
+            log.error(
+                "database is locked (caller %s [%s]); write transactions open now: %s",
+                _caller_label(), threading.current_thread().name,
+                open_write_transactions() or "none (lock held outside a traced txn)",  # oldest first
+            )
         conn.rollback()
         raise
     finally:
