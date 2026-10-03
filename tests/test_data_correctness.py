@@ -245,3 +245,27 @@ def test_migration_refreshes_normalized_activities(tmp_db):
     _migrate_garmin_start_times(tmp_db)
 
     assert tmp_db.execute("SELECT start_time FROM activities").fetchone()[0] == "2025-06-01T18:30:00+00:00"
+
+
+def test_strain_uses_personal_hr_ceiling_not_flat_190(tmp_db):
+    from unittest.mock import patch
+    from app import calibration
+
+    tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES ('2025-05-20', 178)")
+    tmp_db.execute(
+        "INSERT INTO activities(date, start_time, duration_s, avg_hr, type, canonical_source) "
+        "VALUES ('2025-06-01','2025-06-01T08:00:00+00:00',3600,150,'running','garmin')"
+    )
+    tmp_db.commit()
+    tmp_db.row_factory = sqlite3.Row
+
+    seen = []
+
+    def fake_trimp(samples, minutes, resting, max_hr=190.0, **kw):
+        seen.append(max_hr)
+        return 50.0
+
+    with patch.object(calibration, "trimp_from_hr_samples", side_effect=fake_trimp):
+        calibration._strain_at(tmp_db, "2025-06-01T12:00:00+00:00", tau_hours=6)
+
+    assert seen and all(m == 178.0 for m in seen)

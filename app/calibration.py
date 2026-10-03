@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.db import HOME_TZ, db, resolve_metric, utc_now
-from app.readiness import trimp_from_hr_samples
+from app.readiness import hr_ceiling, trimp_from_hr_samples
 
 MODEL = "exercise_strain_tau"
 INTERVAL = timedelta(days=7)
@@ -71,6 +71,7 @@ def _strain_at(conn: sqlite3.Connection, rating_ts: str, tau_hours: float) -> fl
         dates,
     ).fetchall()
     resting_hr, _ = resolve_metric(conn, local_date, "resting_hr")
+    max_hr = hr_ceiling(conn, local_date)
     debt = 0.0
     for activity in activities:
         end = _activity_end(activity)
@@ -85,10 +86,10 @@ def _strain_at(conn: sqlite3.Connection, rating_ts: str, tau_hours: float) -> fl
             "FROM intraday_hr WHERE ts >= ? AND ts < ? GROUP BY ts ORDER BY ts",
             ((start - timedelta(minutes=15)).isoformat(), (end + timedelta(minutes=15)).isoformat()),
         ).fetchall()]
-        trimp = trimp_from_hr_samples(samples, float(activity["duration_s"]) / 60, resting_hr or 55.0)
+        trimp = trimp_from_hr_samples(samples, float(activity["duration_s"]) / 60, resting_hr or 55.0, max_hr)
         if trimp is None and activity["avg_hr"]:
             # Sparse HR coverage is common; use the same duration/HR proxy rather than inventing load.
-            trimp = trimp_from_hr_samples([activity["avg_hr"]] * 10, float(activity["duration_s"]) / 60, resting_hr or 55.0)
+            trimp = trimp_from_hr_samples([activity["avg_hr"]] * 10, float(activity["duration_s"]) / 60, resting_hr or 55.0, max_hr)
         if trimp is not None:
             debt += min(0.18, trimp / 1000.0) * math.exp(-hours_since_end / tau_hours)
     return min(0.18, debt) * 100
