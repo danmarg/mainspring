@@ -9,6 +9,7 @@ Rebuilds (in order):
 
 import json
 import logging
+import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -764,11 +765,19 @@ def prune_raw_payloads(conn, retention_days: int = RAW_PAYLOAD_RETENTION_DAYS) -
 
 # ── entry point ──────────────────────────────────────────────────────────────
 
+def _timed(label: str, fn, *args):
+    start = time.monotonic()
+    result = fn(*args)
+    elapsed = time.monotonic() - start
+    (log.warning if elapsed >= 5 else log.info)("normalization step %s took %.1fs", label, elapsed)
+    return result
+
+
 def run_normalization(conn, dates: set[str] | None = None) -> dict:
-    tz_rows = rebuild_day_timezone(conn, dates)
-    metric_rows = rebuild_daily_metrics(conn, dates)
-    activity_rows = rebuild_activities(conn)
-    pruned_rows = prune_raw_payloads(conn)
+    tz_rows = _timed("day_timezone", rebuild_day_timezone, conn, dates)
+    metric_rows = _timed("daily_metrics", rebuild_daily_metrics, conn, dates)
+    activity_rows = _timed("activities", rebuild_activities, conn)
+    pruned_rows = _timed("prune_raw_payloads", prune_raw_payloads, conn)
     conn.commit()
     return {
         "day_timezone_rows": tz_rows,
