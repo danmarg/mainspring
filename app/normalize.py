@@ -262,7 +262,7 @@ def _resting_hr_from_intraday(conn, date_str: str) -> tuple[float | None, str | 
 
 # ── HRV from raw intraday samples (Google Health's daily rollup is all-day) ──
 #
-# Garmin's "hrv" is already overnight-only (hrvSummary.lastNight — see
+# Garmin's "hrv" is already overnight-only (hrvSummary.lastNightAvg — see
 # _parse_hrv in garmin.py), but Google Health/Health Connect's
 # daily-heart-rate-variability rollup is a 24h aggregate, not sleep-window-only.
 # Google Health separately provides real per-sample overnight RMSSD via
