@@ -1,12 +1,11 @@
 """
 Analytics dashboard — /dashboard/*
 
-Auth: same DATASETTE_TOKEN as Datasette, via cookie (ms_dash_auth) or Bearer header.
+Auth: the shared Mainspring password (see app/auth.py), via cookie (ms_dash_auth) or Bearer header.
 Charts: Altair 5/6 → Vega-Lite JSON → rendered client-side via vega-embed CDN.
 Data: SQLite queries with window functions; no pandas.
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -18,6 +17,7 @@ from fastapi import APIRouter, Cookie, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from app import auth
 from app.db import db, DEFAULT_SOURCE_PRIORITY
 from app.readiness import alertness_curve, average_wake_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db, trimp_from_hr_samples, zone_weighted_training_load_rows
 
@@ -33,18 +33,16 @@ COOKIE_NAME = "ms_dash_auth"
 COOKIE_TTL = 30 * 86400  # 30 days, matching the MCP refresh token lifetime
 
 
-def _token_hash(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
-
-
 def _is_authed(request: Request, ms_dash_auth: str | None) -> bool:
-    token = (os.getenv("DATASETTE_TOKEN") or "").strip()
-    if not token:
-        return False
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer ") and auth_header[7:] == token:
-        return True
-    return ms_dash_auth == _token_hash(token)
+    key = auth.client_key(request)
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Bearer "):
+        if auth.limiter.blocked(key):
+            return False
+        if auth.verify(header[7:], auth.DATASETTE):
+            return True
+        auth.limiter.fail(key)
+    return auth.verify_session(ms_dash_auth, "dashboard", auth.DATASETTE)
 
 
 def _auth_redirect():
@@ -1076,18 +1074,25 @@ async def login_page(request: Request):
 
 
 @router.post("/login", response_class=HTMLResponse)
-async def login_submit(request: Request, token: str = Form(...)):
-    expected = (os.getenv("DATASETTE_TOKEN") or "").strip()
-    if not expected:
-        return templates.TemplateResponse(request, "login.html", {"error": "DATASETTE_TOKEN not configured"})
-    if token.strip() != expected:
-        return templates.TemplateResponse(request, "login.html", {"error": "Invalid token"})
+def login_submit(request: Request, token: str = Form(...)):
+    if not auth.configured(auth.DATASETTE):
+        return templates.TemplateResponse(request, "login.html", {"error": "Password not configured"})
+    key = auth.client_key(request)
+    if auth.limiter.blocked(key):
+        return templates.TemplateResponse(
+            request, "login.html", {"error": "Too many failed attempts — try again later"}, status_code=429
+        )
+    if not auth.verify(token, auth.DATASETTE):
+        auth.limiter.fail(key)
+        return templates.TemplateResponse(request, "login.html", {"error": "Invalid password"})
+    auth.limiter.reset(key)
     resp = RedirectResponse("/dashboard", status_code=302)
     resp.set_cookie(
         COOKIE_NAME,
-        _token_hash(expected),
+        auth.primary_session_value("dashboard", auth.DATASETTE),
         max_age=COOKIE_TTL,
         httponly=True,
+        secure=True,
         samesite="lax",
     )
     return resp
@@ -1482,10 +1487,10 @@ def trends(request: Request, days: str = "30",
 
         # Daily max HR from activities
         max_hr_rows = _rows(conn, """
-            SELECT DATE(start_time) AS date, MAX(max_hr) AS max_hr
+            SELECT date, MAX(max_hr) AS max_hr
             FROM garmin_activities
-            WHERE DATE(start_time) >= date('now', ?) AND max_hr IS NOT NULL
-            GROUP BY DATE(start_time)
+            WHERE date >= date('now', ?) AND max_hr IS NOT NULL
+            GROUP BY date
             ORDER BY date
         """, (clause,))
 

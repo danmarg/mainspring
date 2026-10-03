@@ -3,9 +3,9 @@
 # Each chunk completes before Fly auto-stops the machine; the next request wakes it again.
 #
 # Usage:
-#   ADMIN_TOKEN=xxx ./scripts/backfill.sh 2026-04-01 2026-07-14
-#   ADMIN_TOKEN=xxx ./scripts/backfill.sh 2026-04-01 2026-07-14 garmin
-#   ADMIN_TOKEN=xxx ./scripts/backfill.sh 2026-04-01 2026-07-14 google_health
+#   MAINSPRING_PASSWORD=xxx ./scripts/backfill.sh 2026-04-01 2026-07-14
+#   MAINSPRING_PASSWORD=xxx ./scripts/backfill.sh 2026-04-01 2026-07-14 garmin
+#   MAINSPRING_PASSWORD=xxx ./scripts/backfill.sh 2026-04-01 2026-07-14 google_health
 
 set -euo pipefail
 
@@ -13,7 +13,7 @@ BASE_URL="${APP_BASE_URL:?APP_BASE_URL env var required (e.g. https://your-app.f
 START="${1:?Usage: backfill.sh START_DATE END_DATE [source]}"
 END="${2:?Usage: backfill.sh START_DATE END_DATE [source]}"
 SOURCE_FILTER="${3:-both}"  # garmin | google_health | both
-TOKEN="${ADMIN_TOKEN:?ADMIN_TOKEN env var required}"
+TOKEN="${MAINSPRING_PASSWORD:-${ADMIN_TOKEN:?MAINSPRING_PASSWORD env var required}}"
 
 POLL_INTERVAL=5
 CHUNK_DAYS=7

@@ -56,21 +56,21 @@ _static_dir = os.path.join(os.path.dirname(__file__), "static")
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 
-# Mount MCP server if MCP_TOKEN is configured (_mcp_app built at top of file)
+# Mount MCP server if a password is configured (_mcp_app built at top of file)
 if _mcp_app is not None:
     app.mount("/mcp", _mcp_app)
     log.info("MCP server mounted at /mcp")
 else:
-    log.warning("MCP_TOKEN not set — /mcp not mounted")
+    log.warning("no password configured (MAINSPRING_PASSWORD) — /mcp not mounted")
 
-# Mount Datasette if DATASETTE_TOKEN is configured
+# Mount Datasette if a password is configured
 from app.datasette_mount import build_datasette_app
 _ds_app = build_datasette_app()
 if _ds_app is not None:
     app.mount("/datasette", _ds_app)
     log.info("Datasette mounted at /datasette")
 else:
-    log.warning("DATASETTE_TOKEN not set — /datasette not mounted")
+    log.warning("no password configured (MAINSPRING_PASSWORD) — /datasette not mounted")
 
 
 @app.get("/")

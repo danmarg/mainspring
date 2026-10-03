@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from mcp.server import FastMCP
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 
+from app import auth
 from app.db import db, get_connection, utc_now
 
 log = logging.getLogger(__name__)
@@ -231,21 +232,32 @@ def _clean_and_prune(fn):
     return wrapper
 
 
-def _renormalize_date(ts_iso: str) -> None:
-    """Refresh daily_metrics for the UTC date of ts_iso so it's immediately current.
+def _renormalize_date(*ts_iso: str) -> None:
+    """Refresh daily_metrics for the health date(s) of the given timestamps so the
+    change is immediately visible.
 
-    Deliberately only rebuild_daily_metrics for that one date — not the full
+    Deliberately only rebuild_daily_metrics for those dates — not the full
     run_normalization. A manual log can't change day_timezone or activities, and
     the full job deletes + rebuilds every activity and prunes raw payloads, all in
     one write transaction: that made every log_hydration/weight/BP call slow and
-    lock-prone (a multi-second hold behind any import) for no benefit."""
+    lock-prone (a multi-second hold behind any import) for no benefit.
+
+    Both the day-timezone health date (instant-type logs) and the UTC date
+    (date-literal logs like rpe) are refreshed; pass old and new ts when a log
+    moves."""
     try:
+        from app.db import local_health_date
         from app.normalize import rebuild_daily_metrics
-        # Aggregation buckets manual logs by SQL DATE(ts), which normalizes to UTC;
-        # slicing the raw string would miss the day for a non-UTC offset ts.
+        dates: set[str] = set()
         with db() as conn:
-            utc_date = conn.execute("SELECT DATE(?)", (ts_iso,)).fetchone()[0] or ts_iso[:10]
-            rebuild_daily_metrics(conn, dates={utc_date})
+            for ts in ts_iso:
+                if not ts:
+                    continue
+                dates.add(local_health_date(conn, ts))
+                dates.add(conn.execute("SELECT DATE(?)", (ts,)).fetchone()[0] or ts[:10])
+            dates.discard(None)
+            if dates:
+                rebuild_daily_metrics(conn, dates=dates)
     except Exception:
         # best-effort; the next import run's normalization will catch it
         log.exception("renormalize after manual log failed for %s", ts_iso)
@@ -281,6 +293,7 @@ def log_meal(
                 utc_now(),
             ),
         )
+    _renormalize_date(event_ts)
     return f"Logged meal at {event_ts}: {description}"
 
 
@@ -297,6 +310,7 @@ def log_caffeine(
             "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
             (event_ts, "caffeine", description, amount_mg, "mg", utc_now()),
         )
+    _renormalize_date(event_ts)
     return f"Logged caffeine at {event_ts}: {description}" + (f" ({_fmt_num(amount_mg)}mg)" if amount_mg else "")
 
 
@@ -334,6 +348,7 @@ def log_alcohol(
             "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
             (event_ts, "alcohol", description, units, "units", utc_now()),
         )
+    _renormalize_date(event_ts)
     return f"Logged alcohol at {event_ts}: {description}" + (f" ({_fmt_num(units)} units)" if units else "")
 
 
@@ -369,14 +384,16 @@ def amend_log(
         return "No fields provided to amend."
 
     with db() as conn:
-        existing = conn.execute("SELECT id FROM manual_logs WHERE id=?", (log_id,)).fetchone()
+        existing = conn.execute("SELECT ts FROM manual_logs WHERE id=?", (log_id,)).fetchone()
         if not existing:
             return f"Error: no log with id {log_id}"
+        old_ts = existing[0]
         set_clause = ", ".join(f"{k}=?" for k in fields)
         conn.execute(
             f"UPDATE manual_logs SET {set_clause} WHERE id=?",
             (*fields.values(), log_id),
         )
+    _renormalize_date(old_ts, fields.get("ts") or old_ts)
     display = {("estimated_macros" if k == "estimated_macros_json" else k):
                (estimated_macros if k == "estimated_macros_json" else v)
                for k, v in fields.items()}
@@ -782,6 +799,7 @@ def log_rpe(
             "INSERT INTO manual_logs(ts, type, description, quantity, unit, created_at) VALUES (?,?,?,?,?,?)",
             (event_ts, "rpe", desc, float(rpe), "/10", utc_now()),
         )
+    _renormalize_date(event_ts)
     return f"Logged RPE {rpe}/10 for {event_date}" + (f" ({activity_type})" if activity_type else "")
 
 
@@ -1487,9 +1505,9 @@ _offload_sync_tools(mcp)
 def build_mcp_app():
     """
     Return an ASGI app suitable for mounting at /mcp.
-    If MCP_TOKEN is not set, returns None (caller skips the mount).
-    MCP_TOKEN is reused as the login PIN for the OAuth authorization page.
+    If no password is configured, returns None (caller skips the mount).
+    The shared Mainspring password is the login for the OAuth authorization page.
     """
-    if not os.getenv("MCP_TOKEN"):
+    if not auth.configured(auth.MCP):
         return None
     return mcp.streamable_http_app()

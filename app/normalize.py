@@ -12,7 +12,9 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.db import HOME_TZ, DEFAULT_SOURCE_PRIORITY, resolve_metric, utc_now
+from app.db import (
+    HOME_TZ, DEFAULT_SOURCE_PRIORITY, local_health_date, parse_instant, resolve_metric, utc_now,
+)
 
 log = logging.getLogger(__name__)
 
@@ -378,19 +380,50 @@ def _rebuild_hr_zones(conn, date_str: str, todays_max_hr: float | None) -> None:
 
 # ── daily_metrics rebuild ────────────────────────────────────────────────────
 
+# Manual-log types that record a real instant (a drink at 21:00 local) and so
+# belong to the health date of that instant in the day's timezone. Everything else
+# (rpe, soreness, notes) stores a date-literal ts like '<date>T23:59:00+00:00' and
+# is bucketed by that stated date.
+_INSTANT_LOG_TYPES = frozenset({"caffeine", "alcohol", "meal", "hydration", "weight", "blood_pressure"})
+
+
+def _manual_logs_on(conn, date_str: str, log_type: str, column: str) -> list:
+    """Values of `column` for this type's logs whose health date is date_str, in
+    ts order. Fetches a +-1 UTC-day window then filters on the day-timezone date,
+    so a drink at 21:00 New York (01:00 UTC next day) lands on the right day."""
+    day = date.fromisoformat(date_str)
+    rows = conn.execute(
+        f"SELECT {column}, ts FROM manual_logs WHERE type=? AND DATE(ts) BETWEEN ? AND ? ORDER BY ts",
+        (log_type, (day - timedelta(days=1)).isoformat(), (day + timedelta(days=1)).isoformat()),
+    ).fetchall()
+    return [r[0] for r in rows if local_health_date(conn, r[1]) == date_str]
+
+
+def _sum_manual(conn, date_str: str, log_type: str, column: str):
+    values = [v for v in _manual_logs_on(conn, date_str, log_type, column) if v is not None]
+    return sum(values) if values else None
+
+
+def _latest_manual(conn, date_str: str, log_type: str, column: str):
+    values = _manual_logs_on(conn, date_str, log_type, column)
+    return values[-1] if values else None
+
+
 def rebuild_daily_metrics(conn, dates: set[str] | None = None) -> int:
     if dates is None:
         dates = {
             row[0]
             for row in conn.execute("SELECT DISTINCT date FROM raw_daily_metrics").fetchall()
         }
-        dates |= {
-            row[0]
-            for row in conn.execute(
-                "SELECT DISTINCT DATE(ts) FROM manual_logs"
-            ).fetchall()
-            if row[0]
-        }
+        for ts, log_type in conn.execute("SELECT ts, type FROM manual_logs").fetchall():
+            try:
+                dates.add(
+                    local_health_date(conn, ts) if log_type in _INSTANT_LOG_TYPES
+                    else conn.execute("SELECT DATE(?)", (ts,)).fetchone()[0]
+                )
+            except Exception:
+                continue
+        dates.discard(None)
 
     written = 0
     for date_str in sorted(dates):
@@ -465,20 +498,11 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             values["sleep_score"] = round(synthetic, 1)
             source_flags["sleep_score"] = "synthetic"
 
-    caffeine = conn.execute(
-        "SELECT SUM(quantity) FROM manual_logs WHERE type='caffeine' AND DATE(ts)=?",
-        (date_str,),
-    ).fetchone()[0]
+    caffeine = _sum_manual(conn, date_str, "caffeine", "quantity")
 
-    alcohol = conn.execute(
-        "SELECT SUM(quantity) FROM manual_logs WHERE type='alcohol' AND DATE(ts)=?",
-        (date_str,),
-    ).fetchone()[0]
+    alcohol = _sum_manual(conn, date_str, "alcohol", "quantity")
 
-    calories = conn.execute(
-        "SELECT SUM(estimated_calories) FROM manual_logs WHERE type='meal' AND DATE(ts)=?",
-        (date_str,),
-    ).fetchone()[0]
+    calories = _sum_manual(conn, date_str, "meal", "estimated_calories")
 
     # Manual hydration logs are pushed back to Garmin Connect (push_hydration), so
     # Garmin's own total will include them again on the next import. Take the max
@@ -486,10 +510,7 @@ def _rebuild_one_day(conn, date_str: str) -> None:
     # lands) or overriding (throws away Garmin's total once it does): before
     # push-back the manual value is the larger/more current one and wins; after
     # push-back Garmin's total already includes it and is >= the manual sum.
-    manual_hydration = conn.execute(
-        "SELECT SUM(quantity) FROM manual_logs WHERE type='hydration' AND DATE(ts)=?",
-        (date_str,),
-    ).fetchone()[0]
+    manual_hydration = _sum_manual(conn, date_str, "hydration", "quantity")
     if manual_hydration is not None:
         raw_hydration = values.get("hydration_ml")
         if raw_hydration is None or manual_hydration > raw_hydration:
@@ -498,11 +519,7 @@ def _rebuild_one_day(conn, date_str: str) -> None:
         # else: raw value already reflects (or exceeds) the manual log; keep it
         # and its existing source flag
 
-    weight_row = conn.execute(
-        "SELECT quantity FROM manual_logs WHERE type='weight' AND DATE(ts)=? ORDER BY ts DESC LIMIT 1",
-        (date_str,),
-    ).fetchone()
-    weight_kg = weight_row[0] if weight_row else None
+    weight_kg = _latest_manual(conn, date_str, "weight", "quantity")
     if weight_kg is None:
         weight_kg, weight_src = resolve_metric(conn, date_str, "weight_kg")
         if weight_src:
@@ -516,15 +533,11 @@ def _rebuild_one_day(conn, date_str: str) -> None:
     ).fetchone()
     rpe = rpe_row[0] if rpe_row else None
 
-    bp_row = conn.execute(
-        "SELECT estimated_macros_json FROM manual_logs "
-        "WHERE type='blood_pressure' AND DATE(ts)=? ORDER BY ts DESC LIMIT 1",
-        (date_str,),
-    ).fetchone()
+    bp_json = _latest_manual(conn, date_str, "blood_pressure", "estimated_macros_json")
     bp_systolic = bp_diastolic = bp_pulse = None
-    if bp_row and bp_row[0]:
+    if bp_json:
         try:
-            bp = json.loads(bp_row[0])
+            bp = json.loads(bp_json)
             bp_systolic = bp.get("systolic")
             bp_diastolic = bp.get("diastolic")
             bp_pulse = bp.get("pulse")
@@ -696,15 +709,14 @@ def rebuild_activities(conn) -> int:
 
 
 def _parse_start(start_time: str | None) -> datetime | None:
+    """Activity start as an aware UTC datetime (Z / offset / fractional seconds;
+    naive is read as UTC, matching how both importers now store start_time)."""
     if not start_time:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
-                "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ"):
-        try:
-            return datetime.strptime(start_time, fmt)
-        except ValueError:
-            continue
-    return None
+    try:
+        return parse_instant(start_time)
+    except ValueError:
+        return None
 
 
 def _find_match(

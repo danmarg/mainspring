@@ -43,7 +43,7 @@ $EDITOR .env
 # 3. Start
 docker compose up -d
 
-# 4. Open the dashboard — authenticate with DATASETTE_TOKEN from .env
+# 4. Open the dashboard — authenticate with MAINSPRING_PASSWORD from .env
 open http://localhost:8080/dashboard
 ```
 
@@ -59,12 +59,16 @@ All config lives in `.env`. See `.env.example` for the full reference.
 
 | Variable | Purpose |
 |---|---|
-| `ADMIN_TOKEN` | Import endpoints (`/admin/import/*`) |
-| `DATASETTE_TOKEN` | Dashboard login + Datasette SQL explorer |
-| `EXPORT_TOKEN` | `/export/db` snapshot download |
+| `MAINSPRING_PASSWORD` | The single password: import/export endpoints (as a bearer token), dashboard + Datasette login, and the MCP connector's authorization page |
 | `HOME_TZ` | IANA timezone name, e.g. `America/New_York` |
 
-`scripts/generate_config.sh` generates a `.env` with random tokens for the first three.
+`scripts/generate_config.sh` generates a `.env` with a random password.
+
+The old per-surface variables (`ADMIN_TOKEN`, `EXPORT_TOKEN`, `DATASETTE_TOKEN`, `MCP_TOKEN`) are still honoured
+for their own surface while set, so existing cron jobs keep working during a migration. Once everything uses
+`MAINSPRING_PASSWORD`, remove them (`fly secrets unset ADMIN_TOKEN EXPORT_TOKEN DATASETTE_TOKEN MCP_TOKEN`).
+Failed logins are rate-limited per IP. Credential tables (OAuth tokens, Google refresh token) are never readable
+through Datasette or included in `/export/db`.
 
 ### Garmin setup
 
@@ -110,7 +114,7 @@ Google Health adds sleep stages and other metrics not available from Garmin dire
    ```bash
    python scripts/google_health_get_tokens.py \
      --base-url http://localhost:8080 \
-     --token $ADMIN_TOKEN
+     --token $MAINSPRING_PASSWORD
    ```
    This opens a browser window, completes the OAuth consent, and stores the tokens in the app's database. Re-run to refresh.
 
@@ -118,7 +122,7 @@ Google Health adds sleep stages and other metrics not available from Garmin dire
 
 | Feature | Env var(s) required |
 |---|---|
-| MCP server (Claude nutrition logging) | `MCP_TOKEN` |
+| MCP server (Claude nutrition logging) | `MAINSPRING_PASSWORD` (entered on the authorization page) |
 | Litestream real-time DB backup | `LITESTREAM_REPLICA_URL` |
 | Fitbit | `FITBIT_CLIENT_ID`, `FITBIT_CLIENT_SECRET` |
 
@@ -136,13 +140,13 @@ LITESTREAM_REPLICA_URL=s3://mybucket/health.db
 
 ## Claude integration (MCP)
 
-`MCP_TOKEN` is a bearer token you choose (or let `scripts/generate_config.sh` generate). When it is set, the app exposes an MCP server at `/mcp`.
+`MAINSPRING_PASSWORD` is the password you choose (or let `scripts/generate_config.sh` generate). When a password is configured, the app exposes an MCP server at `/mcp`.
 
 To connect it to Claude:
 
 1. In Claude, go to **Settings → Integrations** and add a remote MCP server
 2. URL: `https://your-app/mcp` (or `http://localhost:8080/mcp` locally)
-3. Auth: Bearer token — paste the value of `MCP_TOKEN` from your `.env`
+3. Auth: OAuth — when prompted, enter the value of `MAINSPRING_PASSWORD` from your `.env`
 
 Once connected, Claude can log meals, caffeine, alcohol, weight, and blood pressure directly from conversation, and query your health history.
 
@@ -221,11 +225,11 @@ Imports run automatically every hour via the `importer` service. To trigger one 
 ```bash
 # Garmin
 curl -X POST http://localhost:8080/admin/import/garmin \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
+  -H "Authorization: Bearer $MAINSPRING_PASSWORD"
 
 # Google Health
 curl -X POST http://localhost:8080/admin/import/google_health \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
+  -H "Authorization: Bearer $MAINSPRING_PASSWORD"
 ```
 
 Each import pulls a rolling 7-day window to catch late-arriving Garmin corrections (HRV, sleep scores).
@@ -245,7 +249,7 @@ Each import pulls a rolling 7-day window to catch late-arriving Garmin correctio
 
 The time range selector (7d / 30d / 90d / 180d / 360d) persists across page navigation.
 
-Datasette (raw SQL over all tables) is available at `/datasette`, gated by the same `DATASETTE_TOKEN`. See the [Datasette section](#datasette--sql-exploration) below for example correlation queries.
+Datasette (raw SQL over all tables) is available at `/datasette`, gated by the same password. See the [Datasette section](#datasette--sql-exploration) below for example correlation queries.
 
 ---
 
@@ -302,7 +306,7 @@ Because both are computed regardless of `source_config`, `set_source_preference(
 
 ## Datasette / SQL exploration
 
-Datasette is available at `/datasette` (authenticate with `DATASETTE_TOKEN`). It gives you a full SQL interface over every table — useful for ad-hoc correlation queries that go beyond what the dashboard and MCP tools expose.
+Datasette is available at `/datasette` (authenticate with `MAINSPRING_PASSWORD`). It gives you a full SQL interface over every table — useful for ad-hoc correlation queries that go beyond what the dashboard and MCP tools expose.
 
 ### Useful queries
 
@@ -372,7 +376,7 @@ ORDER BY l.ts DESC
 LIMIT 100;
 ```
 
-These queries run directly in the Datasette UI — no setup required. You can also download a consistent DB snapshot from `/export/db` (requires `EXPORT_TOKEN`) and run heavier analysis locally in a notebook.
+These queries run directly in the Datasette UI — no setup required. You can also download a consistent DB snapshot from `/export/db` (requires `MAINSPRING_PASSWORD` as the bearer token) and run heavier analysis locally in a notebook.
 
 ---
 
@@ -387,10 +391,7 @@ fly volumes create health_data --size 10 --region iad
 
 # Mirror your .env as Fly secrets:
 fly secrets set \
-  ADMIN_TOKEN=... \
-  DATASETTE_TOKEN=... \
-  EXPORT_TOKEN=... \
-  MCP_TOKEN=... \
+  MAINSPRING_PASSWORD=... \
   APP_BASE_URL=https://your-app.fly.dev \
   HOME_TZ=Europe/Berlin \
   GARMINTOKENS='...' \
@@ -415,7 +416,7 @@ The included `.github/workflows/import.yml` provides a secondary hourly trigger 
 | Secret | Value |
 |---|---|
 | `MAINSPRING_URL` | Your app's public URL, e.g. `https://your-app.fly.dev` |
-| `MAINSPRING_ADMIN_TOKEN` | The value of `ADMIN_TOKEN` from your `.env` |
+| `MAINSPRING_ADMIN_TOKEN` | The value of `MAINSPRING_PASSWORD` from your `.env` |
 
 The workflow also has a manual trigger that lets you run a backfill for a specific date range.
 
