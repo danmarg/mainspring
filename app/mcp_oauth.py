@@ -5,6 +5,8 @@ Single-user design: the "login" is just entering MCP_TOKEN as a PIN.
 All state lives in the SQLite DB.
 """
 
+import asyncio
+import functools
 import json
 import os
 import secrets
@@ -70,6 +72,17 @@ def _db():
     return get_connection()
 
 
+def _threaded(fn):
+    """Expose a sync DB-writing function as an async provider method run in a
+    worker thread. These writes wait up to busy_timeout (5min) behind an import's
+    write lock; run inline they'd freeze the event loop (and /healthz) meanwhile.
+    Read-only methods stay inline — WAL readers never wait on the writer."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return wrapper
+
+
 # ── OAuth provider ────────────────────────────────────────────────────────────
 
 class MainspringOAuthProvider:
@@ -91,7 +104,8 @@ class MainspringOAuthProvider:
             return None
         return OAuthClientInformationFull(**json.loads(row[0]))
 
-    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+    @_threaded
+    def register_client(self, client_info: OAuthClientInformationFull) -> None:
         conn = _db()
         try:
             conn.execute(
@@ -104,7 +118,8 @@ class MainspringOAuthProvider:
         finally:
             conn.close()
 
-    async def authorize(
+    @_threaded
+    def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
         session_id = secrets.token_urlsafe(32)
@@ -141,7 +156,8 @@ class MainspringOAuthProvider:
             return None
         return AuthorizationCode(**json.loads(row[0]))
 
-    async def exchange_authorization_code(
+    @_threaded
+    def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
         access_token = secrets.token_urlsafe(32)
@@ -216,7 +232,8 @@ class MainspringOAuthProvider:
             return None
         return rt
 
-    async def exchange_refresh_token(
+    @_threaded
+    def exchange_refresh_token(
         self,
         client: OAuthClientInformationFull,
         refresh_token: RefreshToken,
@@ -247,7 +264,8 @@ class MainspringOAuthProvider:
             scope=" ".join(at.scopes),
         )
 
-    async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
+    @_threaded
+    def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         conn = _db()
         try:
             if isinstance(token, AccessToken):
@@ -304,7 +322,7 @@ async def login_page(session: str, error: str = ""):
 
 
 @router.post("/login")
-async def login_submit(request: Request, session: str = Form(...), pin: str = Form(...)):
+def login_submit(request: Request, session: str = Form(...), pin: str = Form(...)):
     expected = os.getenv("MCP_TOKEN")
     if not expected or pin != expected:
         return RedirectResponse(

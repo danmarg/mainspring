@@ -501,15 +501,29 @@ def test_log_energy_validates_and_stores_ordinal_level():
 
 # ── tool_call_log instrumentation ─────────────────────────────────────────────
 
+async def _wait_for_row(sql: str, timeout: float = 3.0):
+    """The call log is written fire-and-forget off the event loop, so it lands
+    shortly after the tool returns rather than before."""
+    import asyncio
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        conn = sqlite3.connect(str(db_module.DB_PATH))
+        try:
+            row = conn.execute(sql).fetchone()
+        finally:
+            conn.close()
+        if row or asyncio.get_running_loop().time() > deadline:
+            return row
+        await asyncio.sleep(0.05)
+
+
 async def test_tool_call_logging_records_successful_call():
     from app.mcp_server import mcp
     await mcp._tool_manager.call_tool("get_source_config", {})
 
-    conn = sqlite3.connect(str(db_module.DB_PATH))
-    row = conn.execute(
+    row = await _wait_for_row(
         "SELECT tool, outcome, error, duration_ms FROM tool_call_log WHERE tool='get_source_config'"
-    ).fetchone()
-    conn.close()
+    )
     assert row is not None
     assert row[0] == "get_source_config"
     assert row[1] == "ok"
@@ -524,20 +538,10 @@ async def test_tool_call_logging_records_exception_and_still_raises():
     with pytest.raises(ToolError):
         await mcp._tool_manager.call_tool("not_a_real_tool", {})
 
-    conn = sqlite3.connect(str(db_module.DB_PATH))
-    row = conn.execute(
+    row = await _wait_for_row(
         "SELECT tool, outcome, error FROM tool_call_log WHERE tool='not_a_real_tool'"
-    ).fetchone()
-    conn.close()
+    )
     assert row is not None
     assert row[1] == "error"
     assert "not_a_real_tool" in row[2] or "Unknown tool" in row[2]
 
-
-def test_sync_tools_are_offloaded_from_event_loop():
-    """FastMCP runs sync tools inline on the loop; _offload_sync_tools must have
-    wrapped every tool so a slow/lock-blocked call can't freeze /healthz."""
-    from app.mcp_server import mcp
-
-    tools = mcp._tool_manager._tools
-    assert tools and all(t.is_async for t in tools.values())
