@@ -1366,7 +1366,8 @@ def overview(request: Request,
     # Intensity = RPE/10 if logged, else (avg_hr - resting_hr) / (max_hr - resting_hr),
     # with the same personal HR ceiling the load model uses (not a flat 190).
     resting_hr_for_calc = float(today_row[2]) if today_row and today_row[2] else 55.0
-    max_hr_for_calc = hr_ceiling(conn, today)
+    with db() as ceiling_conn:  # the page's main connection is already closed here
+        max_hr_for_calc = hr_ceiling(ceiling_conn, today)
     activity_boosts: list[tuple[float, float]] = []
     strain_events: list[tuple[float, float]] = []
     for index, act in enumerate(activity_rows):
