@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -16,12 +17,25 @@ log = logging.getLogger(__name__)
 
 # Build MCP app now (sets mcp._session_manager as a side effect)
 from app.mcp_server import build_mcp_app, mcp as _mcp_instance
+from app.watchdog import start_watchdog
 _mcp_app = build_mcp_app()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    dog = start_watchdog()
+    beat = asyncio.create_task(dog.heartbeat())
+    try:
+        async with _serve_mcp():
+            yield
+    finally:
+        beat.cancel()
+        dog.stop()
+
+
+@asynccontextmanager
+async def _serve_mcp():
     if _mcp_app is not None:
         # StreamableHTTPSessionManager requires its task group to be started
         # via run() before any requests arrive. Starlette does NOT call mounted
