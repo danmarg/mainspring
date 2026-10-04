@@ -34,7 +34,7 @@ Everything runs in a single Docker container with a single SQLite file — no ex
 git clone https://github.com/danmarg/mainspring
 cd mainspring
 
-# 1. Generate .env with random bearer tokens
+# 1. Generate .env with a random password
 bash scripts/generate_config.sh
 
 # 2. Set HOME_TZ and add Garmin credentials (see Garmin setup below)
@@ -257,10 +257,32 @@ Datasette (raw SQL over all tables) is available at `/datasette`, gated by the s
 
 - **Single SQLite file** at `DB_PATH` (default `/data/health.db`), WAL mode
 - **FastAPI** app serves the dashboard, admin import routes, optional MCP server, and Datasette
-- `raw_import_payloads` — append-only landing zone written before any parsing; everything else is derived and replayable
+- `raw_import_payloads` — landing zone for verbatim upstream responses written before any parsing; everything else is derived and replayable (superseded intermediate versions are compacted — see Operations)
+- `day_timezone` — the timezone of each health day, used to turn UTC instants into health dates
 - `raw_daily_metrics(date, source, metric, value)` — provider-agnostic EAV table; adding a new source = new rows, no schema change
 - `daily_metrics` — normalized wide table rebuilt after each import; this is what the dashboard queries
 - `manual_logs` — write target for all MCP nutrition/caffeine/alcohol logging tools
+
+---
+
+## Health dates, timezones and HRV
+
+- **Instants vs. dates.** Every timestamp is stored in UTC. A *health date* is the instant converted to that day's
+  timezone, taken from the `day_timezone` table (derived from device offsets in the raw payloads, with `HOME_TZ` as the
+  fallback). So a drink logged at 21:00 in New York is 01:00 UTC the next day but counts toward the day you drank it.
+  This applies to caffeine, alcohol, meals, hydration, weight and blood pressure.
+- **Date-literal logs.** RPE and soreness are logged *for a date* (stored as `<date>T…+00:00`), so they stay on the date you
+  gave and are never shifted by timezone.
+- **Editing logs.** Meal, caffeine, alcohol, hydration, weight, blood-pressure and RPE logs, plus `amend_log` and
+  `delete_log`, immediately refresh `daily_metrics` for the affected day(s), including both days when a log is moved
+  across midnight.
+- **Activity start times** are stored as UTC instants (Garmin `startTimeGMT`); `activities.date` is the local calendar day.
+  Google Health and Garmin starts are compared as UTC when de-duplicating activities (±15 minutes).
+- **HRV** is last night's value from `hrvSummary.lastNightAvg`. There is deliberately no fall-back to Garmin's weekly
+  average: before Garmin finishes computing a night, the nightly value is empty and storing the smoothed weekly figure
+  would hide a bad night. (History imported before this change may contain weekly averages.)
+- **Heart-rate ceiling.** HRR-based training load, strain/monotony and the energy chart all use one personal ceiling: the
+  95th percentile of your daily max HR over the last 180 days (190 bpm if there isn't enough data).
 
 ---
 
@@ -405,18 +427,55 @@ The app auto-stops when idle and wakes on the first incoming request.
 
 ### Scheduled imports on Fly.io
 
-`fly-deploy.sh` manages a dedicated Fly Machine that runs the importers hourly. On first run it creates the scheduler machine automatically; on subsequent deploys it updates it to the new image. No manual setup required.
+`fly-deploy.sh` manages a dedicated Fly Machine that runs the importers on a schedule. On first run it creates the scheduler machine automatically; on subsequent deploys it updates it to the new image. No manual setup required.
 
-The scheduler calls the app via its public URL so the Fly proxy wakes the auto-stopped app machine on each run.
+The scheduler calls the app via its public URL so the Fly proxy wakes the auto-stopped app machine on each run. The scheduler sends `MAINSPRING_PASSWORD` (or the legacy `ADMIN_TOKEN` while that's still set) as the bearer token.
 
-**Fallback: GitHub Actions**
+Overlapping triggers are harmless: only one import per source runs at a time, and a trigger that arrives while one is running returns `{"status": "already_running"}` and does nothing.
 
-The included `.github/workflows/import.yml` provides a secondary hourly trigger via GitHub Actions. To enable it, add two secrets to your repository (Settings → Secrets and variables → Actions):
+---
 
-| Secret | Value |
+## Operations and maintenance
+
+### Imports and the write lock
+
+SQLite has a single writer, so the importers commit before every upstream HTTP call and never hold the write lock across
+network I/O. Imports are single-flight per source (see above); explicit-range imports (`start_date`/`end_date`, e.g.
+`scripts/backfill.sh`) get HTTP 409 while one is running and should simply retry. On startup, import runs left `running` by
+a killed process are marked `error` ("interrupted"). Normalization is serialized across imports.
+
+Diagnostics you can read in `fly logs`:
+
+| Log line | Meaning |
 |---|---|
-| `MAINSPRING_URL` | Your app's public URL, e.g. `https://your-app.fly.dev` |
-| `MAINSPRING_ADMIN_TOKEN` | The value of `MAINSPRING_PASSWORD` from your `.env` |
+| `write transaction held Ns by module:function:line` | A write transaction stayed open ≥ `LOCK_HOLD_WARN_S` (default 2s), with its holder |
+| `database is locked … write transactions open now: [...]` | Every write transaction open when a lock error occurred, oldest first |
+| `normalization step … took Ns` / `… timing: fetch+parse … normalization …` | Per-step and per-import timing |
+| `event loop stalled Ns; … thread stacks follow` | The watchdog saw the event loop stop responding; all thread stacks follow |
 
-The workflow also has a manual trigger that lets you run a backfill for a specific date range.
+The **watchdog** restarts the process (so Fly restarts the machine) if the event loop is stalled for 90s
+(`WATCHDOG_EXIT_AFTER_S`, `0` disables the exit; `WATCHDOG_DUMP_AFTER_S` sets when stacks are dumped, default 15s).
 
+### Raw payload retention and compaction
+
+`raw_import_payloads` keeps the verbatim upstream responses. Intraday endpoints return a new payload every time the day has
+progressed, so without compaction it held ~70 intermediate copies of each day and made up ~97% of the database.
+
+- **Compaction** (once a day after an import, in small committed batches under a 10s budget): once a day is more than 2
+  days old, only the newest payload per source/endpoint/date is kept. Activities keep the newest copy per `activityId`;
+  date-less range payloads (`get_body_battery`, `get_activities_by_date`, `get_scheduled_workouts`) keep the newest.
+- **Pruning** deletes payloads older than 180 days (`RAW_PAYLOAD_RETENTION_DAYS`). It costs one lookup when nothing is due.
+- The file does not shrink by itself: SQLite reuses freed pages but never returns them to the volume.
+
+Admin endpoints (bearer = `MAINSPRING_PASSWORD`):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /admin/maintenance/db` | File, live and reclaimable size; free disk; last maintenance result |
+| `POST /admin/maintenance/compact` | Run compaction to completion now |
+| `POST /admin/maintenance/vacuum` | Rewrite the file to return free pages to the volume. Refused unless there is enough disk (~1.3× the live data, on the volume and in the temp dir) and ≥ 50MB reclaimable. Holds the write lock while it runs |
+
+### Dependencies
+
+`datasette` is pinned to the 0.65 series: a newer release can change plugin internals and break startup, which happened once
+in production (0.65.5 reads `plugin.__name__`). Test an upgrade locally before widening the pin.
