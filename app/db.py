@@ -313,6 +313,7 @@ def upsert_raw_metric(
 
 
 _MULTI_ITEM_ENDPOINTS = frozenset({"activity", "scheduled_workout", "get_body_battery_item"})
+_DEDUPE_WINDOW_ROWS = 20_000  # ~ several days of imports
 
 
 def upsert_raw_payload(
@@ -327,26 +328,31 @@ def upsert_raw_payload(
     stored payload for this (source, endpoint, date) — rolling-window imports
     re-fetch the same days repeatedly, so most re-fetches have unchanged
     content and would otherwise duplicate storage forever."""
+    # raw_import_payloads has no index and is mostly large payload_json blobs, so any
+    # unbounded search is a full-table scan. Only compare against recent rows (a
+    # rowid range): that covers the rolling re-fetch window the dedupe exists for.
+    max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM raw_import_payloads").fetchone()[0]
+    floor = max_id - _DEDUPE_WINDOW_ROWS
     if endpoint in _MULTI_ITEM_ENDPOINTS or date is None:
         # Several distinct payloads share one (source, endpoint, date) — two
-        # activities on a day, or per-activity splits/zones stored with date NULL — so "identical to the latest" never matches (A,B,A,B
-        # alternate) and every run re-inserted them all. Dedupe against any stored
-        # copy instead; ordering doesn't matter for these (derived tables are keyed
-        # by the item's own id).
+        # activities on a day, or per-activity splits/zones stored with date NULL — so
+        # "identical to the latest" never matches (A,B,A,B alternate). Dedupe against
+        # any recent copy instead; ordering doesn't matter for these (derived tables
+        # are keyed by the item's own id).
         if conn.execute(
-            "SELECT 1 FROM raw_import_payloads WHERE source=? AND endpoint=? AND date IS ? "
-            "AND payload_json=? LIMIT 1",
-            (source, endpoint, date, payload_json),
+            "SELECT 1 FROM raw_import_payloads WHERE id > ? AND source=? AND endpoint=? "
+            "AND date IS ? AND payload_json=? LIMIT 1",
+            (floor, source, endpoint, date, payload_json),
         ).fetchone():
             return
     else:
         row = conn.execute(
             """
             SELECT payload_json FROM raw_import_payloads
-            WHERE source=? AND endpoint=? AND date IS ?
+            WHERE id > ? AND source=? AND endpoint=? AND date IS ?
             ORDER BY id DESC LIMIT 1
             """,
-            (source, endpoint, date),
+            (floor, source, endpoint, date),
         ).fetchone()
         if row and row[0] == payload_json:
             return
