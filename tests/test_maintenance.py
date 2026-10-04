@@ -163,11 +163,58 @@ def test_maybe_compact_waits_between_passes_but_continues_when_unfinished(tmp_db
     assert len(calls) == 2
 
 
-def test_run_normalization_triggers_compaction(tmp_db, monkeypatch):
+def test_normalization_itself_does_not_compact(tmp_db, monkeypatch):
+    """Compaction must not run inside the normalization lock/transaction."""
     calls = []
     monkeypatch.setattr(norm, "maybe_compact_raw_payloads", lambda conn: calls.append(1) or 0)
     norm.run_normalization(tmp_db, {day(0)})
-    assert calls == [1]
+    assert calls == []
+
+
+def _finish_import(monkeypatch, source="garmin"):
+    monkeypatch.setattr(admin_routes, "_fire_morning_webhook", lambda: True)
+    run = admin_routes._start_import(source, __import__("fastapi").BackgroundTasks(), lambda *a, **k: {}, 7, None, None)
+    admin_routes._run_import_bg(source, run["run_id"], lambda conn, **kw: {"skipped": False, "rows_upserted": 0, "dates": []}, {})
+    return run
+
+
+def test_import_triggers_compaction_after_it_is_recorded_and_outside_the_normalization_lock(tmp_db, monkeypatch):
+    seen = {}
+
+    def fake_compact(conn):
+        seen["normalization_lock_held"] = admin_routes._normalization_lock.locked()
+        seen["run_status"] = conn.execute("SELECT status FROM import_runs ORDER BY id DESC LIMIT 1").fetchone()[0]
+        return 0
+
+    monkeypatch.setattr(norm, "maybe_compact_raw_payloads", fake_compact)
+    admin_routes._running_imports.clear()
+    _finish_import(monkeypatch)
+    assert seen == {"normalization_lock_held": False, "run_status": "ok"}
+
+
+def test_compaction_failure_never_fails_the_import(tmp_db, monkeypatch):
+    def boom(conn):
+        raise RuntimeError("disk exploded")
+    monkeypatch.setattr(norm, "maybe_compact_raw_payloads", boom)
+    admin_routes._running_imports.clear()
+    run = _finish_import(monkeypatch)
+    assert tmp_db.execute("SELECT status FROM import_runs WHERE id=?", (run["run_id"],)).fetchone()[0] == "ok"
+
+
+def test_compaction_is_skipped_while_a_maintenance_job_runs(tmp_db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(norm, "maybe_compact_raw_payloads", lambda conn: calls.append(1) or 0)
+    assert admin_routes._maintenance_lock.acquire(blocking=False)
+    try:
+        admin_routes._running_imports.clear()
+        _finish_import(monkeypatch)
+    finally:
+        admin_routes._maintenance_lock.release()
+    assert calls == []
+
+
+def test_compaction_runs_daily_once_caught_up(monkeypatch):
+    assert norm.COMPACT_INTERVAL_S == 24 * 3600 and norm.COMPACT_TIME_BUDGET_S == 10.0
 
 
 # ── stats + vacuum ───────────────────────────────────────────────────────────
