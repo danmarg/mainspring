@@ -173,6 +173,21 @@ def _start_import(source: str, background_tasks, import_fn, days, start_date, en
     return {"run_id": run_id, "status": "started"}
 
 
+def _compact_after_import() -> None:
+    """Best-effort payload compaction (daily once caught up). Skipped if a maintenance
+    job is already running; a failure here must never fail the import."""
+    if not _maintenance_lock.acquire(blocking=False):
+        return
+    try:
+        from app.normalize import maybe_compact_raw_payloads
+        with db() as conn:
+            maybe_compact_raw_payloads(conn)
+    except Exception:
+        log.exception("raw payload compaction failed")
+    finally:
+        _maintenance_lock.release()
+
+
 def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
     """Run an import synchronously in a background thread and update import_runs."""
     try:
@@ -251,6 +266,10 @@ def _run_import_bg_inner(source: str, run_id: int, import_fn, import_kwargs: dic
                 if claimed and not _fire_morning_webhook():
                     with db() as conn:
                         conn.execute("DELETE FROM morning_webhooks WHERE date=?", (today,))
+
+        # Housekeeping last, after the run is recorded and the webhook has fired, and
+        # outside the normalization lock so it never delays an import's completion.
+        _compact_after_import()
 
     except Exception as exc:
         log.exception("%s import run_id=%d failed", source, run_id)
@@ -360,7 +379,9 @@ def _compact_until_done() -> dict:
     total, rounds = 0, 0
     while True:
         with db() as conn:
-            deleted, finished = compact_raw_payloads(conn)
+            # explicit admin run: longer rounds, since every round re-scans the table to find
+            # victims; the write lock is still only held per committed batch
+            deleted, finished = compact_raw_payloads(conn, time_budget_s=60.0)
         total += deleted
         rounds += 1
         if finished:

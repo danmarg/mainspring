@@ -834,8 +834,8 @@ def prune_raw_payloads(conn, retention_days: int = RAW_PAYLOAD_RETENTION_DAYS,
 
 COMPACT_AFTER_DAYS = 2          # today and the two days before it stay untouched
 COMPACT_BATCH_ROWS = 100        # commit between batches so writers can interleave
-COMPACT_TIME_BUDGET_S = 20.0
-COMPACT_INTERVAL_S = 6 * 3600   # how often an import triggers a compaction pass
+COMPACT_TIME_BUDGET_S = 10.0   # per call; the write lock is only held per committed batch, never for the budget
+COMPACT_INTERVAL_S = 24 * 3600  # once a day once caught up (every import until the backlog is done)
 
 # several distinct payloads share one (source, endpoint, date) and there's no per-row key
 # to tell versions apart ('activity' is handled separately, keyed by activityId)
@@ -914,17 +914,24 @@ def compact_raw_payloads(conn, time_budget_s: float = COMPACT_TIME_BUDGET_S,
     conn.execute("PRAGMA secure_delete=OFF")  # don't rewrite every freed page (halves WAL traffic)
     victims.sort()
     deleted = 0
+    slowest = 0.0
     deadline = time.monotonic() + time_budget_s
+    finished = True
     for i in range(0, len(victims), COMPACT_BATCH_ROWS):
         if time.monotonic() >= deadline:
-            return deleted, False
+            finished = False
+            break
         batch = victims[i:i + COMPACT_BATCH_ROWS]
+        t = time.monotonic()
         cur = conn.execute(
             f"DELETE FROM raw_import_payloads WHERE id IN ({','.join('?' * len(batch))})", batch
         )
         conn.commit()
+        slowest = max(slowest, time.monotonic() - t)  # includes any wait for the write lock
         deleted += cur.rowcount
-    return deleted, True
+    if slowest >= 1.0:
+        log.warning("compaction: slowest committed batch took %.1fs (%d rows each)", slowest, COMPACT_BATCH_ROWS)
+    return deleted, finished
 
 
 _compaction_state = {"last_finished": 0.0}
@@ -961,7 +968,6 @@ def run_normalization(conn, dates: set[str] | None = None) -> dict:
     metric_rows = _timed("daily_metrics", rebuild_daily_metrics, conn, dates)
     activity_rows = _timed("activities", rebuild_activities, conn)
     pruned_rows = _timed("prune_raw_payloads", prune_raw_payloads, conn)
-    _timed("compact_raw_payloads", maybe_compact_raw_payloads, conn)
     conn.commit()
     return {
         "day_timezone_rows": tz_rows,
