@@ -769,6 +769,21 @@ def _first_fetched_at_from(conn, min_id: int):
     ).fetchone()
 
 
+def _id_boundary(conn, cutoff: str, first_id: int) -> int:
+    """Smallest id whose fetched_at >= cutoff (rows are append-only, so fetched_at
+    rises with id): binary search over rowid lookups, never a table scan."""
+    max_id = conn.execute("SELECT MAX(id) FROM raw_import_payloads").fetchone()[0]
+    lo, hi = first_id, max_id + 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        row = _first_fetched_at_from(conn, mid)
+        if row is None or row[1] >= cutoff:
+            hi = mid
+        else:
+            lo = row[0] + 1
+    return lo
+
+
 def prune_raw_payloads(conn, retention_days: int = RAW_PAYLOAD_RETENTION_DAYS,
                        time_budget_s: float = PRUNE_TIME_BUDGET_S) -> int:
     """Delete raw_import_payloads rows older than the retention window.
@@ -790,18 +805,7 @@ def prune_raw_payloads(conn, retention_days: int = RAW_PAYLOAD_RETENTION_DAYS,
     first = _first_fetched_at_from(conn, 0)
     if not first or first[1] >= cutoff:
         return 0
-    max_id = conn.execute("SELECT MAX(id) FROM raw_import_payloads").fetchone()[0]
-
-    # smallest id whose fetched_at >= cutoff (everything below it is expired)
-    lo, hi = first[0], max_id + 1
-    while lo < hi:
-        mid = (lo + hi) // 2
-        row = _first_fetched_at_from(conn, mid)
-        if row is None or row[1] >= cutoff:
-            hi = mid
-        else:
-            lo = row[0] + 1
-    boundary = lo
+    boundary = _id_boundary(conn, cutoff, first[0])
 
     deleted = 0
     deadline = time.monotonic() + time_budget_s
@@ -815,6 +819,130 @@ def prune_raw_payloads(conn, retention_days: int = RAW_PAYLOAD_RETENTION_DAYS,
         deleted += cur.rowcount
         if cur.rowcount < PRUNE_BATCH_ROWS:
             break
+    return deleted
+
+
+# ── compaction ───────────────────────────────────────────────────────────────
+#
+# Intraday endpoints (heart rate, stress, sleep, body battery...) return a different
+# payload every time the day has progressed, so every import stored a fresh full copy
+# for today/yesterday — ~70 copies a day at imports every 20 minutes — and 97% of the
+# database (1.5GB of 1.6GB) was those intermediate snapshots (plus ~50k duplicate
+# activity payloads and thousands of whole-month scheduled-workout lists). Only the
+# final version of a settled day has replay value, so once a day is settled keep just
+# its newest payload per (source, endpoint, date).
+
+COMPACT_AFTER_DAYS = 2          # today and the two days before it stay untouched
+COMPACT_BATCH_ROWS = 100        # commit between batches so writers can interleave
+COMPACT_TIME_BUDGET_S = 20.0
+COMPACT_INTERVAL_S = 6 * 3600   # how often an import triggers a compaction pass
+
+# several distinct payloads share one (source, endpoint, date) and there's no per-row key
+# to tell versions apart ('activity' is handled separately, keyed by activityId)
+_NEVER_COMPACT = frozenset({"activity", "scheduled_workout", "get_activity_splits", "get_activity_hr_in_timezones"})
+# stored with date NULL and re-stored whenever they change; redundant with per-item rows
+_NULL_DATE_COMPACT = frozenset({"get_body_battery", "get_activities_by_date", "get_scheduled_workouts"})
+
+
+def _superseded_activity_payloads(conn, settled_before: str) -> list[int]:
+    """Older copies of the same activity (keyed by activityId inside the payload).
+    Activity payloads are small, so reading them is cheap; read in id-ordered pages."""
+    newest: dict[tuple, int] = {}
+    rows: list[tuple] = []
+    last_id = 0
+    while True:
+        page = conn.execute(
+            "SELECT id, source, json_extract(payload_json, '$.activityId') FROM raw_import_payloads "
+            "WHERE endpoint='activity' AND date IS NOT NULL AND date < ? AND id > ? ORDER BY id LIMIT 2000",
+            (settled_before, last_id),
+        ).fetchall()
+        if not page:
+            break
+        last_id = page[-1][0]
+        for rid, source, activity_id in page:
+            if activity_id is None:
+                continue  # unrecognised shape: leave alone
+            key = (source, str(activity_id))
+            rows.append((rid, key))
+            newest[key] = max(rid, newest.get(key, -1))
+    return [rid for rid, key in rows if rid != newest[key]]
+
+
+def compact_raw_payloads(conn, time_budget_s: float = COMPACT_TIME_BUDGET_S,
+                         after_days: int = COMPACT_AFTER_DAYS) -> tuple[int, bool]:
+    """Delete superseded payload versions of settled days. Returns (deleted, finished);
+    unfinished means the time budget ran out and another call should continue.
+
+    The scan reads only id/source/endpoint/date — columns stored *before* the large
+    payload_json, so it touches one leaf page per row rather than every overflow
+    page. Deletes run in small committed batches so writers can interleave."""
+    conn.commit()
+    today = datetime.now(timezone.utc).date()
+    settled_before = (today - timedelta(days=after_days)).isoformat()
+
+    keep: dict[tuple, int] = {}
+    candidates: list[tuple] = []
+    for rid, source, endpoint, day in conn.execute(
+        "SELECT id, source, endpoint, date FROM raw_import_payloads WHERE date IS NOT NULL AND date < ?",
+        (settled_before,),
+    ):
+        if endpoint in _NEVER_COMPACT:
+            continue
+        key = (source, endpoint, day)
+        candidates.append((rid, key))
+        if rid > keep.get(key, -1):
+            keep[key] = rid
+    victims = [rid for rid, key in candidates if rid != keep[key]]
+
+    # date-less payloads: older than the settle window by id boundary; keep the newest
+    first = _first_fetched_at_from(conn, 0)
+    if first:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=after_days)).isoformat()
+        boundary = _id_boundary(conn, cutoff, first[0])
+        newest: dict[tuple, int] = {}
+        old_null: list[tuple] = []
+        for rid, source, endpoint in conn.execute(
+            "SELECT id, source, endpoint FROM raw_import_payloads WHERE date IS NULL AND id < ?", (boundary,)
+        ):
+            if endpoint in _NULL_DATE_COMPACT:
+                old_null.append((rid, (source, endpoint)))
+                newest[(source, endpoint)] = max(rid, newest.get((source, endpoint), -1))
+        victims += [rid for rid, key in old_null if rid != newest[key]]
+
+    victims += _superseded_activity_payloads(conn, settled_before)
+
+    conn.execute("PRAGMA secure_delete=OFF")  # don't rewrite every freed page (halves WAL traffic)
+    victims.sort()
+    deleted = 0
+    deadline = time.monotonic() + time_budget_s
+    for i in range(0, len(victims), COMPACT_BATCH_ROWS):
+        if time.monotonic() >= deadline:
+            return deleted, False
+        batch = victims[i:i + COMPACT_BATCH_ROWS]
+        cur = conn.execute(
+            f"DELETE FROM raw_import_payloads WHERE id IN ({','.join('?' * len(batch))})", batch
+        )
+        conn.commit()
+        deleted += cur.rowcount
+    return deleted, True
+
+
+_compaction_state = {"last_finished": 0.0}
+
+
+def maybe_compact_raw_payloads(conn) -> int:
+    """Called after each import: compact at most every COMPACT_INTERVAL_S, but keep
+    going on every import until a pass has actually finished."""
+    if _compaction_state["last_finished"] and time.monotonic() - _compaction_state["last_finished"] < COMPACT_INTERVAL_S:
+        return 0
+    start = time.monotonic()
+    deleted, finished = compact_raw_payloads(conn)
+    if finished:
+        _compaction_state["last_finished"] = time.monotonic()
+    (log.warning if deleted else log.info)(
+        "raw payload compaction: deleted %d superseded payloads in %.1fs (%s)",
+        deleted, time.monotonic() - start, "done" if finished else "more to do",
+    )
     return deleted
 
 
@@ -833,6 +961,7 @@ def run_normalization(conn, dates: set[str] | None = None) -> dict:
     metric_rows = _timed("daily_metrics", rebuild_daily_metrics, conn, dates)
     activity_rows = _timed("activities", rebuild_activities, conn)
     pruned_rows = _timed("prune_raw_payloads", prune_raw_payloads, conn)
+    _timed("compact_raw_payloads", maybe_compact_raw_payloads, conn)
     conn.commit()
     return {
         "day_timezone_rows": tz_rows,
