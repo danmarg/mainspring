@@ -50,7 +50,7 @@ DEFAULT_SOURCE_PRIORITY = ["garmin", "google_health"]
 LOCK_HOLD_WARN_S = float(os.getenv("LOCK_HOLD_WARN_S", "2"))
 
 _open_txns: dict[int, tuple[str, str, float]] = {}  # id -> (label, thread, begin)
-_open_txns_lock = threading.Lock()
+_open_txns_lock = threading.RLock()  # re-entrant: a GC-triggered connection teardown can call back into the tracer on the same thread
 
 
 def _caller_label() -> str:
