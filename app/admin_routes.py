@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
@@ -111,8 +112,78 @@ def _fire_morning_webhook() -> bool:
         return False
 
 
+# ── single-flight imports ─────────────────────────────────────────────────────
+#
+# Imports take minutes (and far longer under contention) while triggers arrive every
+# 20 minutes from more than one caller, so without a guard runs pile up — ~20
+# google_health imports started in one burst after an outage — all fetching from the
+# same upstream and fighting over the one SQLite write lock. One import per source at
+# a time; the process is the only runner (single Machine), so an in-memory registry
+# is authoritative and resets on restart.
+
+IMPORT_MAX_AGE_S = 3600  # a run older than this is presumed hung and no longer blocks a new one
+_running_imports: dict[str, tuple[int, float]] = {}  # source -> (run_id, started monotonic)
+_running_lock = threading.Lock()
+_normalization_lock = threading.Lock()  # normalization is global (activities rebuild); never run two at once
+
+
+def mark_interrupted_imports() -> int:
+    """At startup nothing can legitimately still be running: any import_runs row left
+    'running' belongs to a process that was restarted/killed mid-import."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE import_runs SET status='error', finished_at=?, error='interrupted (process restarted)' "
+            "WHERE status='running'", (utc_now(),),
+        )
+        return cur.rowcount
+
+
+def _start_import(source: str, background_tasks, import_fn, days, start_date, end_date) -> dict:
+    explicit_range = start_date is not None or end_date is not None
+    with _running_lock:
+        current = _running_imports.get(source)
+        if current and time.monotonic() - current[1] < IMPORT_MAX_AGE_S:
+            if explicit_range:
+                # a backfill must not silently turn into "someone else's import"
+                raise HTTPException(status_code=409, detail=f"{source} import already running (run {current[0]})")
+            return {"run_id": current[0], "status": "already_running"}
+        if current:
+            log.warning("%s import run %d exceeded %ds; allowing a new run", source, current[0], IMPORT_MAX_AGE_S)
+
+        _running_imports[source] = (0, time.monotonic())  # reserve the slot; fill in run_id below
+
+    try:  # the insert can wait on the write lock — don't hold _running_lock meanwhile
+        with db() as conn:
+            cur = conn.execute(
+                "INSERT INTO import_runs(source, started_at, status) VALUES (?,?,?)",
+                (source, utc_now(), "running"),
+            )
+            run_id = cur.lastrowid
+    except Exception:
+        with _running_lock:
+            _running_imports.pop(source, None)
+        raise
+    with _running_lock:
+        _running_imports[source] = (run_id, _running_imports[source][1])
+
+    background_tasks.add_task(
+        _run_import_bg, source, run_id, import_fn,
+        {"days": days, "start_date": start_date, "end_date": end_date},
+    )
+    return {"run_id": run_id, "status": "started"}
+
+
 def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
     """Run an import synchronously in a background thread and update import_runs."""
+    try:
+        _run_import_bg_inner(source, run_id, import_fn, import_kwargs)
+    finally:
+        with _running_lock:
+            if _running_imports.get(source, (None,))[0] == run_id:
+                del _running_imports[source]
+
+
+def _run_import_bg_inner(source: str, run_id: int, import_fn, import_kwargs: dict):
     try:
         today = date.today().isoformat()
         t_start = time.monotonic()
@@ -125,7 +196,7 @@ def _run_import_bg(source: str, run_id: int, import_fn, import_kwargs: dict):
 
         if not result.get("skipped"):
             from app.normalize import run_normalization
-            with db() as conn:
+            with _normalization_lock, db() as conn:
                 run_normalization(conn, imported_dates or None)
             log.info(
                 "%s import run_id=%d timing: fetch+parse %.1fs, normalization %.1fs (%d dates)",
@@ -198,19 +269,7 @@ def import_garmin(
     end_date: date | None = Query(default=None),
 ):
     from app.importers.garmin import run_import
-
-    with db() as conn:
-        cur = conn.execute(
-            "INSERT INTO import_runs(source, started_at, status) VALUES (?,?,?)",
-            ("garmin", utc_now(), "running"),
-        )
-        run_id = cur.lastrowid
-
-    background_tasks.add_task(
-        _run_import_bg, "garmin", run_id, run_import,
-        {"days": days, "start_date": start_date, "end_date": end_date},
-    )
-    return {"run_id": run_id, "status": "started"}
+    return _start_import("garmin", background_tasks, run_import, days, start_date, end_date)
 
 
 
@@ -268,19 +327,7 @@ def import_google_health(
     end_date: date | None = Query(default=None),
 ):
     from app.importers.google_health import run_import
-
-    with db() as conn:
-        cur = conn.execute(
-            "INSERT INTO import_runs(source, started_at, status) VALUES (?,?,?)",
-            ("google_health", utc_now(), "running"),
-        )
-        run_id = cur.lastrowid
-
-    background_tasks.add_task(
-        _run_import_bg, "google_health", run_id, run_import,
-        {"days": days, "start_date": start_date, "end_date": end_date},
-    )
-    return {"run_id": run_id, "status": "started"}
+    return _start_import("google_health", background_tasks, run_import, days, start_date, end_date)
 
 
 @router.get("/calibration/energy", dependencies=[Depends(_import_auth)])

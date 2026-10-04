@@ -756,11 +756,66 @@ def _insert_activity(conn, row: tuple, source: str, garmin_id: str | None, gh_id
     )
 
 
-def prune_raw_payloads(conn, retention_days: int = RAW_PAYLOAD_RETENTION_DAYS) -> int:
-    """Delete raw_import_payloads rows older than the retention window."""
+PRUNE_BATCH_ROWS = 200
+PRUNE_TIME_BUDGET_S = 20.0
+
+
+def _first_fetched_at_from(conn, min_id: int):
+    """(id, fetched_at) of the first row with id >= min_id — a rowid lookup, so it only
+    touches that one row (reading fetched_at means walking that row's payload_json
+    overflow pages, which is why a fetched_at *filter* has to read the whole table)."""
+    return conn.execute(
+        "SELECT id, fetched_at FROM raw_import_payloads WHERE id >= ? ORDER BY id LIMIT 1", (min_id,)
+    ).fetchone()
+
+
+def prune_raw_payloads(conn, retention_days: int = RAW_PAYLOAD_RETENTION_DAYS,
+                       time_budget_s: float = PRUNE_TIME_BUDGET_S) -> int:
+    """Delete raw_import_payloads rows older than the retention window.
+
+    The table has no index and fetched_at sits *after* the large payload_json
+    column, so `DELETE ... WHERE fetched_at < ?` read the entire table (~90s on a
+    1.7GB volume) inside every import's normalization transaction — holding the
+    write lock the whole time. Rows are append-only, so fetched_at rises with id:
+      * if the oldest row is inside the window (the normal case) nothing is due —
+        one rowid lookup, done;
+      * otherwise binary-search the id boundary with rowid lookups, then delete in
+        small batches, committing between them so writers can interleave. A
+        time budget bounds one call; the remainder is picked up next run.
+    Rows are only ever deleted by id range *and* re-checked against the cutoff.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
-    cur = conn.execute("DELETE FROM raw_import_payloads WHERE fetched_at < ?", (cutoff,))
-    return cur.rowcount
+    conn.commit()  # never prune inside someone else's open transaction
+
+    first = _first_fetched_at_from(conn, 0)
+    if not first or first[1] >= cutoff:
+        return 0
+    max_id = conn.execute("SELECT MAX(id) FROM raw_import_payloads").fetchone()[0]
+
+    # smallest id whose fetched_at >= cutoff (everything below it is expired)
+    lo, hi = first[0], max_id + 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        row = _first_fetched_at_from(conn, mid)
+        if row is None or row[1] >= cutoff:
+            hi = mid
+        else:
+            lo = row[0] + 1
+    boundary = lo
+
+    deleted = 0
+    deadline = time.monotonic() + time_budget_s
+    while time.monotonic() < deadline:
+        cur = conn.execute(
+            "DELETE FROM raw_import_payloads WHERE id IN "
+            "(SELECT id FROM raw_import_payloads WHERE id < ? ORDER BY id LIMIT ?) AND fetched_at < ?",
+            (boundary, PRUNE_BATCH_ROWS, cutoff),
+        )
+        conn.commit()
+        deleted += cur.rowcount
+        if cur.rowcount < PRUNE_BATCH_ROWS:
+            break
+    return deleted
 
 
 # ── entry point ──────────────────────────────────────────────────────────────

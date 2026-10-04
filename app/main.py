@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.db import init_db
-from app.admin_routes import router as admin_router
+from app.admin_routes import mark_interrupted_imports, router as admin_router
 from app.mcp_oauth import router as mcp_auth_router
 from app.dashboard import router as dashboard_router
 
@@ -24,6 +24,9 @@ _mcp_app = build_mcp_app()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    interrupted = mark_interrupted_imports()
+    if interrupted:
+        log.warning("marked %d import run(s) left running by a previous process as interrupted", interrupted)
     dog = start_watchdog()
     beat = asyncio.create_task(dog.heartbeat())
     try:
