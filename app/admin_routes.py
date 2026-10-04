@@ -402,6 +402,14 @@ def maintenance_compact(background_tasks: BackgroundTasks):
     return _start_maintenance("compact", _compact_until_done, background_tasks)
 
 
+@router.post("/maintenance/reparse_hrv", dependencies=[Depends(_import_auth)])
+def maintenance_reparse_hrv(background_tasks: BackgroundTasks):
+    """Fix history stored before the lastNightAvg fix (weekly average saved as nightly
+    HRV) by re-parsing the retained raw payloads — no re-fetch from Garmin."""
+    from app.maintenance import reparse_garmin_hrv_and_renormalize
+    return _start_maintenance("reparse_hrv", reparse_garmin_hrv_and_renormalize, background_tasks)
+
+
 @router.post("/maintenance/vacuum", dependencies=[Depends(_import_auth)])
 def maintenance_vacuum(background_tasks: BackgroundTasks):
     """Rewrite the database file to return freed pages to the volume. Refused unless

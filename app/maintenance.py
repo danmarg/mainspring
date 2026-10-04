@@ -78,3 +78,70 @@ def vacuum_db() -> dict:
     after = db_stats()
     log.warning("VACUUM finished in %.1fs: %s", time.monotonic() - started, after)
     return {"before": before, "after": after, "seconds": round(time.monotonic() - started, 1)}
+
+
+def reparse_garmin_hrv(conn) -> dict:
+    """Re-derive Garmin's stored HRV from the raw payloads we kept.
+
+    Before the lastNightAvg fix, the importer read a `lastNight` key that real payloads
+    don't have and fell back to the *weekly* average, so most history holds a smoothed
+    weekly figure instead of the night's value. The verbatim payload is still stored for
+    every one of those days, so nothing needs to be re-fetched: re-run the (fixed)
+    parser over the newest payload per date. A day whose payload has no nightly figure
+    gets its wrong stored value removed rather than left as a weekly average.
+
+    Returns counts plus the affected dates; the caller re-normalizes those dates."""
+    from app.importers.garmin import _parse_hrv  # single source of truth for the parse
+    import json
+
+    latest: dict[str, int] = {}
+    # id/date sit before the payload column, so this scan doesn't read payload overflow pages
+    for rid, day in conn.execute(
+        "SELECT id, date FROM raw_import_payloads WHERE endpoint='get_hrv_data' AND date IS NOT NULL"
+    ):
+        if rid > latest.get(day, -1):
+            latest[day] = rid
+
+    changed: list[str] = []
+    counts = {"checked": 0, "corrected": 0, "removed": 0, "unchanged": 0}
+    for day in sorted(latest):
+        counts["checked"] += 1
+        payload = conn.execute("SELECT payload_json FROM raw_import_payloads WHERE id=?", (latest[day],)).fetchone()[0]
+        before = conn.execute(
+            "SELECT value FROM raw_daily_metrics WHERE date=? AND source='garmin' AND metric='hrv'", (day,)
+        ).fetchone()
+        stored = before[0] if before else None
+        if _parse_hrv(conn, day, json.loads(payload)):
+            after = conn.execute(
+                "SELECT value FROM raw_daily_metrics WHERE date=? AND source='garmin' AND metric='hrv'", (day,)
+            ).fetchone()[0]
+            if stored is None or abs(after - stored) > 0.001:
+                counts["corrected"] += 1
+                changed.append(day)
+            else:
+                counts["unchanged"] += 1
+        elif stored is not None:
+            conn.execute("DELETE FROM raw_daily_metrics WHERE date=? AND source='garmin' AND metric='hrv'", (day,))
+            counts["removed"] += 1
+            changed.append(day)
+        else:
+            counts["unchanged"] += 1
+        if (counts["checked"] % 100) == 0:
+            conn.commit()
+    conn.commit()
+    return {**counts, "dates": changed}
+
+
+def reparse_garmin_hrv_and_renormalize() -> dict:
+    """reparse_garmin_hrv, then refresh daily_metrics for just the dates that changed."""
+    from app.normalize import rebuild_daily_metrics
+
+    with dbm.db() as conn:
+        result = reparse_garmin_hrv(conn)
+    dates = result.pop("dates")
+    for i in range(0, len(dates), 50):  # small committed chunks: never a long write lock
+        with dbm.db() as conn:
+            rebuild_daily_metrics(conn, set(dates[i:i + 50]))
+    log.warning("HRV reparse: %s; re-normalized %d dates", result, len(dates))
+    return {**result, "renormalized_dates": len(dates)}
+
