@@ -330,6 +330,68 @@ def import_google_health(
     return _start_import("google_health", background_tasks, run_import, days, start_date, end_date)
 
 
+# ── maintenance ───────────────────────────────────────────────────────────────
+
+_maintenance_lock = threading.Lock()
+_maintenance_job: dict = {"name": None, "result": None}
+
+
+def _run_maintenance(name: str, fn) -> None:
+    try:
+        _maintenance_job["result"] = fn()
+    except Exception as exc:
+        log.exception("maintenance job %s failed", name)
+        _maintenance_job["result"] = {"error": str(exc)}
+    finally:
+        _maintenance_job["name"] = None
+        _maintenance_lock.release()
+
+
+def _start_maintenance(name: str, fn, background_tasks) -> dict:
+    if not _maintenance_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=f"maintenance job '{_maintenance_job['name']}' already running")
+    _maintenance_job.update(name=name, result=None)
+    background_tasks.add_task(_run_maintenance, name, fn)
+    return {"status": "started", "job": name}
+
+
+def _compact_until_done() -> dict:
+    from app.normalize import compact_raw_payloads
+    total, rounds = 0, 0
+    while True:
+        with db() as conn:
+            deleted, finished = compact_raw_payloads(conn)
+        total += deleted
+        rounds += 1
+        if finished:
+            return {"deleted": total, "rounds": rounds}
+        time.sleep(1)  # let importers and MCP writers in between rounds
+
+
+@router.get("/maintenance/db", dependencies=[Depends(_import_auth)])
+def maintenance_db():
+    """File/live/reclaimable size, free disk, and the last maintenance result."""
+    from app.maintenance import db_stats
+    return {**db_stats(), "running": _maintenance_job["name"], "last_result": _maintenance_job["result"]}
+
+
+@router.post("/maintenance/compact", dependencies=[Depends(_import_auth)])
+def maintenance_compact(background_tasks: BackgroundTasks):
+    """Delete superseded payload versions of settled days, to completion."""
+    return _start_maintenance("compact", _compact_until_done, background_tasks)
+
+
+@router.post("/maintenance/vacuum", dependencies=[Depends(_import_auth)])
+def maintenance_vacuum(background_tasks: BackgroundTasks):
+    """Rewrite the database file to return freed pages to the volume. Refused unless
+    there is enough disk; holds the write lock while it runs."""
+    from app.maintenance import vacuum_blockers, vacuum_db
+    blockers = vacuum_blockers()
+    if blockers:
+        raise HTTPException(status_code=409, detail={"refused": blockers})
+    return _start_maintenance("vacuum", vacuum_db, background_tasks)
+
+
 @router.get("/calibration/energy", dependencies=[Depends(_import_auth)])
 def energy_calibration_status():
     """Return the latest suggestion; this endpoint never changes the live model."""
