@@ -29,6 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: superfly/flyctl-actions/setup-flyctl@1.6
+      # The action installs only `flyctl`; fly-deploy.sh calls `fly`.
+      - run: ln -s "$(command -v flyctl)" "$(dirname "$(command -v flyctl)")/fly"
       # fly-deploy.sh also moves the hourly scheduler machine to the new image.
       - run: ./scripts/fly-deploy.sh
         env:
