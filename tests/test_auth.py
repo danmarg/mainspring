@@ -285,10 +285,7 @@ def test_datasette_app_builds_and_serves_plugin_listing(tmp_db, monkeypatch):
     """Production crashed at import because Datasette 0.65.5 reads plugin.__name__
     for every registered plugin. Exercise the same path the mount takes."""
     monkeypatch.setenv("MAINSPRING_PASSWORD", "pw")
-    from app import datasette_mount
     from app.datasette_mount import build_datasette_app, make_datasette
-    # datasette_mount binds DB_PATH at import; point it at the temp DB (no /data in CI).
-    monkeypatch.setattr(datasette_mount, "DB_PATH", db_module.DB_PATH)
     assert build_datasette_app() is not None
 
     async def run():
