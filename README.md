@@ -425,6 +425,10 @@ fly secrets set \
 
 The app auto-stops when idle and wakes on the first incoming request.
 
+**Autodeploy:** `.github/workflows/deploy.yml` runs the tests and then `scripts/fly-deploy.sh` on every push to `main`
+(or manually via *Run workflow*). It needs a `FLY_API_TOKEN` repo secret holding an app-scoped deploy token:
+`fly tokens create deploy -a mainspring -x 8760h | gh secret set FLY_API_TOKEN` (the token expires after a year).
+
 ### Scheduled imports on Fly.io
 
 `fly-deploy.sh` manages a dedicated Fly Machine that runs the importers on a schedule. On first run it creates the scheduler machine automatically; on subsequent deploys it updates it to the new image. No manual setup required.
