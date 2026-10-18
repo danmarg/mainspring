@@ -312,3 +312,89 @@ def test_second_maintenance_job_gets_409_while_one_runs(tmp_db, client):
 def test_vacuum_endpoint_refuses_with_reasons(tmp_db, client):
     r = client.post("/admin/maintenance/vacuum")  # nothing reclaimable in a fresh DB
     assert r.status_code == 409 and r.json()["detail"]["refused"]
+
+
+# ── HRV history repair ───────────────────────────────────────────────────────
+
+def _hrv_payload(night, weekly):
+    import json
+    return json.dumps({"hrvSummary": {"lastNightAvg": night, "weeklyAvg": weekly, "status": "BALANCED"}})
+
+
+def _stored_hrv(conn, date, source="garmin"):
+    row = conn.execute("SELECT value FROM raw_daily_metrics WHERE date=? AND source=? AND metric='hrv'", (date, source)).fetchone()
+    return row[0] if row else None
+
+
+def _store(conn, date, value, source="garmin"):
+    conn.execute("INSERT OR REPLACE INTO raw_daily_metrics(date, source, metric, value, fetched_at) VALUES (?,?,?,?,?)",
+                 (date, source, "hrv", value, "2026-01-01T00:00:00+00:00"))
+    conn.commit()
+
+
+def test_reparse_replaces_stored_weekly_average_with_the_nightly_value(tmp_db):
+    put(tmp_db, "get_hrv_data", day(40), _hrv_payload(night=37, weekly=33))
+    _store(tmp_db, day(40), 33.0)  # what the old importer wrote: the weekly average
+    result = maintenance.reparse_garmin_hrv(tmp_db)
+    assert _stored_hrv(tmp_db, day(40)) == 37.0
+    assert (result["corrected"], result["removed"]) == (1, 0) and result["dates"] == [day(40)]
+
+
+def test_reparse_uses_only_the_newest_payload_for_a_date(tmp_db):
+    put(tmp_db, "get_hrv_data", day(40), _hrv_payload(night=30, weekly=33))
+    put(tmp_db, "get_hrv_data", day(40), _hrv_payload(night=41, weekly=33))  # later re-fetch
+    maintenance.reparse_garmin_hrv(tmp_db)
+    assert _stored_hrv(tmp_db, day(40)) == 41.0
+
+
+def test_reparse_removes_a_wrong_value_when_the_payload_has_no_nightly_figure(tmp_db):
+    put(tmp_db, "get_hrv_data", day(40), _hrv_payload(night=None, weekly=33))
+    _store(tmp_db, day(40), 33.0)
+    result = maintenance.reparse_garmin_hrv(tmp_db)
+    assert _stored_hrv(tmp_db, day(40)) is None and result["removed"] == 1
+
+
+def test_reparse_is_idempotent_and_leaves_correct_days_and_other_sources_alone(tmp_db):
+    put(tmp_db, "get_hrv_data", day(5), _hrv_payload(night=44, weekly=40))
+    _store(tmp_db, day(5), 44.0)  # already correct
+    put(tmp_db, "get_hrv_data", day(40), _hrv_payload(night=37, weekly=33))
+    _store(tmp_db, day(40), 33.0)
+    _store(tmp_db, day(40), 52.0, source="google_health")
+    first = maintenance.reparse_garmin_hrv(tmp_db)
+    second = maintenance.reparse_garmin_hrv(tmp_db)
+    assert first["corrected"] == 1 and first["unchanged"] == 1
+    assert second["corrected"] == 0 and second["removed"] == 0 and second["dates"] == []
+    assert _stored_hrv(tmp_db, day(5)) == 44.0
+    assert _stored_hrv(tmp_db, day(40), source="google_health") == 52.0
+
+
+def test_reparse_ignores_other_endpoints_and_days_without_payloads(tmp_db):
+    put(tmp_db, "get_stats", day(40), _hrv_payload(night=99, weekly=99))
+    _store(tmp_db, day(60), 31.0)  # no payload kept for this day → not touched
+    maintenance.reparse_garmin_hrv(tmp_db)
+    assert _stored_hrv(tmp_db, day(40)) is None and _stored_hrv(tmp_db, day(60)) == 31.0
+
+
+def test_reparse_refreshes_daily_metrics_for_changed_dates_only(tmp_db):
+    d = day(40)
+    put(tmp_db, "get_hrv_data", d, _hrv_payload(night=37, weekly=33))
+    _store(tmp_db, d, 33.0)
+    from app.normalize import rebuild_daily_metrics
+    rebuild_daily_metrics(tmp_db, {d})
+    tmp_db.commit()  # release the write lock: the repair job uses its own connections
+    assert tmp_db.execute("SELECT hrv FROM daily_metrics WHERE date=?", (d,)).fetchone()[0] == 33.0
+
+    result = maintenance.reparse_garmin_hrv_and_renormalize()
+
+    assert result["renormalized_dates"] == 1 and result["corrected"] == 1
+    assert tmp_db.execute("SELECT hrv FROM daily_metrics WHERE date=?", (d,)).fetchone()[0] == 37.0
+
+
+def test_reparse_endpoint_runs_in_the_background_and_reports(tmp_db, client):
+    put(tmp_db, "get_hrv_data", day(40), _hrv_payload(night=37, weekly=33))
+    _store(tmp_db, day(40), 33.0)
+    r = client.post("/admin/maintenance/reparse_hrv")
+    assert r.status_code == 200 and r.json() == {"status": "started", "job": "reparse_hrv"}
+    info = client.get("/admin/maintenance/db").json()
+    assert info["last_result"]["corrected"] == 1
+    assert _stored_hrv(tmp_db, day(40)) == 37.0
