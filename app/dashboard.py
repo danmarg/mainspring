@@ -689,29 +689,40 @@ def _live_curve_json(wake_hour: float | None, sleep_score: float | None,
     return json.dumps([{"h": i / 4.0, "a": r["alertness"]} for i, r in enumerate(curve)])
 
 
-def _sleep_debt_minutes(recent_sleep_rows: list[dict], target_min: float,
-                        lookback_nights: int = 3, baseline_nights: int = 14,
-                        min_baseline_nights: int = 5, cap_total_min: float = 180.0) -> float:
+def _sleep_profile(recent_sleep_rows: list[dict], target_min: float,
+                   lookback_nights: int = 3, baseline_nights: int = 28,
+                   min_baseline_nights: int = 7, cap_total_min: float = 180.0) -> dict:
     """
-    Acute sleep debt: net shortfall over the last lookback_nights nights, measured
-    against min(target, personal baseline) where the baseline is the median of the
-    baseline_nights nights before that window.
+    What a normal night looks like for you, and how far the last few nights fell short of it.
 
-    Measuring against the baseline (not the raw target) separates "the last few
-    nights were short" — actionable, worth an earlier bedtime — from "you usually
-    sleep a bit under target", which would otherwise read as permanent debt and
-    pin the figure at the cap. Long nights net against short ones, so a catch-up
-    night actually repays debt. Falls back to the target alone until there are
-    min_baseline_nights of history. Capped at cap_total_min so a long bad stretch
-    doesn't produce an absurd bedtime recommendation.
+    "Typical" is the median (with interquartile range) of the baseline_nights nights before
+    the lookback window — your own normal, not a population number. Over a year of Garmin
+    data, next-morning HRV didn't move with duration above ~6h, so there's no outcome-based
+    "need" to fit; the distribution of what you actually sleep is the honest baseline.
+
+    debt_min is the net shortfall over the last lookback_nights nights against
+    min(target, typical). Measuring against typical separates "the last few nights were
+    short" — actionable, worth an earlier bedtime — from "you usually sleep a bit under
+    target", which would otherwise read as permanent debt and pin the figure at the cap;
+    that chronic gap is reported separately as typical vs target. Long nights net against
+    short ones, so a catch-up night actually repays debt. Falls back to the target alone
+    (and no typical range) until there are min_baseline_nights of history. Capped at
+    cap_total_min so a long bad stretch doesn't produce an absurd bedtime recommendation.
     """
     durations = [r["sleep_duration_min"] for r in recent_sleep_rows]
     recent = durations[-lookback_nights:]
     history = durations[:-lookback_nights][-baseline_nights:]
+    typical = typical_low = typical_high = None
     reference = target_min
     if len(history) >= min_baseline_nights:
-        reference = min(target_min, statistics.median(history))
-    return min(max(0.0, sum(reference - d for d in recent)), cap_total_min)
+        typical_low, typical, typical_high = statistics.quantiles(history, n=4, method="inclusive")
+        reference = min(target_min, typical)
+    return {
+        "debt_min": min(max(0.0, sum(reference - d for d in recent)), cap_total_min),
+        "typical_min": typical,
+        "typical_low_min": typical_low,
+        "typical_high_min": typical_high,
+    }
 
 
 def _activity_bar(rows: list[dict], field: str, y_title: str) -> str:
@@ -1340,7 +1351,7 @@ def overview(request: Request,
 
         recent_sleep_rows = _rows(conn, """
             SELECT date, sleep_duration_min FROM daily_metrics
-            WHERE date <= ? AND date > date(?, '-18 days')
+            WHERE date <= ? AND date > date(?, '-32 days')
               AND sleep_duration_min IS NOT NULL
             ORDER BY date
         """, (metrics_date, metrics_date))
@@ -1362,10 +1373,11 @@ def overview(request: Request,
             "days_away": days_away,
         }
 
-    # Acute sleep debt over the last 3 nights (vs personal baseline, see
-    # _sleep_debt_minutes), repaid at up to 1h/night so a large deficit spreads
+    # Acute sleep debt over the last 3 nights (vs your typical night, see
+    # _sleep_profile), repaid at up to 1h/night so a large deficit spreads
     # over several nights rather than producing an absurd bedtime.
-    sleep_debt_min = _sleep_debt_minutes(recent_sleep_rows, sleep_target_min)
+    sleep_profile = _sleep_profile(recent_sleep_rows, sleep_target_min)
+    sleep_debt_min = sleep_profile["debt_min"]
     repay_min = min(sleep_debt_min, 60.0)
     recommended_sleep_hours = (sleep_target_min + repay_min) / 60.0
 
@@ -1445,6 +1457,9 @@ def overview(request: Request,
         "live_curve_json": _live_curve_json(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None, strain_events or None),
         "recommended_sleep_hours": round(recommended_sleep_hours, 2),
         "sleep_debt_min": round(sleep_debt_min),
+        "sleep_target_min": round(sleep_target_min),
+        "typical_sleep": {k: round(v) for k, v in sleep_profile.items()
+                          if k != "debt_min" and v is not None} or None,
     })
 
 

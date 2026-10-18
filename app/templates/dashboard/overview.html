@@ -229,6 +229,8 @@
   var bedtimeWakeHour = {{ bedtime_wake_hour | tojson }};
   var recommendedSleepHours = {{ recommended_sleep_hours | tojson }};
   var sleepDebtMin = {{ sleep_debt_min | tojson }};
+  var sleepTargetMin = {{ sleep_target_min | tojson }};
+  var typicalSleep = {{ typical_sleep | tojson }};  // {typical_min, typical_low_min, typical_high_min} or null
 
   function fmtDuration(hoursFloat) {
     var totalMin = Math.round(hoursFloat * 60);
@@ -309,9 +311,17 @@
     // swing the recommendation.
     var bedtime = fmtClock(bedtimeWakeHour + (24 - recommendedSleepHours));
     var bedtimeText = 'Aim for bed by ~' + bedtime + ' (' + fmtDuration(recommendedSleepHours) + ')';
-    bedtimeText += sleepDebtMin >= 45
+    bedtimeText += sleepDebtMin >= 60
       ? ' — catching up on ' + fmtDuration(sleepDebtMin / 60) + ' of sleep debt from the last few nights.'
       : '.';
+    // Chronic gap: your normal night vs target. Stated as a fact rather than as debt,
+    // since it's the steady state, not something a single early night repays.
+    if (typicalSleep && sleepTargetMin - typicalSleep.typical_min >= 20) {
+      bedtimeText += ' Your typical night is ' + fmtDuration(typicalSleep.typical_min / 60) +
+        ' (' + fmtDuration(typicalSleep.typical_low_min / 60) + '–' + fmtDuration(typicalSleep.typical_high_min / 60) +
+        '), ' + fmtDuration((sleepTargetMin - typicalSleep.typical_min) / 60) + ' under your ' +
+        fmtDuration(sleepTargetMin / 60) + ' target.';
+    }
 
     document.getElementById('live-rec-text').textContent =
       'Alertness ' + current + '/100 (' + trend + '). ' + windowText + ' ' + bedtimeText;
