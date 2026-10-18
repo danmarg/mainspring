@@ -4,12 +4,24 @@ Readiness score and energy curve — shared between dashboard and MCP server.
 ━━━ Readiness score ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Weighted composite of six signals (weights in compute_readiness):
 
-HRV / 7-day baseline (35%)
-  The ratio of today's HRV to its own 7-day rolling mean is a better fatigue
-  signal than the raw value, because individual baselines vary so much.
+HRV: 7-day rolling lnRMSSD vs a 60-day normal range (35%)
+  A single night's HRV is noisy; the 7-day rolling mean of ln(RMSSD), read
+  against the athlete's own normal range (60-day mean, in units of its SD —
+  the "smallest worthwhile change" is ~0.5 SD), is the recommended way to act
+  on it. Scored as a band rather than "higher is better": a drop below the
+  normal range is the classic fatigue signal, but HRV well *above* it during
+  heavy training can also mean overreaching (parasympathetic hyperactivity),
+  so it's mildly discounted instead of rewarded. Falls back to today vs the
+  7-day mean until there's enough history for a baseline.
   Reference: Plews, D.J. et al. (2012). "Heart rate variability in elite
   triathletes, is variation in variability the key to effective training?
   A case comparison." Int J Sports Physiol Perform, 7(4), 327-336.
+  Reference: Plews, D.J. et al. (2013). "Training adaptation and heart rate
+  variability in elite endurance athletes: opening the door to effective
+  monitoring." Sports Med, 43(9), 773-781.
+  Reference: Le Meur, Y. et al. (2013). "Evidence of parasympathetic
+  hyperactivity in functionally overreached athletes." Med Sci Sports
+  Exerc, 45(11), 2061-2071.
 
   Folded into this component: the day-to-day *variability* of HRV, measured
   as the standard deviation of ln(RMSSD) across the same trailing 7 nights.
@@ -43,24 +55,30 @@ Sleep debt (25%)
 
 Resting HR vs baseline (15%)
   Elevated morning resting HR is an established marker of incomplete recovery
-  and autonomic stress. Inverted from the HRV ratio so high = bad.
+  and autonomic stress. Scored in units of the athlete's own day-to-day SD
+  (28-day window), so a 1-2 bpm wobble within normal noise doesn't swing the
+  score; falls back to a ratio until there's enough history.
   Reference: Coote, J.H. (2010). "Recovery of heart rate following intense
   dynamic exercise." Exp Physiol, 95(3), 431-440.
 
-Training Stress Balance / form (10%)
-  TSB = CTL − ATL (chronic minus acute training load). Positive TSB = freshness,
-  negative TSB = accumulated fatigue. Garmin provides CTL/ATL directly.
-  Reference: Banister, E.W. (1991). "Modeling elite athletic performance."
-  Physiological Testing of Elite Athletes, 403-424.
-
-Acute:Chronic Workload Ratio (15%)
-  ATL/CTL ratio (the same two Garmin-provided numbers behind TSB, read as a
-  ratio instead of a difference). Sweet spot 0.8-1.3; below it risks
-  detraining, above it is the most replicated injury-risk signal in the
-  load-monitoring literature, penalized more steeply than the low side.
+Training load: acute:chronic ratio (25%)
+  ATL/CTL. One component, not two: form expressed scale-free, (CTL−ATL)/CTL,
+  is exactly 1 − ACWR, so scoring TSB alongside ACWR counted the same number
+  twice — and raw TSB (CTL − ATL) isn't scale-free at all: Garmin's loads are
+  in the hundreds, so the TrainingPeaks-style ±25 bands pinned it at 0 or 100.
+  Form % is still reported in the detail. Sweet spot 0.8-1.3, high side
+  penalized more steeply. ACWR is contested (mathematical coupling of acute
+  into chronic; weak causal evidence for injury), so the self-computed
+  fallback uses the uncoupled form (chronic excludes the acute week), and the
+  weight is moderate.
   Reference: Gabbett, T.J. (2016). "The training-injury prevention paradox:
   should athletes be training smarter and harder?" Br J Sports Med, 50(5),
   273-280.
+  Reference: Williams, S. et al. (2017). "Better way to determine the
+  acute:chronic workload ratio?" Br J Sports Med, 51(3), 209-210.
+  Reference: Impellizzeri, F.M. et al. (2020). "Acute:chronic workload ratio:
+  conceptual issues and fundamental pitfalls." Int J Sports Physiol Perform,
+  15(6), 907-913.
 
 ━━━ Energy / alertness curve ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Two-process model: alertness(t) = f(C(t), S(t)) where:
@@ -112,8 +130,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
+import statistics
 from datetime import date, timedelta
+
+
+def _trimp_k() -> float:
+    """Banister TRIMP's exponential weighting: 1.92 for men, 1.67 for women
+    (Morton, Fitz-Clarke & Banister 1990). Set ATHLETE_SEX=female to use the latter."""
+    return 1.67 if os.getenv("ATHLETE_SEX", "").strip().lower().startswith("f") else 1.92
 
 
 def _ln_rmssd_cv(daily_hrv_values: list[float]) -> float | None:
@@ -202,23 +228,26 @@ def _daily_trimp(
     if max_hr <= resting_hr:
         return daily
     reserve = max_hr - resting_hr
+    k = _trimp_k()
     for d, avg_hr, duration_s in rows:
         hrr = min(1.0, max(0.0, (avg_hr - resting_hr) / reserve))
-        trimp = (duration_s / 60.0) * hrr * math.exp(1.92 * hrr)
+        trimp = (duration_s / 60.0) * hrr * math.exp(k * hrr)
         daily[d] = daily.get(d, 0.0) + trimp
     return daily
 
 
-def _ewma_load(daily_trimp: dict[str, float], as_of: date, tau_days: float, window_days: int) -> float | None:
+def _ewma_load(daily_trimp: dict[str, float], as_of: date, tau_days: float, window_days: int,
+               skip_days: int = 0) -> float | None:
     """
     Banister-style exponentially-weighted daily training load: weight = exp(-days_ago/tau)
     (tau is a decay constant, not a half-life — half-life = tau * ln(2)). Rest days count
     as zero load rather than being skipped, since absence of training is itself signal
-    here (unlike a missing sleep score, which just means no reading).
+    here (unlike a missing sleep score, which just means no reading). skip_days leaves
+    out the most recent days — used to uncouple chronic from acute load.
     """
     total_weight = 0.0
     weighted_sum = 0.0
-    for days_ago in range(window_days):
+    for days_ago in range(skip_days, window_days):
         d = as_of - timedelta(days=days_ago)
         trimp = daily_trimp.get(d.isoformat(), 0.0)
         weight = math.exp(-days_ago / tau_days)
@@ -252,7 +281,9 @@ def self_computed_load(conn: sqlite3.Connection, date_str: str) -> tuple[float |
         return None, None
 
     atl = _ewma_load(daily_trimp, as_of, tau_days=7, window_days=28)
-    ctl = _ewma_load(daily_trimp, as_of, tau_days=42, window_days=180)
+    # Uncoupled chronic load: excludes the acute week, so a spike in acute load
+    # isn't partly cancelled by also inflating the chronic denominator (Williams 2017).
+    ctl = _ewma_load(daily_trimp, as_of, tau_days=42, window_days=180, skip_days=7)
     return atl, ctl
 
 
@@ -431,6 +462,19 @@ def zone_weighted_training_load_rows(conn: sqlite3.Connection, since_clause: str
     ]
 
 
+def _hrv_band_score(z: float) -> float:
+    """Score for the 7-day lnRMSSD rolling mean, z = SDs from the 60-day normal.
+    Inside the normal range (-0.5 to +1 SD) scores 75-90; below it falls off
+    steeply (a sustained drop is the fatigue signal); well above it eases back
+    toward 50 rather than rising (possible overreaching, Le Meur 2013) — never
+    below 50, since high HRV alone isn't evidence of fatigue."""
+    if z < -0.5:
+        return max(0.0, 75.0 - (-0.5 - z) * 30.0)
+    if z <= 1.0:
+        return 75.0 + (z + 0.5) * 10.0
+    return max(50.0, 90.0 - (z - 1.0) * 20.0)
+
+
 def compute_readiness(
     hrv: float | None,
     hrv_7d: float | None,
@@ -441,9 +485,16 @@ def compute_readiness(
     atl: float | None,
     ctl: float | None,
     load_source: str | None = None,
+    hrv_z: float | None = None,
+    rhr_sd: float | None = None,
 ) -> dict:
     """
     Compute a composite readiness score 0-100.
+
+    hrv_z: 7-day rolling lnRMSSD vs 60-day normal, in SDs (preferred HRV input;
+        hrv/hrv_7d ratio is the fallback when it's None).
+    rhr_sd: SD of daily resting HR over the trailing 28 days (scores RHR in SDs;
+        ratio fallback when None).
 
     Returns:
         score: int 0-100, or None if no data at all
@@ -453,30 +504,28 @@ def compute_readiness(
     """
     components: list[dict] = []
 
-    # HRV vs 7-day rolling mean, with a variability penalty (weight 0.35)
-    # Plews et al. 2012: current/rolling-mean ratio is the key signal.
-    # Plews et al. 2013 / Buchheit 2014: elevated night-to-night CV is an
-    # independent overreaching signal, so it discounts the ratio score.
-    if hrv is not None and hrv_7d and hrv_7d > 0:
+    # HRV (weight 0.35): 7-day rolling lnRMSSD vs 60-day normal range (Plews 2013),
+    # with a penalty for elevated night-to-night variability (Plews 2013 / Buchheit 2014).
+    hrv_score = detail = None
+    if hrv_z is not None:
+        hrv_score = _hrv_band_score(hrv_z)
+        detail = f"7-day avg {hrv_z:+.1f} SD vs your 60-day normal"
+        if hrv is not None:
+            detail = f"{hrv:.0f}ms; " + detail
+    elif hrv is not None and hrv_7d and hrv_7d > 0:
         ratio = hrv / hrv_7d
         # 50 at baseline, +/- 2.5 points per percent deviation; capped 0-100
         hrv_score = min(100.0, max(0.0, 50.0 + (ratio - 1.0) * 250.0))
         sign = "+" if ratio >= 1 else ""
         detail = f"{hrv:.0f}ms vs {hrv_7d:.0f}ms avg ({sign}{(ratio-1)*100:.0f}%)"
-
+    if hrv_score is not None:
         if hrv_cv is not None:
             # Healthy trailing-week CV is roughly <=8%; penalize above that,
             # ramping to a 30pt cap by ~15% (capped so CV alone can't zero the score).
             cv_penalty = min(30.0, max(0.0, (hrv_cv - 0.08) / (0.15 - 0.08) * 30.0))
             hrv_score = max(0.0, hrv_score - cv_penalty)
             detail += f", CV {hrv_cv*100:.0f}%"
-
-        components.append({
-            "name": "HRV",
-            "score": hrv_score,
-            "weight": 0.35,
-            "detail": detail,
-        })
+        components.append({"name": "HRV", "score": hrv_score, "weight": 0.35, "detail": detail})
 
     # Sleep debt: EWMA over trailing nights (weight 0.25)
     if sleep_debt_score is not None:
@@ -489,34 +538,27 @@ def compute_readiness(
 
     # RHR vs 7-day rolling mean, inverted (weight 0.15)
     if rhr is not None and rhr_7d and rhr_7d > 0:
-        ratio = rhr / rhr_7d
-        # 50 at baseline; elevated RHR (ratio > 1) drives score down
-        rhr_score = min(100.0, max(0.0, 50.0 - (ratio - 1.0) * 500.0))
+        if rhr_sd and rhr_sd > 0:
+            # In SDs of normal day-to-day noise: 50 at baseline, -15 per SD elevated
+            z = (rhr - rhr_7d) / rhr_sd
+            rhr_score = min(100.0, max(0.0, 50.0 - z * 15.0))
+            rhr_detail = f"{rhr:.0f}bpm vs {rhr_7d:.0f}bpm avg ({z:+.1f} SD)"
+        else:
+            ratio = rhr / rhr_7d
+            rhr_score = min(100.0, max(0.0, 50.0 - (ratio - 1.0) * 500.0))
+            rhr_detail = f"{rhr:.0f}bpm vs {rhr_7d:.0f}bpm avg"
         components.append({
             "name": "Resting HR",
             "score": rhr_score,
             "weight": 0.15,
-            "detail": f"{rhr:.0f}bpm vs {rhr_7d:.0f}bpm avg",
+            "detail": rhr_detail,
         })
 
     load_suffix = " (self-estimated)" if load_source == "self" else ""
 
-    # Training Stress Balance / form (weight 0.10 when available)
-    if atl is not None and ctl is not None:
-        tsb = ctl - atl
-        # 50 at TSB=0; +2pts per unit of TSB (100 at +25, 0 at -25)
-        tsb_score = min(100.0, max(0.0, 50.0 + tsb * 2.0))
-        sign = "+" if tsb >= 0 else ""
-        components.append({
-            "name": "Form (TSB)",
-            "score": tsb_score,
-            "weight": 0.10,
-            "detail": f"TSB {sign}{tsb:.0f}{load_suffix}",
-        })
-
-    # Acute:Chronic Workload Ratio (weight 0.15 when available)
-    # Gabbett 2016: sweet spot 0.8-1.3; penalize high side more steeply
-    # than low side, matching the asymmetric injury-risk curve.
+    # Training load (weight 0.25): acute:chronic ratio. Gabbett 2016 sweet spot
+    # 0.8-1.3, high side penalized more steeply. Form % = (CTL-ATL)/CTL = 1-ACWR
+    # is the same information, so it's reported here rather than scored separately.
     if atl is not None and ctl is not None and ctl > 0:
         acwr = atl / ctl
         if 0.8 <= acwr <= 1.3:
@@ -525,11 +567,12 @@ def compute_readiness(
             acwr_score = max(0.0, 100.0 - (0.8 - acwr) * 150.0)
         else:
             acwr_score = max(0.0, 100.0 - (acwr - 1.3) * 220.0)
+        form_pct = (1.0 - acwr) * 100
         components.append({
             "name": "ACWR",
             "score": acwr_score,
-            "weight": 0.15,
-            "detail": f"ATL/CTL {acwr:.2f}{load_suffix}",
+            "weight": 0.25,
+            "detail": f"ATL/CTL {acwr:.2f}, form {form_pct:+.0f}%{load_suffix}",
         })
 
     if not components:
@@ -615,6 +658,8 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
     hrv_7d = sum(hrv_values_7d) / len(hrv_values_7d) if hrv_values_7d else None
     rhr_7d = sum(rhr_values_7d) / len(rhr_values_7d) if rhr_values_7d else None
     hrv_cv = _ln_rmssd_cv(hrv_values_7d + ([hrv] if hrv is not None else []))
+    hrv_z = _hrv_rolling_z(conn, date_str, today_hrv_all_day)
+    rhr_sd = _rhr_sd(conn, date_str, today_rhr_computed)
 
     sleep_rows = conn.execute(
         """SELECT date, sleep_score FROM daily_metrics
@@ -646,7 +691,51 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
         if atl is not None and ctl is not None:
             load_source = "self"
 
-    return compute_readiness(hrv, hrv_7d, hrv_cv, sleep_debt, rhr, rhr_7d, atl, ctl, load_source)
+    return compute_readiness(hrv, hrv_7d, hrv_cv, sleep_debt, rhr, rhr_7d, atl, ctl, load_source,
+                             hrv_z=hrv_z, rhr_sd=rhr_sd)
+
+
+HRV_BASELINE_DAYS = 60
+HRV_BASELINE_MIN_NIGHTS = 21
+RHR_SD_DAYS = 28
+RHR_SD_MIN_DAYS = 10
+
+
+def _hrv_rolling_z(conn: sqlite3.Connection, date_str: str, all_day: bool) -> float | None:
+    """7-day rolling mean of ln(RMSSD) ending date_str, in SDs from the mean of the
+    HRV_BASELINE_DAYS nights before it (Plews 2013). Methodology-matched like the 7-day
+    baseline. None until there are >= 4 recent and HRV_BASELINE_MIN_NIGHTS baseline nights."""
+    rows = conn.execute(
+        """SELECT date, hrv, source_flags_json FROM daily_metrics
+           WHERE date <= ? AND date > date(?, ?) AND hrv > 0""",
+        (date_str, date_str, f"-{HRV_BASELINE_DAYS + 7} days"),
+    ).fetchall()
+    week_start = (date.fromisoformat(date_str) - timedelta(days=6)).isoformat()
+    recent, baseline = [], []
+    for d, v, flags in rows:
+        if _is_all_day_hrv_flag(flags) != all_day:
+            continue
+        (recent if d >= week_start else baseline).append(math.log(v))
+    if len(recent) < 4 or len(baseline) < HRV_BASELINE_MIN_NIGHTS:
+        return None
+    sd = statistics.pstdev(baseline)
+    if sd <= 0:
+        return None
+    return (sum(recent) / len(recent) - statistics.fmean(baseline)) / sd
+
+
+def _rhr_sd(conn: sqlite3.Connection, date_str: str, computed: bool) -> float | None:
+    """SD of daily resting HR over the RHR_SD_DAYS before date_str, methodology-matched."""
+    rows = conn.execute(
+        """SELECT resting_hr, source_flags_json FROM daily_metrics
+           WHERE date < ? AND date >= date(?, ?) AND resting_hr IS NOT NULL""",
+        (date_str, date_str, f"-{RHR_SD_DAYS} days"),
+    ).fetchall()
+    values = [v for v, flags in rows if _is_computed_rhr_flag(flags) == computed]
+    if len(values) < RHR_SD_MIN_DAYS:
+        return None
+    sd = statistics.pstdev(values)
+    return sd if sd > 0 else None
 
 
 # ── illness / physiological-stress risk ──────────────────────────────────────
@@ -1110,8 +1199,9 @@ def trimp_from_hr_samples(
     if len(values) < min_samples or duration_minutes <= 0 or max_hr <= resting_hr:
         return None
     reserve = max_hr - resting_hr
+    k = _trimp_k()
     weighted = []
     for bpm in values:
         hrr = min(1.0, max(0.0, (bpm - resting_hr) / reserve))
-        weighted.append(hrr * math.exp(1.92 * hrr))
+        weighted.append(hrr * math.exp(k * hrr))
     return round(duration_minutes * sum(weighted) / len(weighted), 2)
