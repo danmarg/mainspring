@@ -309,7 +309,7 @@
     // swing the recommendation.
     var bedtime = fmtClock(bedtimeWakeHour + (24 - recommendedSleepHours));
     var bedtimeText = 'Aim for bed by ~' + bedtime + ' (' + fmtDuration(recommendedSleepHours) + ')';
-    bedtimeText += sleepDebtMin > 15
+    bedtimeText += sleepDebtMin >= 45
       ? ' — catching up on ' + fmtDuration(sleepDebtMin / 60) + ' of sleep debt from the last few nights.'
       : '.';
 

@@ -690,17 +690,28 @@ def _live_curve_json(wake_hour: float | None, sleep_score: float | None,
 
 
 def _sleep_debt_minutes(recent_sleep_rows: list[dict], target_min: float,
-                        lookback_nights: int = 3, cap_total_min: float = 180.0) -> float:
+                        lookback_nights: int = 3, baseline_nights: int = 14,
+                        min_baseline_nights: int = 5, cap_total_min: float = 180.0) -> float:
     """
-    Sum of (target - actual) sleep duration over the most recent lookback_nights
-    nights with data. Capped at cap_total_min (3h default) so a long gap in data
-    or an extended bad stretch doesn't produce an absurd bedtime recommendation —
-    practical sleep-debt guidance treats debt beyond a couple nights as something
-    to repay gradually rather than in one sitting anyway.
+    Acute sleep debt: net shortfall over the last lookback_nights nights, measured
+    against min(target, personal baseline) where the baseline is the median of the
+    baseline_nights nights before that window.
+
+    Measuring against the baseline (not the raw target) separates "the last few
+    nights were short" — actionable, worth an earlier bedtime — from "you usually
+    sleep a bit under target", which would otherwise read as permanent debt and
+    pin the figure at the cap. Long nights net against short ones, so a catch-up
+    night actually repays debt. Falls back to the target alone until there are
+    min_baseline_nights of history. Capped at cap_total_min so a long bad stretch
+    doesn't produce an absurd bedtime recommendation.
     """
-    deficits = [max(0.0, target_min - r["sleep_duration_min"])
-                for r in recent_sleep_rows[-lookback_nights:]]
-    return min(sum(deficits), cap_total_min)
+    durations = [r["sleep_duration_min"] for r in recent_sleep_rows]
+    recent = durations[-lookback_nights:]
+    history = durations[:-lookback_nights][-baseline_nights:]
+    reference = target_min
+    if len(history) >= min_baseline_nights:
+        reference = min(target_min, statistics.median(history))
+    return min(max(0.0, sum(reference - d for d in recent)), cap_total_min)
 
 
 def _activity_bar(rows: list[dict], field: str, y_title: str) -> str:
@@ -1316,15 +1327,20 @@ def overview(request: Request,
             }
 
         # Sleep debt — recent nights' shortfall vs target, for the bedtime recommendation
+        # Accept the names set_training_goal has actually been called with;
+        # sleep_target_hours alone silently fell back to 8h.
         sleep_target_row = conn.execute(
-            "SELECT value FROM training_goals WHERE metric='sleep_target_hours'"
+            "SELECT value FROM training_goals "
+            "WHERE metric IN ('sleep_target_hours', 'sleep_target', 'sleep_hours') "
+            "ORDER BY CASE metric WHEN 'sleep_target_hours' THEN 0 "
+            "WHEN 'sleep_target' THEN 1 ELSE 2 END LIMIT 1"
         ).fetchone()
         sleep_target_hours = float(sleep_target_row[0]) if sleep_target_row else 8.0
         sleep_target_min = sleep_target_hours * 60.0
 
         recent_sleep_rows = _rows(conn, """
             SELECT date, sleep_duration_min FROM daily_metrics
-            WHERE date <= ? AND date > date(?, '-4 days')
+            WHERE date <= ? AND date > date(?, '-18 days')
               AND sleep_duration_min IS NOT NULL
             ORDER BY date
         """, (metrics_date, metrics_date))
@@ -1346,8 +1362,9 @@ def overview(request: Request,
             "days_away": days_away,
         }
 
-    # Sleep debt over the last 3 nights, repaid at up to 1h/night so a large
-    # deficit spreads over several nights rather than producing an absurd bedtime.
+    # Acute sleep debt over the last 3 nights (vs personal baseline, see
+    # _sleep_debt_minutes), repaid at up to 1h/night so a large deficit spreads
+    # over several nights rather than producing an absurd bedtime.
     sleep_debt_min = _sleep_debt_minutes(recent_sleep_rows, sleep_target_min)
     repay_min = min(sleep_debt_min, 60.0)
     recommended_sleep_hours = (sleep_target_min + repay_min) / 60.0
