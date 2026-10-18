@@ -568,7 +568,7 @@ def get_suggested_workout(date: Optional[str] = None) -> dict | None:
     """Return Garmin's suggested workout for a given date (YYYY-MM-DD, defaults to today),
     plus the training-load context behind it: Garmin's own training_readiness alongside
     this service's own composite readiness score (HRV incl. day-to-day variability,
-    debt-adjusted sleep, resting HR, TSB, and ACWR — see app/readiness.py), plus a
+    debt-adjusted sleep, resting HR, and acute:chronic load — see app/readiness.py), plus a
     trailing-window illness/physiological-stress signal (RHR/HRV/skin-temp
     concordance — heuristic, not a diagnosis)."""
     from app.readiness import illness_risk_from_db, readiness_from_db
@@ -964,7 +964,7 @@ def delete_training_event(event_id: int) -> str:
 @mcp.tool()
 @_clean_and_prune
 def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict:
-    """Rich context for workout planning: today's metrics, HRV trend, TSB (form),
+    """Rich context for workout planning: today's metrics, HRV trend, form (% of chronic load),
     training load status, week progress vs targets, next goal event, yesterday's RPE,
     aerobic efficiency trend, Garmin's suggested workout, recent activities,
     personalized insights from historical correlations, a trailing-window
@@ -1123,8 +1123,10 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             "sleep_need_baseline_min": today_row[20],
         }
 
-        if ctl is not None and atl is not None:
-            today["tsb"] = round(ctl - atl, 1)
+        # Form as a % of chronic load, not raw CTL - ATL: Garmin's loads are in the
+        # hundreds, so a raw difference has no fixed scale to interpret.
+        if ctl is not None and atl is not None and ctl > 0:
+            today["form_pct"] = round((ctl - atl) / ctl * 100, 1)
 
         hrv_vals = [r[1] for r in hrv_rows if r[1] is not None]
         if len(hrv_vals) >= 4:
@@ -1236,7 +1238,9 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     # ── personalized insights ─────────────────────────────────────────────────
     insights = []
     for c in correlations:
-        if abs(c["r"]) < 0.15:
+        # Only findings that survive the FDR correction; a weak r on a handful of
+        # days is indistinguishable from chance and shouldn't read as personal history.
+        if abs(c["r"]) < 0.15 or not c.get("significant"):
             continue
         inp, out = c["input"], c["output"]
         yval = yesterday_behavior.get(inp)
@@ -1311,11 +1315,13 @@ planning, and recommendations. The server never fetches weather or sends message
 1. Call `get_workout_context()` — one call returns everything needed:
    - today's HRV, sleep, stress, body battery, training readiness
    - `readiness`: this service's own composite score (0-100, label Primed/Ready/
-     Moderate/Low/Rest) blending HRV ratio + day-to-day HRV variability, debt-adjusted
-     sleep (trailing ~10 nights, not just last night), resting HR, TSB, and ACWR —
+     Moderate/Low/Rest) blending HRV (7-day rolling average vs your 60-day normal range)
+     + day-to-day HRV variability, debt-adjusted sleep (trailing ~10 nights, not just
+     last night), resting HR (in SDs of your normal noise), and acute:chronic load —
      independent of Garmin's own training_readiness, useful as a cross-check
    - HRV trend (improving/stable/declining over 7 days)
-   - TSB (Training Stress Balance = CTL − ATL; positive = fresh, negative = fatigued/building)
+   - `form_pct`: form = (CTL − ATL) / CTL as a % (positive = fresh, negative =
+     fatigued/building). Scale-free on purpose: Garmin's load units are in the hundreds
    - load_status derived from ATL/CTL ratio
    - yesterday's alcohol, caffeine, calories, and RPE
    - week progress vs weekly targets (runs, km, strength sessions)
@@ -1334,7 +1340,7 @@ planning, and recommendations. The server never fetches weather or sends message
    - `training_monotony_strain`: Foster's monotony (mean/SD of trailing-7-day daily
      load) and strain (sum × monotony). `band: "elevated"` means load has been spread
      too evenly across the week — no easy/hard contrast — a distinct overtraining
-     risk from TSB/ACWR, which only look at load magnitude
+     risk from form/ACWR, which only look at load magnitude
    - `decoupling_trend`: aerobic decoupling (HR:pace drift within a run) trended across
      the most recent qualifying runs. `direction: "worsening"` = aerobic base eroding,
      back off intensity regardless of what HRV/sleep say that morning; `"improving"` =
@@ -1349,7 +1355,7 @@ planning, and recommendations. The server never fetches weather or sends message
    which behaviours most affect recovery. Results feed the insights in `get_workout_context`.
 
 3. Recommend a workout. Consider in order:
-   a. TSB: positive → fine to go hard; deeply negative → favour recovery
+   a. form_pct: positive → fine to go hard; below about −30% → favour recovery
    b. HRV trend: declining → back off intensity; improving → good to build
    c. load_status: overreaching → rest or easy; detraining → safe to add load
    d. next_event weeks_away: taper starts ~2–3 weeks out; peak week ~4–6 weeks out
@@ -1361,12 +1367,12 @@ planning, and recommendations. The server never fetches weather or sends message
       grey_zone_flag == true together: this week has been all moderate, no contrast —
       push a clearly easy day or a clearly hard day today, not another moderate one
    i. decoupling_trend.direction == "worsening": bias toward easy volume even if
-      TSB/HRV look fine — it's an earlier, run-specific signal they don't carry
+      form/HRV look fine — it's an earlier, run-specific signal they don't carry
    j. illness_risk.level: thresholds are already scaled to this person's own trailing
       variability (not a flat cutoff), so treat the levels as calibrated, not raw noise —
       but weight them by count and same-night concordance, not by label alone. "yellow"
       (a single signal, or several signals spread across different nights) is common
-      and NOT a reason on its own to downgrade toward easy/rest — let TSB/HRV/sleep drive
+      and NOT a reason on its own to downgrade toward easy/rest — let form/HRV/sleep drive
       the call as usual. Only "red" (2+ signals crossing threshold on the SAME night,
       still active as of today) should bias toward easy/rest, and even then as one input
       among the others above, not an override or a hard veto — it's not a diagnosis, and
@@ -1380,8 +1386,8 @@ planning, and recommendations. The server never fetches weather or sends message
 
 | Metric | Good | Caution | Act |
 |---|---|---|---|
-| hrv | above personal avg | 5–10% below avg | >10% below → easy/rest |
-| tsb | 0 to +20 | -10 to 0 | < -20 → high fatigue, rest |
+| hrv (see readiness HRV detail: 7-day avg vs 60-day normal) | −0.5 to +1 SD | −0.5 to −1 SD, or well above +1 SD in a heavy block (possible overreaching) | below −1 SD for several days → easy/rest |
+| form_pct | −10% to +25% | −30% to −10% | below −30% → high fatigue, rest (form_pct = 1 − training_load_ratio) |
 | training_load_ratio | 0.8–1.3 | 1.3–1.5 | >1.5 overreaching |
 | sleep_score | >75 | 60–75 | <60 compounds other signals |
 | training_readiness | >70 | 50–70 | <50 favour recovery |
@@ -1396,9 +1402,10 @@ planning, and recommendations. The server never fetches weather or sends message
 | intensity_distribution.moderate_pct | <20% | 20–30% | >30% → grey_zone_flag, drifted off polarized training |
 | decoupling_trend.direction | improving/stable | — | worsening → back off intensity |
 
-TSB interpretation: think of it as "form". Positive = rested/sharp (good for racing or
-hard efforts). Negative = accumulated fatigue (fine during a build block, bad near a race).
-A TSB of -30 with a marathon in 2 weeks = needs to taper urgently.
+Form interpretation: positive = rested/sharp (good for racing or hard efforts).
+Negative = accumulated fatigue (fine during a build block, bad near a race). Form of
+−30% with a marathon in 2 weeks = needs to taper urgently; going into race day, aim for
+roughly +5% to +25%.
 
 ---
 
@@ -1450,8 +1457,15 @@ When an event is done: `complete_training_event(id, result='3:52:14')`.
 resting HR, stress, body battery) at lag 0, 1, and 2 days.
 
 - **lag=1** is the most clinically relevant: last night's behaviour → this morning's recovery
+- Outputs are detrended against their own trailing 7-day mean, so r answers "was this
+  lower than my recent normal after X", not "was it low during a low month"
+- On days the user logged anything, missing caffeine/alcohol counts as 0 (so drinking
+  vs not drinking is compared); days with no logs at all are excluded
 - Requires `min_pairs=14` (default) — results with fewer data points are suppressed
-- `r` ranges −1 to +1; |r| > 0.3 is worth acting on, |r| > 0.5 is strong
+- Trust `significant` / `q` (false-discovery-rate adjusted across the whole sweep, with
+  a sample size adjusted for day-to-day autocorrelation), not |r| alone: a sweep runs
+  dozens of tests, and some will look strong by chance. Only mention a non-significant
+  result as "no clear signal yet"
 - Use `method='spearman'` if you suspect non-linear relationships
 
 Run this when: onboarding to a new conversation, weekly reviews, or when the user asks

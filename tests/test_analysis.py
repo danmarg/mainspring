@@ -167,3 +167,60 @@ def test_top_findings_populated(tmp_db):
     assert "alcohol_units" in result["top_findings"][0]
     assert "hrv" in result["top_findings"][0]
     assert "negative" in result["top_findings"][0]
+
+
+def test_zero_fill_on_logging_days(tmp_db):
+    # Alcohol logged only on drinking days; other days have meal logs. Missing alcohol
+    # on those logging days must count as 0, so all days pair up, not just drinking days.
+    end = date.today()
+    for i in range(40):
+        d = (end - timedelta(days=39 - i)).isoformat()
+        drink = i % 4 == 0
+        _insert_day(tmp_db, d, calories_estimated=2000.0,
+                    alcohol_units=(3.0 if drink else None), hrv=50.0)
+    for i in range(1, 40):
+        d = (end - timedelta(days=39 - i)).isoformat()
+        hrv = 40.0 if (i - 1) % 4 == 0 else 50.0
+        _insert_day(tmp_db, d, hrv=hrv)
+    result = compute_correlations(tmp_db, inputs=["alcohol_units"], outputs=["hrv"],
+                                  lags=[1], days=60, min_pairs=10)
+    c = result["correlations"][0]
+    assert c["n_pairs"] > 25  # ~all days, not ~10 drinking days
+    assert c["r"] < -0.5
+
+
+def test_no_zero_fill_without_logging(tmp_db):
+    end = date.today()
+    for i in range(30):
+        d = (end - timedelta(days=29 - i)).isoformat()
+        _insert_day(tmp_db, d, alcohol_units=((2.0 + i % 2) if i % 3 == 0 else None), hrv=50.0 + i % 5)
+    result = compute_correlations(tmp_db, inputs=["alcohol_units"], outputs=["hrv"],
+                                  lags=[1], days=60, min_pairs=5)
+    assert result["correlations"][0]["n_pairs"] <= 10
+
+
+def test_detrending_removes_shared_trend(tmp_db):
+    # Weight falling and HRV rising together over months, with no day-level link:
+    # raw r is ~-1, detrended r should be near zero.
+    import random
+    rng = random.Random(1)
+    end = date.today()
+    for i in range(90):
+        d = (end - timedelta(days=89 - i)).isoformat()
+        _insert_day(tmp_db, d, weight_kg=85.0 - i * 0.05 + rng.gauss(0, 0.3),
+                    hrv=40.0 + i * 0.1 + rng.gauss(0, 2))
+    raw = compute_correlations(tmp_db, inputs=["weight_kg"], outputs=["hrv"], lags=[0],
+                               days=80, min_pairs=10, detrend=False)["correlations"][0]
+    det = compute_correlations(tmp_db, inputs=["weight_kg"], outputs=["hrv"], lags=[0],
+                               days=80, min_pairs=10)["correlations"][0]
+    assert raw["r"] < -0.6
+    assert abs(det["r"]) < 0.3
+    assert not det["significant"]
+
+
+def test_significance_fields_and_fdr():
+    from app.analysis import _bh_q_values, _p_value
+    assert _p_value(0.15, 10) > 0.5   # weak r on few days: chance
+    assert _p_value(0.6, 60) < 0.001
+    q = _bh_q_values([0.01, 0.04, 0.03, 0.5])
+    assert q == pytest.approx([0.04, 0.0533333, 0.0533333, 0.5], rel=1e-4)

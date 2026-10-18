@@ -137,14 +137,84 @@ def test_compute_readiness_acwr_penalizes_high_ratio_more_than_low():
     assert high_score < low_score
 
 
-def test_compute_readiness_tsb_still_present_alongside_acwr():
-    result = compute_readiness(
+def test_compute_readiness_scores_load_once_scale_free():
+    # Form (CTL-ATL)/CTL is 1 - ACWR, so it's reported, not scored separately; and
+    # Garmin-scale loads (hundreds) must score the same as the same ratio at any scale.
+    garmin = compute_readiness(
         hrv=None, hrv_7d=None, hrv_cv=None, sleep_debt_score=None,
-        rhr=None, rhr_7d=None, atl=80.0, ctl=100.0,
+        rhr=None, rhr_7d=None, atl=560.0, ctl=671.0,
     )
-    names = {c["name"] for c in result["components"]}
-    assert "Form (TSB)" in names
-    assert "ACWR" in names
+    small = compute_readiness(
+        hrv=None, hrv_7d=None, hrv_cv=None, sleep_debt_score=None,
+        rhr=None, rhr_7d=None, atl=56.0, ctl=67.1,
+    )
+    names = [c["name"] for c in garmin["components"]]
+    assert names == ["ACWR"]
+    assert garmin["components"][0]["score"] == small["components"][0]["score"]
+    assert "form +17%" in garmin["components"][0]["detail"]
+
+
+def test_hrv_band_score_shape():
+    from app.readiness import _hrv_band_score
+    assert _hrv_band_score(0.0) == pytest.approx(80.0)
+    assert _hrv_band_score(-2.0) < _hrv_band_score(-0.5) < _hrv_band_score(0.0)
+    # Well above normal eases off rather than rising, but never below 50.
+    assert _hrv_band_score(3.0) < _hrv_band_score(1.0)
+    assert _hrv_band_score(10.0) == 50.0
+
+
+def test_compute_readiness_prefers_hrv_z_over_ratio():
+    result = compute_readiness(
+        hrv=40.0, hrv_7d=50.0, hrv_cv=None, sleep_debt_score=None,
+        rhr=None, rhr_7d=None, atl=None, ctl=None, hrv_z=0.0,
+    )
+    hrv_component = result["components"][0]
+    assert hrv_component["score"] == pytest.approx(80.0)
+    assert "SD vs your 60-day normal" in hrv_component["detail"]
+
+
+def test_compute_readiness_rhr_scaled_by_personal_sd():
+    # +1 bpm is a big move for someone with 0.5 bpm noise, small for someone with 3 bpm.
+    tight = compute_readiness(hrv=None, hrv_7d=None, hrv_cv=None, sleep_debt_score=None,
+                              rhr=51.0, rhr_7d=50.0, atl=None, ctl=None, rhr_sd=0.5)
+    loose = compute_readiness(hrv=None, hrv_7d=None, hrv_cv=None, sleep_debt_score=None,
+                              rhr=51.0, rhr_7d=50.0, atl=None, ctl=None, rhr_sd=3.0)
+    assert tight["components"][0]["score"] == pytest.approx(20.0)
+    assert loose["components"][0]["score"] == pytest.approx(45.0)
+
+
+def test_hrv_rolling_z_from_db():
+    from app.readiness import _hrv_rolling_z
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    from datetime import date as _d, timedelta as _td
+    end = _d(2025, 6, 30)
+    for i in range(67):
+        d = (end - _td(days=i)).isoformat()
+        hrv = 40.0 if i < 7 else (50.0 if i % 2 else 52.0)  # last week well below normal
+        conn.execute("INSERT INTO daily_metrics(date, hrv, source_flags_json) VALUES (?,?,?)",
+                     (d, hrv, "{}"))
+    conn.commit()
+    z = _hrv_rolling_z(conn, end.isoformat(), False)
+    conn.close()
+    assert z is not None and z < -5
+
+
+def test_trimp_coefficient_follows_athlete_sex(monkeypatch):
+    from app.readiness import trimp_from_hr_samples
+    male = trimp_from_hr_samples([150.0] * 30, 30, 50, 190)
+    monkeypatch.setenv("ATHLETE_SEX", "female")
+    female = trimp_from_hr_samples([150.0] * 30, 30, 50, 190)
+    assert female < male
+
+
+def test_self_computed_chronic_load_excludes_acute_week():
+    from datetime import date as _d
+    from app.readiness import _ewma_load
+    as_of = _d(2025, 6, 30)
+    # Training only in the last 3 days: coupled chronic sees it, uncoupled doesn't.
+    trimp = {"2025-06-30": 100.0, "2025-06-29": 100.0, "2025-06-28": 100.0}
+    assert _ewma_load(trimp, as_of, 42, 180) > 0
+    assert _ewma_load(trimp, as_of, 42, 180, skip_days=7) == 0
 
 
 # ── compute_readiness: no data ────────────────────────────────────────────────
@@ -242,7 +312,7 @@ def test_readiness_from_db_uses_trailing_sleep_debt_and_acwr():
     assert result["score"] is not None
     names = {c["name"] for c in result["components"]}
     assert "ACWR" in names
-    assert "Form (TSB)" in names
+    assert "Form (TSB)" not in names
 
     sleep_component = next(c for c in result["components"] if c["name"] == "Sleep")
     # Last night was 90 but preceded by a week of 50s — debt-adjusted score should
