@@ -754,3 +754,13 @@ def test_push_blood_pressure_success(monkeypatch):
     assert kwargs["systolic"] == 120
     assert kwargs["diastolic"] == 80
     assert kwargs["pulse"] == 65
+
+
+def test_parse_sleep_episode_bounds(tmp_db):
+    data = {"dailySleepDTO": {"sleepTimeSeconds": 30000,
+                              "sleepStartTimestampGMT": 1792268679000,
+                              "sleepEndTimestampGMT": 1792298799000}}
+    _parse_sleep(tmp_db, "2025-01-01", data)
+    got = dict(tmp_db.execute(
+        "SELECT metric, value FROM raw_daily_metrics WHERE metric LIKE 'sleep_%_epoch'").fetchall())
+    assert got == {"sleep_start_epoch": 1792268679.0, "sleep_end_epoch": 1792298799.0}

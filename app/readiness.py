@@ -749,8 +749,22 @@ def _rhr_sd(conn: sqlite3.Connection, date_str: str, computed: bool) -> float | 
 #     based SARS-CoV-2 detection found resting HR, HRV, and respiratory rate
 #     each carry independent signal, while skin temperature alone was the
 #     least reliable metric in isolation — it adds value only in combination.
+#     Overnight respiratory rate in particular is very stable night to night,
+#     so a rise of ~1 breath/min is unusual (Miller et al. 2020; Natarajan
+#     et al. 2020).
 #     Reference: Kamišalić, A. et al. (2022). "The role of wearable devices
 #     in detecting SARS-CoV-2: A systematic review." IJERPH / PMC9020803.
+#     Reference: Miller, D.J. et al. (2020). "Analyzing changes in respiratory
+#     rate to predict the risk of COVID-19 infection." PLoS ONE, 15(12).
+#     Reference: Natarajan, A. et al. (2020). "Assessment of physiological
+#     signs associated with COVID-19 measured using wearable devices."
+#     npj Digit Med, 3, 156.
+#
+#   - Baselines: the better-performing detectors compare against several weeks
+#     of the person's own data that *excludes* the days being tested (e.g. a
+#     28-day baseline, Mishra et al. 2020, Nat Biomed Eng 4:1208). A short
+#     baseline that includes the deviating days partly absorbs the very
+#     change it's meant to catch.
 #
 #   - The signals don't always move together — they can cascade over a few
 #     days rather than all shifting on the same day (RHR first, skin temp
@@ -777,7 +791,8 @@ def compute_illness_risk(
 ) -> dict:
     """
     days: list of {date, rhr, rhr_baseline, rhr_sd, hrv, hrv_baseline, hrv_log_sd,
-    skin_temp_deviation}, most recent last. `rhr_sd`/`hrv_log_sd` are the trailing-
+    skin_temp_deviation, resp, resp_baseline, resp_sd}, most recent last (the resp_*
+    keys are optional). `rhr_sd`/`hrv_log_sd` are the trailing-
     baseline-window standard deviations (constant across days, like the baselines
     themselves) and are optional — missing/zero falls back to a fixed threshold.
 
@@ -816,6 +831,7 @@ def compute_illness_risk(
     RHR_DELTA_BPM = 3.0       # fallback: bpm above baseline, used only if rhr_sd is unavailable
     HRV_RATIO = 0.90          # fallback: fraction of baseline, used only if hrv_log_sd is unavailable
     SKIN_TEMP_C = 0.3         # degrees C above personal baseline (already baseline-relative upstream)
+    RESP_DELTA = 1.0          # fallback: breaths/min above baseline, used only if resp_sd is unavailable
 
     triggers: dict[str, dict] = {}  # signal name -> first/strongest trigger found
     most_recent_date = days[-1].get("date") if days else None
@@ -863,6 +879,21 @@ def compute_illness_risk(
                 if is_today:
                     active_today.add("HRV")
 
+        resp, resp_base = day.get("resp"), day.get("resp_baseline")
+        resp_sd = day.get("resp_sd")
+        if resp is not None and resp_base:
+            delta = resp - resp_base
+            # Floor the SD-based threshold: overnight resp rate can be so stable that
+            # 1.5 SD is a fraction of a breath, below the sensor's own resolution.
+            threshold = max(0.5, Z_THRESHOLD * resp_sd) if resp_sd else RESP_DELTA
+            if delta >= threshold:
+                if "Respiratory rate" not in triggers:
+                    triggers["Respiratory rate"] = {
+                        "date": d, "detail": f"Overnight breathing +{delta:.1f}/min vs baseline ({_recency(d)})"}
+                day_signals.setdefault(d, set()).add("Respiratory rate")
+                if is_today:
+                    active_today.add("Respiratory rate")
+
         skin_temp = day.get("skin_temp_deviation")
         if skin_temp is not None and skin_temp >= SKIN_TEMP_C:
             if "Skin temp" not in triggers:
@@ -876,7 +907,8 @@ def compute_illness_risk(
     n_today = len(active_today)
 
     have_any_data = any(
-        day.get("rhr_baseline") or day.get("hrv_baseline") or day.get("skin_temp_deviation") is not None
+        day.get("rhr_baseline") or day.get("hrv_baseline") or day.get("resp_baseline")
+        or day.get("skin_temp_deviation") is not None
         for day in days
     )
     if not have_any_data:
@@ -904,20 +936,23 @@ def compute_illness_risk(
     else:
         level, label, color = "green", "Normal range", "#2ecc71"
 
-    detail = "; ".join(signals) if signals else "RHR, HRV, and skin temp all within normal range."
+    detail = "; ".join(signals) if signals else "RHR, HRV, breathing rate, and skin temp all within normal range."
     return {"level": level, "label": label, "color": color, "detail": detail, "signals": signals}
 
 
+ILLNESS_BASELINE_DAYS = 28
+
+
 def illness_risk_from_db(conn: sqlite3.Connection, date_str: str | None = None, window_days: int = 3) -> dict:
-    """Trailing-window illness/stress risk (see compute_illness_risk). Baseline is
-    a single 7-day trailing average anchored on the window's most recent date —
-    it doesn't need to move day-to-day since it represents "normal for you", not
-    a rolling comparison point."""
+    """Trailing-window illness/stress risk (see compute_illness_risk). The baseline is
+    the ILLNESS_BASELINE_DAYS days *before* the window, so the days being tested don't
+    dilute their own baseline; it represents "normal for you", not a rolling comparison
+    point, so it stays fixed across the window."""
     if date_str is None:
         date_str = date.today().isoformat()
 
     window_rows = conn.execute(
-        """SELECT date, resting_hr, hrv, skin_temp_deviation, source_flags_json
+        """SELECT date, resting_hr, hrv, skin_temp_deviation, source_flags_json, sleep_breathing_rate
            FROM daily_metrics
            WHERE date <= ? AND date > date(?, ?)
            ORDER BY date""",
@@ -930,10 +965,11 @@ def illness_risk_from_db(conn: sqlite3.Connection, date_str: str | None = None, 
     today_rhr_computed = _is_computed_rhr_flag(today_flags)
     today_hrv_all_day = _is_all_day_hrv_flag(today_flags)
 
+    window_start = (date.fromisoformat(date_str) - timedelta(days=window_days - 1)).isoformat()
     baseline_rows = conn.execute(
-        """SELECT hrv, resting_hr, source_flags_json FROM daily_metrics
-           WHERE date >= date(?, '-7 days') AND date < ?""",
-        (date_str, date_str),
+        """SELECT hrv, resting_hr, source_flags_json, sleep_breathing_rate FROM daily_metrics
+           WHERE date >= date(?, ?) AND date < ?""",
+        (window_start, f"-{ILLNESS_BASELINE_DAYS} days", window_start),
     ).fetchall()
     hrv_values = [
         r[0] for r in baseline_rows
@@ -943,16 +979,16 @@ def illness_risk_from_db(conn: sqlite3.Connection, date_str: str | None = None, 
         r[1] for r in baseline_rows
         if r[1] is not None and _is_computed_rhr_flag(r[2]) == today_rhr_computed
     ]
+    resp_values = [r[3] for r in baseline_rows if r[3] is not None]
     hrv_baseline = sum(hrv_values) / len(hrv_values) if hrv_values else None
     rhr_baseline = sum(rhr_values) / len(rhr_values) if rhr_values else None
+    resp_baseline = sum(resp_values) / len(resp_values) if resp_values else None
 
-    # Trailing-window SDs, used to scale triggers to this person's own noise
+    # Baseline-window SDs, used to scale triggers to this person's own noise
     # (see compute_illness_risk). Need >=4 samples for either to be meaningful,
     # same floor as _ln_rmssd_cv.
-    rhr_sd = None
-    if len(rhr_values) >= 4:
-        rhr_mean = rhr_baseline
-        rhr_sd = math.sqrt(sum((v - rhr_mean) ** 2 for v in rhr_values) / len(rhr_values))
+    rhr_sd = statistics.pstdev(rhr_values) if len(rhr_values) >= 4 else None
+    resp_sd = statistics.pstdev(resp_values) if len(resp_values) >= 4 else None
     hrv_log_sd = _ln_rmssd_cv(hrv_values)
 
     days = [
@@ -965,6 +1001,9 @@ def illness_risk_from_db(conn: sqlite3.Connection, date_str: str | None = None, 
             "hrv_baseline": hrv_baseline,
             "hrv_log_sd": hrv_log_sd,
             "skin_temp_deviation": r[3],
+            "resp": r[5],
+            "resp_baseline": resp_baseline,
+            "resp_sd": resp_sd,
         }
         for r in window_rows
     ]
@@ -999,15 +1038,49 @@ def _circular_sd_hours(hours: list[float]) -> float | None:
     return circular_sd_rad / (2 * math.pi) * 24
 
 
-def sleep_regularity(nights: list[tuple[float, float]]) -> dict:
+def sleep_regularity_index(intervals: dict[str, tuple[float, float]]) -> float | None:
+    """
+    Sleep Regularity Index (Phillips et al. 2017, Sci Rep 7:3216; the metric used by
+    Windred et al. 2024): the probability of being in the same state (asleep/awake)
+    at any two time points 24h apart, rescaled to -100..100 (100 = identical timing
+    every day). Computed from main sleep episodes only — nights are
+    {date: (start_epoch_s, end_epoch_s)} — so wake bouts inside a night and naps
+    aren't counted. For each pair of consecutive nights, the minutes where the two
+    disagree are the symmetric difference of night 1 shifted +24h and night 2.
+    Needs >= 5 consecutive-night pairs.
+    """
+    pair_scores = []
+    for d, (s1, e1) in intervals.items():
+        nxt = (date.fromisoformat(d) + timedelta(days=1)).isoformat()
+        if nxt not in intervals:
+            continue
+        s2, e2 = intervals[nxt]
+        s1, e1 = s1 + 86400, e1 + 86400
+        overlap = max(0.0, min(e1, e2) - max(s1, s2))
+        mismatch_min = ((e1 - s1) + (e2 - s2) - 2 * overlap) / 60
+        pair_scores.append(max(-100.0, 100.0 - 200.0 * mismatch_min / 1440))
+    if len(pair_scores) < 5:
+        return None
+    return sum(pair_scores) / len(pair_scores)
+
+
+def sleep_regularity(nights: list[tuple[float, float]],
+                     intervals: dict[str, tuple[float, float]] | None = None) -> dict:
     """
     Args:
-        nights: list of (wake_hour, sleep_duration_min) tuples, most recent
-                14 or so nights.
+        nights: list of (wake_hour, time_in_bed_min) tuples, most recent 14 or so
+                nights. time_in_bed includes awake minutes, so wake - time_in_bed is
+                the actual bedtime (sleep duration alone excludes them and puts
+                bedtime late).
+        intervals: {date: (start_epoch_s, end_epoch_s)} sleep episodes, when the
+                source provides them — enables the Sleep Regularity Index.
 
     Returns:
-        score: 0-100 (100 = perfectly consistent bed/wake times), or None if
-               too few nights
+        score: 0-100 (100 = perfectly consistent timing), or None if too few nights.
+               The SRI (clamped at 0) when there are enough consecutive nights,
+               otherwise derived from the circular SD of bed/wake times.
+        method: "sri" or "circular_sd"
+        sri: the raw Sleep Regularity Index, or None
         wake_sd_hours, bedtime_sd_hours: circular SD of each, in hours
     """
     wake_hours = [w for w, _ in nights if w is not None]
@@ -1019,17 +1092,24 @@ def sleep_regularity(nights: list[tuple[float, float]]) -> dict:
 
     wake_sd = _circular_sd_hours(wake_hours)
     bedtime_sd = _circular_sd_hours(bedtimes)
-    if wake_sd is None and bedtime_sd is None:
-        return {"score": None, "wake_sd_hours": None, "bedtime_sd_hours": None}
+    sri = sleep_regularity_index(intervals) if intervals else None
+    if wake_sd is None and bedtime_sd is None and sri is None:
+        return {"score": None, "method": None, "sri": None,
+                "wake_sd_hours": None, "bedtime_sd_hours": None}
 
-    sds = [sd for sd in (wake_sd, bedtime_sd) if sd is not None]
-    avg_sd = sum(sds) / len(sds)
-    # SD of 0h -> 100; SD of 2.5h -> 0 (a "goes to bed within ~15min most
-    # nights" athlete scores high, someone routinely off by 2h+ scores low)
-    score = round(max(0.0, min(100.0, 100.0 - avg_sd * 40.0)))
+    if sri is not None:
+        score, method = round(max(0.0, sri)), "sri"
+    else:
+        sds = [sd for sd in (wake_sd, bedtime_sd) if sd is not None]
+        avg_sd = sum(sds) / len(sds)
+        # SD of 0h -> 100; SD of 2.5h -> 0 (a "goes to bed within ~15min most
+        # nights" athlete scores high, someone routinely off by 2h+ scores low)
+        score, method = round(max(0.0, min(100.0, 100.0 - avg_sd * 40.0))), "circular_sd"
 
     return {
         "score": score,
+        "method": method,
+        "sri": round(sri, 1) if sri is not None else None,
         "wake_sd_hours": round(wake_sd, 2) if wake_sd is not None else None,
         "bedtime_sd_hours": round(bedtime_sd, 2) if bedtime_sd is not None else None,
     }
@@ -1038,16 +1118,49 @@ def sleep_regularity(nights: list[tuple[float, float]]) -> dict:
 def _wake_hours_from_db(conn: sqlite3.Connection, date_str: str, window_days: int) -> dict[str, float]:
     """sleep_wake_hour only lives in raw_daily_metrics (not the daily_metrics wide
     table), so resolve it per-date with the usual garmin-first source priority."""
-    wake_rows = conn.execute(
-        """SELECT date,
-               MIN(CASE WHEN source='garmin' THEN value END) AS garmin_val,
-               MIN(CASE WHEN source='google_health' THEN value END) AS gh_val
-           FROM raw_daily_metrics
-           WHERE metric='sleep_wake_hour' AND date <= ? AND date > date(?, ?)
-           GROUP BY date""",
+    return {d: n["wake_hour"] for d, n in _nights_from_db(conn, date_str, window_days).items()}
+
+
+def _nights_from_db(conn: sqlite3.Connection, date_str: str, window_days: int) -> dict[str, dict]:
+    """
+    Per-night sleep timing for the window ending date_str, garmin-first per date:
+    {date: {wake_hour, time_in_bed_min, interval}}. interval is (start, end) epoch
+    seconds when the source stored them (sleep_start_epoch/sleep_end_epoch), and then
+    time in bed is exact. Otherwise it's estimated: Garmin's sleep duration excludes
+    awake minutes, so they're added back; Google Health's duration is the session
+    length, which already includes them.
+    """
+    rows = conn.execute(
+        """SELECT date, source, metric, value FROM raw_daily_metrics
+           WHERE metric IN ('sleep_wake_hour', 'sleep_start_epoch', 'sleep_end_epoch',
+                            'sleep_duration_min', 'sleep_awake_min')
+             AND source IN ('garmin', 'google_health')
+             AND date <= ? AND date > date(?, ?)""",
         (date_str, date_str, f"-{window_days} days"),
     ).fetchall()
-    return {r[0]: r[1] if r[1] is not None else r[2] for r in wake_rows}
+    by_key: dict[tuple[str, str], dict[str, float]] = {}
+    for d, source, metric, value in rows:
+        by_key.setdefault((d, source), {})[metric] = value
+
+    nights: dict[str, dict] = {}
+    for d in sorted({d for d, _ in by_key}):
+        for source in ("garmin", "google_health"):
+            m = by_key.get((d, source))
+            if not m or m.get("sleep_wake_hour") is None:
+                continue
+            interval = None
+            if m.get("sleep_start_epoch") and m.get("sleep_end_epoch")                     and m["sleep_end_epoch"] > m["sleep_start_epoch"]:
+                interval = (m["sleep_start_epoch"], m["sleep_end_epoch"])
+                in_bed = (interval[1] - interval[0]) / 60
+            elif m.get("sleep_duration_min"):
+                in_bed = m["sleep_duration_min"] + (
+                    (m.get("sleep_awake_min") or 0.0) if source == "garmin" else 0.0)
+            else:
+                in_bed = None
+            nights[d] = {"wake_hour": m["sleep_wake_hour"], "time_in_bed_min": in_bed,
+                         "interval": interval}
+            break
+    return nights
 
 
 def _circular_mean_hours(hours: list[float]) -> float | None:
@@ -1077,24 +1190,44 @@ def average_wake_hour_from_db(conn: sqlite3.Connection, date_str: str | None = N
 def sleep_regularity_from_db(conn: sqlite3.Connection, date_str: str | None = None, window_days: int = 14) -> dict:
     if date_str is None:
         date_str = date.today().isoformat()
+    nights = _nights_from_db(conn, date_str, window_days)
+    return sleep_regularity(
+        [(n["wake_hour"], n["time_in_bed_min"]) for n in nights.values()],
+        {d: n["interval"] for d, n in nights.items() if n["interval"]},
+    )
 
-    wake_by_date = _wake_hours_from_db(conn, date_str, window_days)
-    if not wake_by_date:
-        return sleep_regularity([])
 
-    dur_rows = conn.execute(
-        """SELECT date, sleep_duration_min FROM daily_metrics
-           WHERE date <= ? AND date > date(?, ?)""",
-        (date_str, date_str, f"-{window_days} days"),
-    ).fetchall()
-    dur_by_date = {r[0]: r[1] for r in dur_rows}
+# ── chronotype ───────────────────────────────────────────────────────────────
+#
+# The alertness curve's circadian peak defaults to 15:00, a population-typical
+# chronotype. People differ by several hours, and the standard field measure of
+# chronotype is mid-sleep on free days, MSF (Roenneberg, T. et al. (2003). "Life
+# between clocks: daily temporal patterns of human chronotypes." J Biol Rhythms,
+# 18(1), 80-90). The circadian phase of alertness tracks it, so the peak is placed
+# a fixed offset after MSF — 11h, which maps the population-typical MSF of ~04:00
+# onto the default 15:00. Free days are approximated as weekend mornings (nights of
+# Fri/Sat), since there's no calendar; falls back to all nights when there are too
+# few weekends. No correction for oversleep on free days (MSFsc), so heavy
+# weekend catch-up sleep shifts the estimate slightly late.
+CIRCADIAN_PEAK_DEFAULT = 15.0
+MSF_TO_PEAK_HOURS = 11.0
 
-    nights = [
-        (wake, dur_by_date.get(d))
-        for d, wake in wake_by_date.items()
-        if wake is not None
-    ]
-    return sleep_regularity(nights)
+
+def circadian_peak_hour_from_db(conn: sqlite3.Connection, date_str: str | None = None,
+                                window_days: int = 28) -> float:
+    if date_str is None:
+        date_str = date.today().isoformat()
+    nights = _nights_from_db(conn, date_str, window_days)
+    mid = {d: (n["wake_hour"] - n["time_in_bed_min"] / 120) % 24
+           for d, n in nights.items() if n["time_in_bed_min"]}
+    free = [h for d, h in mid.items() if date.fromisoformat(d).weekday() >= 5]
+    sample = free if len(free) >= 4 else (list(mid.values()) if len(mid) >= 7 else [])
+    msf = _circular_mean_hours(sample)
+    if msf is None:
+        return CIRCADIAN_PEAK_DEFAULT
+    # Keep within a plausible range; an MSF far outside it is more likely shift
+    # work or bad data than a chronotype.
+    return max(12.0, min(19.0, (msf + MSF_TO_PEAK_HOURS) % 24))
 
 
 def alertness_curve(
@@ -1105,12 +1238,14 @@ def alertness_curve(
     activity_boosts: list[tuple[float, float]] | None = None,
     strain_events: list[tuple[float, float]] | None = None,
     strain_tau_hours: float = 6.0,
+    circadian_peak_hour: float = CIRCADIAN_PEAK_DEFAULT,
 ) -> list[dict]:
     """
     Simplified two-process alertness model (Borbély 1982; Daan, Beersma, Borbély 1984).
 
     Combines:
-      - Circadian signal C(t): cosine with peak ~9pm (wake-maintenance zone)
+      - Circadian signal C(t): cosine peaking mid-afternoon (circadian_peak_hour,
+        15:00 by default; see circadian_peak_hour_from_db for the chronotype shift)
       - Homeostatic pressure S(t): exponential rise over the waking day
       - Sleep-quality factor: low score shifts starting S upward
       - Caffeine boost: blocks adenosine, suppressing S with ~5h half-life
@@ -1120,7 +1255,7 @@ def alertness_curve(
 
     Args:
         wake_hour: local hour of waking (e.g. 6.5 = 6:30am)
-        sleep_score: 0-100 sleep quality (affects depth of post-wake restoration)
+        sleep_score: 0-100 sleep quality; sets residual sleep pressure at wake
         hours: how many hours forward to forecast
         caffeine_doses: list of (dose_mg, local_hour_of_dose) tuples for today
         activity_boosts: list of (intensity_0_to_1, local_end_hour) tuples for today
@@ -1138,10 +1273,10 @@ def alertness_curve(
         t = i / 4.0  # hours since waking
         hour = (wake_hour + t) % 24
 
-        # Circadian component: cosine peak at 3pm (15h), typical chronotype.
-        # This shifts the alert phase to afternoon and produces the expected
-        # morning-rise → afternoon-peak → evening-decline pattern.
-        C = (math.cos(2 * math.pi * (hour - 15.0) / 24) + 1) / 2
+        # Circadian component: cosine peaking at circadian_peak_hour (15:00 for a
+        # typical chronotype, shifted by the user's own mid-sleep timing). Produces
+        # the expected morning-rise → afternoon-peak → evening-decline pattern.
+        C = (math.cos(2 * math.pi * (hour - circadian_peak_hour) / 24) + 1) / 2
 
         # Homeostatic pressure: rises from s0 toward 1 over the waking period
         S = s0 + (1 - s0) * (1 - math.exp(-t / 16.0))
@@ -1180,8 +1315,10 @@ def alertness_curve(
                     strain_debt += initial_penalty * math.exp(-hours_since_end / max(0.1, strain_tau_hours))
         strain_debt = min(0.18, strain_debt)
 
+        # Sleep quality enters once, through s0 (residual sleep pressure at wake).
+        # It used to also scale the whole curve, counting poor sleep twice.
         raw = C * 0.65 + (1 - S_effective) * 0.35
-        base_alertness = max(5.0, min(100.0, raw * quality * 100))
+        base_alertness = max(5.0, min(100.0, raw * 100))
         alertness = round(max(5.0, base_alertness - strain_debt * 100), 1)
 
         result.append({"hour": round(hour, 3), "alertness": alertness,

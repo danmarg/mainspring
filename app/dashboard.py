@@ -19,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 
 from app import auth
 from app.db import db, DEFAULT_SOURCE_PRIORITY
-from app.readiness import alertness_curve, average_wake_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db, hr_ceiling, trimp_from_hr_samples, zone_weighted_training_load_rows
+from app.readiness import alertness_curve, average_wake_hour_from_db, circadian_peak_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db, hr_ceiling, trimp_from_hr_samples, zone_weighted_training_load_rows
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard")
@@ -611,7 +611,8 @@ def _activity_end_local_hour(start_time: str, duration_s: int, browser_tz: str |
 def _energy_chart(wake_hour: float | None, sleep_score: float | None,
                   caffeine_doses: list[tuple[float, float]] | None = None,
                   activity_boosts: list[tuple[float, float]] | None = None,
-                  strain_events: list[tuple[float, float]] | None = None) -> str:
+                  strain_events: list[tuple[float, float]] | None = None,
+                  circadian_peak_hour: float = 15.0) -> str:
     """
     Energy forecast chart using two-process alertness model (Borbély 1982).
     Anchored to today's wake time from Garmin sleep data.
@@ -623,7 +624,7 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
     FORECAST_HOURS = 18  # slightly past midnight for late sleepers
     curve = alertness_curve(wake_hour, sleep_score or 75.0, FORECAST_HOURS,
                             caffeine_doses=caffeine_doses, activity_boosts=activity_boosts,
-                            strain_events=strain_events)
+                            strain_events=strain_events, circadian_peak_hour=circadian_peak_hour)
 
     # Use hours-since-wake on X axis to avoid midnight-wrapping issues
     curve_hw = [
@@ -676,7 +677,8 @@ def _energy_chart(wake_hour: float | None, sleep_score: float | None,
 def _live_curve_json(wake_hour: float | None, sleep_score: float | None,
                      caffeine_doses: list[tuple[float, float]] | None = None,
                      activity_boosts: list[tuple[float, float]] | None = None,
-                     strain_events: list[tuple[float, float]] | None = None) -> str:
+                     strain_events: list[tuple[float, float]] | None = None,
+                     circadian_peak_hour: float = 15.0) -> str:
     """Raw alertness curve (hours-since-wake, alertness) for the client-side
     live status widget, which recomputes 'good window to train' / bedtime
     text every minute without a page reload."""
@@ -685,7 +687,7 @@ def _live_curve_json(wake_hour: float | None, sleep_score: float | None,
     FORECAST_HOURS = 18
     curve = alertness_curve(wake_hour, sleep_score or 75.0, FORECAST_HOURS,
                             caffeine_doses=caffeine_doses, activity_boosts=activity_boosts,
-                            strain_events=strain_events)
+                            strain_events=strain_events, circadian_peak_hour=circadian_peak_hour)
     return json.dumps([{"h": i / 4.0, "a": r["alertness"]} for i, r in enumerate(curve)])
 
 
@@ -1250,6 +1252,8 @@ def overview(request: Request,
         # Trailing average wake time, for anchoring the bedtime recommendation instead
         # of today's single (possibly anomalous) wake — see average_wake_hour_from_db.
         bedtime_wake_hour = average_wake_hour_from_db(conn, metrics_date)
+        # Chronotype: shifts the alertness curve's circadian peak (see readiness.py)
+        circadian_peak = circadian_peak_hour_from_db(conn, metrics_date)
         if bedtime_wake_hour is None:
             bedtime_wake_hour = wake_hour
 
@@ -1477,10 +1481,10 @@ def overview(request: Request,
         "calorie_target": calorie_target,
         "hydration_target": hydration_target,
         "calibration_status": calibration_status,
-        "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None, strain_events or None),
+        "energy_spec": _energy_chart(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None, strain_events or None, circadian_peak),
         "wake_hour": wake_hour,
         "bedtime_wake_hour": bedtime_wake_hour,
-        "live_curve_json": _live_curve_json(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None, strain_events or None),
+        "live_curve_json": _live_curve_json(wake_hour, sleep_score_for_curve, caffeine_doses or None, activity_boosts or None, strain_events or None, circadian_peak),
         "recommended_sleep_hours": round(recommended_sleep_hours, 2),
         "sleep_debt_min": round(sleep_debt_min),
         "sleep_target_min": round(sleep_target_min),

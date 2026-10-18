@@ -1334,8 +1334,10 @@ planning, and recommendations. The server never fetches weather or sends message
    - `recovery_hours`, `sleep_breathing_rate`, `skin_temp_deviation`, `hydration_ml`,
      `lactate_threshold_hr`/`_pace`, `ftp_watts`, `sleep_need_min` (Garmin's need for the
      night just slept; `sleep_need_next_min` is for tonight) — see the metric table below
-   - `sleep_regularity`: night-to-night bed/wake-time consistency over 14 nights
-     (independent of duration/score; erratic timing alone predicts worse recovery)
+   - `sleep_regularity`: night-to-night timing consistency over 14 nights — the Sleep
+     Regularity Index when sleep start/end times are available (`method: "sri"`), else
+     a bed/wake-time spread score (independent of duration/score; irregular timing
+     predicts worse outcomes on its own)
    - `recent_soreness`: soreness/injury logs from the last 3 days
    - `training_monotony_strain`: Foster's monotony (mean/SD of trailing-7-day daily
      load) and strain (sum × monotony). `band: "elevated"` means load has been spread
@@ -1393,11 +1395,11 @@ planning, and recommendations. The server never fetches weather or sends message
 | training_readiness | >70 | 50–70 | <50 favour recovery |
 | readiness.score | ≥65 (Ready/Primed) | 50–65 (Moderate) | <50 → Low/Rest, favour recovery |
 | body_battery_high | >70 | 40–70 | <40 suggests poor recovery |
-| sleep_regularity.score | >80 | 50–80 | <50 → bed/wake times swinging 2h+, a recovery drag on its own |
+| sleep_regularity.score | >80 | 70–80 (SRI) / 50–80 (spread) | <70 (SRI) / <50 (spread) → timing swinging by hours, a recovery drag on its own |
 | sleep_duration_min vs sleep_need_min | at or above need | within ~30 min | >1h short on consecutive nights → sleep is the limiter; Garmin-only (null without a Garmin device), adjusted daily for load/HRV, so a rising need after hard days is expected |
 | recovery_hours | 0 (ready now) | a few hours left | still elapsing → favour easy/rest until it hits 0 |
 | skin_temp_deviation | near 0°C | ±0.3°C | >0.5°C above baseline → elevated, could be illness, poor sleep, heat, or dehydration — treat other signals cautiously |
-| illness_risk.level | green/None | yellow (1 signal, or 2+ non-concordant across the window — informational only, don't act on it alone) | red (2+ signals concordant on the SAME night, still active) → bias toward easy/rest. Not a diagnosis — as often driven by poor sleep, heat, dehydration, or ordinary stress as by illness |
+| illness_risk.level (RHR, HRV, overnight breathing rate, skin temp vs a 28-day baseline) | green/None | yellow (1 signal, or 2+ non-concordant across the window — informational only, don't act on it alone) | red (2+ signals concordant on the SAME night, still active) → bias toward easy/rest. Not a diagnosis — as often driven by poor sleep, heat, dehydration, or ordinary stress as by illness |
 | training_monotony_strain.monotony | ≤1.5 | 1.5–2.0 | >2.0 → "elevated" band, force contrast into the week |
 | intensity_distribution.moderate_pct | <20% | 20–30% | >30% → grey_zone_flag, drifted off polarized training |
 | decoupling_trend.direction | improving/stable | — | worsening → back off intensity |

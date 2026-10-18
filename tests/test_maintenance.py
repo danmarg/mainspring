@@ -398,3 +398,24 @@ def test_reparse_endpoint_runs_in_the_background_and_reports(tmp_db, client):
     info = client.get("/admin/maintenance/db").json()
     assert info["last_result"]["corrected"] == 1
     assert _stored_hrv(tmp_db, day(40)) == 37.0
+
+
+def test_reparse_sleep_backfills_new_fields_from_retained_payloads(tmp_db):
+    import json
+    payload = json.dumps({"dailySleepDTO": {
+        "sleepTimeSeconds": 27000, "sleepStartTimestampGMT": 1792268679000,
+        "sleepEndTimestampGMT": 1792298799000,
+        "sleepNeed": {"baseline": 470, "actual": 500}}})
+    put(tmp_db, "get_sleep_data", day(30), payload)
+    result = maintenance.reparse_garmin_sleep(tmp_db)
+    assert result == {"reparsed": 1, "dates": [day(30)]}
+    got = dict(tmp_db.execute(
+        "SELECT metric, value FROM raw_daily_metrics WHERE date=?", (day(30),)).fetchall())
+    assert got["sleep_start_epoch"] == 1792268679.0
+    assert got["sleep_need_min"] == 500.0
+    assert maintenance.reparse_garmin_sleep(tmp_db)["reparsed"] == 1  # idempotent
+
+
+def test_reparse_sleep_endpoint_starts_job(client):
+    r = client.post("/admin/maintenance/reparse_sleep")
+    assert r.status_code == 200 and r.json() == {"status": "started", "job": "reparse_sleep"}

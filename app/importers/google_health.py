@@ -580,6 +580,16 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
     # wall-clock) — must apply endUtcOffset to get the local hour, or this reads
     # ~2h early for HOME_TZ and silently wrong wherever the offset differs.
     interval = sleep_data.get("interval", {})
+    # Episode bounds as UTC epoch seconds, same as Garmin's (see _parse_sleep there).
+    for key, metric in (("startTime", "sleep_start_epoch"), ("endTime", "sleep_end_epoch")):
+        ts = interval.get(key)
+        if ts:
+            try:
+                epoch = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                upsert_raw_metric(conn, date_str, SOURCE, metric, epoch, now)
+                rows += 1
+            except (ValueError, TypeError):
+                pass
     end_str = interval.get("endTime")
     if end_str:
         try:
