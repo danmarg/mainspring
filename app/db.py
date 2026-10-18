@@ -177,6 +177,11 @@ _ADDED_DAILY_METRICS_COLUMNS = [
 ]
 
 
+_ADDED_ACTIVITY_HR_ZONES_COLUMNS = [
+    ("low_bpm", "REAL"),
+]
+
+
 _ADDED_MANUAL_LOGS_COLUMNS = [
     ("garmin_synced_at", "TEXT"),
 ]
@@ -187,6 +192,11 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     for col, col_type in _ADDED_DAILY_METRICS_COLUMNS:
         if col not in existing:
             conn.execute(f"ALTER TABLE daily_metrics ADD COLUMN {col} {col_type}")
+
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(activity_hr_zones)")}
+    for col, col_type in _ADDED_ACTIVITY_HR_ZONES_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE activity_hr_zones ADD COLUMN {col} {col_type}")
 
     existing = {row[1] for row in conn.execute("PRAGMA table_info(manual_logs)")}
     for col, col_type in _ADDED_MANUAL_LOGS_COLUMNS:

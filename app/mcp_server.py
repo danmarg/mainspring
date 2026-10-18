@@ -330,9 +330,13 @@ def log_energy(level: int, ts: Optional[str] = None, note: Optional[str] = None)
 
 @mcp.tool()
 def get_energy_calibration() -> dict:
-    """Return the latest exercise-strain decay suggestion. It is never auto-applied."""
-    from app.calibration import latest_energy_calibration
-    return latest_energy_calibration() or {"status": "not_run"}
+    """Return the latest exercise-strain decay suggestion, plus `readiness_validation`:
+    how well the readiness score and each of its components track morning energy logs
+    (Spearman rho over the last 180 days). Neither is ever auto-applied."""
+    from app.calibration import latest_energy_calibration, readiness_validation
+    with db() as conn:
+        validation = readiness_validation(conn)
+    return {**(latest_energy_calibration() or {"status": "not_run"}), "readiness_validation": validation}
 
 
 @mcp.tool()
@@ -1344,14 +1348,19 @@ planning, and recommendations. The server never fetches weather or sends message
      too evenly across the week — no easy/hard contrast — a distinct overtraining
      risk from form/ACWR, which only look at load magnitude
    - `decoupling_trend`: aerobic decoupling (HR:pace drift within a run) trended across
-     the most recent qualifying runs. `direction: "worsening"` = aerobic base eroding,
+     the most recent steady runs (interval/fartlek/progression runs are excluded; heat
+     also raises drift and isn't corrected for, so discount hot-weather runs). `direction: "worsening"` = aerobic base eroding,
      back off intensity regardless of what HRV/sleep say that morning; `"improving"` =
      base is strengthening, can absorb more intensity
-   - `intensity_distribution`: real time-in-zone % (easy/moderate/hard) across the
-     trailing week, from Garmin's per-activity zone data — not whole-session avg HR,
-     which would hide interval recoveries inside "moderate". `grey_zone_flag: true`
-     means recent training hasn't been polarized (too much moderate-intensity, not
-     enough true easy or true hard)
+   - `intensity_distribution`: real time-in-zone % across the trailing 14 days, from
+     Garmin's per-activity zone data — not whole-session avg HR, which would hide
+     interval recoveries inside "moderate". With `model: "lthr_3zone"` the zones are the
+     research three-zone model anchored on lactate threshold: easy = below LT1 (~89% of
+     LTHR), moderate = between LT1 and LTHR (marathon/tempo pace lives here), hard =
+     above LTHR. `"garmin_5zone"` is the fallback without an LTHR (Garmin zones 1-2/3/4-5).
+     `grey_zone_flag: true` means recent training hasn't been polarized (too much
+     moderate-intensity, not enough true easy or true hard) — expect it during a
+     marathon-specific block, where race-pace work is moderate by definition
 
 2. Use `get_correlations()` periodically (weekly / when patterns are unclear) to surface
    which behaviours most affect recovery. Results feed the insights in `get_workout_context`.

@@ -385,39 +385,103 @@ def decoupling_trend_from_db(conn: sqlite3.Connection, date_str: str, window_run
     }
 
 
-def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, window_days: int = 7) -> dict:
+# Three-zone intensity model (Seiler & Kjerland 2006; Stöggl & Sperlich 2014):
+# zone 1 below the first ventilatory/lactate threshold, zone 2 between thresholds,
+# zone 3 above the second. Polarization research is framed in these zones, not in a
+# watch's 5-zone %HRmax bands: for a runner with LTHR 162 and Garmin zone 4 at
+# 143-161, marathon-pace running sits in Garmin's "zone 4" yet below LT2. LT2 is taken
+# as Garmin's lactate-threshold HR; LT1 isn't measured by the watch, so it's
+# approximated at 89% of LTHR (the conventional top of an LTHR-based endurance zone).
+# Time is apportioned from Garmin's per-zone seconds assuming HR is spread evenly
+# within each Garmin zone. Falls back to Garmin zones 1-2 / 3 / 4-5 without an LTHR
+# or zone boundaries.
+LT1_FRACTION_OF_LTHR = 0.89
+
+
+def _latest_lthr(conn: sqlite3.Connection, date_str: str) -> float | None:
+    row = conn.execute(
+        "SELECT lactate_threshold_hr FROM daily_metrics WHERE date <= ? AND lactate_threshold_hr > 0 "
+        "ORDER BY date DESC LIMIT 1", (date_str,)).fetchone()
+    return float(row[0]) if row else None
+
+
+def _latest_zone_bounds(conn: sqlite3.Connection) -> dict[int, float]:
+    """Garmin zone lower bounds from the most recent activity that recorded them —
+    used for activities stored before boundaries were kept (they're an account
+    setting, so the latest is the best guess)."""
+    row = conn.execute(
+        "SELECT activity_id FROM activity_hr_zones WHERE low_bpm IS NOT NULL "
+        "ORDER BY rowid DESC LIMIT 1").fetchone()
+    if not row:
+        return {}
+    return {int(z): lo for z, lo in conn.execute(
+        "SELECT zone, low_bpm FROM activity_hr_zones WHERE activity_id=? AND low_bpm IS NOT NULL",
+        (row[0],))}
+
+
+def three_zone_seconds(zone_rows: list[tuple[int, float, float | None]], lthr: float | None,
+                       fallback_bounds: dict[int, float]) -> tuple[float, float, float, str]:
+    """(easy, moderate, hard) seconds and the model used, from one activity's (or a
+    pooled set of) Garmin (zone, seconds, low_bpm) rows."""
+    bounds = {z: lo for z, _, lo in zone_rows if lo is not None} or fallback_bounds
+    if not lthr or len(bounds) < len({z for z, _, _ in zone_rows}):
+        easy = sum(s for z, s, _ in zone_rows if z <= 2)
+        moderate = sum(s for z, s, _ in zone_rows if z == 3)
+        hard = sum(s for z, s, _ in zone_rows if z >= 4)
+        return easy, moderate, hard, "garmin_5zone"
+
+    lt1, lt2 = LT1_FRACTION_OF_LTHR * lthr, lthr
+    zones = sorted(bounds)
+    easy = moderate = hard = 0.0
+    for z, secs, _ in zone_rows:
+        if not secs:
+            continue
+        lo = bounds[z]
+        nxt = [bounds[k] for k in zones if k > z]
+        prev = [bounds[k] for k in zones if k < z]
+        hi = nxt[0] if nxt else lo + (lo - prev[-1] if prev else 15.0)  # top zone: same width
+        width = max(1e-6, hi - lo)
+        f_easy = max(0.0, min(hi, lt1) - lo) / width
+        f_hard = max(0.0, hi - max(lo, lt2)) / width
+        f_mod = max(0.0, 1.0 - f_easy - f_hard)
+        easy += secs * f_easy
+        moderate += secs * f_mod
+        hard += secs * f_hard
+    return easy, moderate, hard, "lthr_3zone"
+
+
+def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, window_days: int = 14) -> dict:
     """
-    Polarization: % of trailing running time in easy (zones 1-2), moderate
-    (zone 3), and hard (zones 4-5) HR zones, using Garmin's real per-activity
-    time-in-zone (activity_hr_zones) rather than whole-session avg HR — an
-    interval session's recovery jogs would otherwise drag its average into
-    "moderate" and hide the exact grey-zone drift this metric exists to
-    catch. grey_zone_flag fires when moderate-zone time dominates, the
-    pattern polarized-training research associates with a fitness plateau.
+    Polarization: % of trailing running time below LT1 (easy), between thresholds
+    (moderate), and above LT2 (hard) — see three_zone_seconds — from Garmin's real
+    per-activity time-in-zone (activity_hr_zones) rather than whole-session avg HR:
+    an interval session's recovery jogs would otherwise drag its average into
+    "moderate" and hide the exact grey-zone drift this metric exists to catch.
+    grey_zone_flag fires when moderate time dominates, the pattern polarized-training
+    research associates with a plateau. 14-day window: a single week swings with one
+    long run or one workout.
     """
     rows = conn.execute(
-        """SELECT z.zone, SUM(z.seconds)
+        """SELECT z.zone, z.seconds, z.low_bpm
            FROM activities a
            JOIN activity_hr_zones z ON z.activity_id = a.garmin_activity_id
-           WHERE a.date <= ? AND a.date > date(?, ?)
-           GROUP BY z.zone""",
+           WHERE a.date <= ? AND a.date > date(?, ?)""",
         (date_str, date_str, f"-{window_days} days"),
     ).fetchall()
-    zone_seconds = {int(z): s for z, s in rows if s}
-    total = sum(zone_seconds.values())
+    zone_rows = [(int(z), s or 0.0, lo) for z, s, lo in rows]
+    easy, moderate, hard, model = three_zone_seconds(
+        zone_rows, _latest_lthr(conn, date_str), _latest_zone_bounds(conn))
+    total = easy + moderate + hard
     if total <= 0:
         return {"easy_pct": None, "moderate_pct": None, "hard_pct": None, "grey_zone_flag": None,
-                "detail": "no zone data in window"}
-
-    easy = zone_seconds.get(1, 0) + zone_seconds.get(2, 0)
-    moderate = zone_seconds.get(3, 0)
-    hard = zone_seconds.get(4, 0) + zone_seconds.get(5, 0)
+                "model": None, "detail": "no zone data in window"}
 
     return {
         "easy_pct": round(easy / total * 100, 1),
         "moderate_pct": round(moderate / total * 100, 1),
         "hard_pct": round(hard / total * 100, 1),
         "grey_zone_flag": (moderate / total) > 0.30,
+        "model": model,
         "detail": None,
     }
 

@@ -69,3 +69,28 @@ def test_stale_running_claim_is_recovered(tmp_db):
         ).fetchall()
     assert rows[0][0] == "error"
     assert "stale" in rows[0][1]
+
+
+def test_readiness_validation_tracks_morning_energy():
+    from app.calibration import readiness_validation
+    now = datetime.now(timezone.utc)
+    with db() as conn:
+        for i in range(40):
+            d = (now - timedelta(days=40 - i)).date().isoformat()
+            _seed_day(conn, d)
+            hrv = 40.0 if i % 3 == 0 else 55.0
+            conn.execute("INSERT INTO daily_metrics(date, hrv, sleep_score, source_flags_json) VALUES (?,?,?,?)",
+                         (d, hrv, 75.0, "{}"))
+            if i >= 10:  # morning rating: low on low-HRV days
+                conn.execute("INSERT INTO manual_logs(ts,type,quantity,created_at) VALUES (?,?,?,?)",
+                             (f"{d}T08:00:00+00:00", "energy", 2 if hrv < 50 else 4, utc_now()))
+        result = readiness_validation(conn)
+    assert result["status"] == "ok"
+    assert result["components"]["HRV"]["rho"] > 0.5
+    assert result["overall"]["rho"] > 0.5
+
+
+def test_readiness_validation_insufficient():
+    from app.calibration import readiness_validation
+    with db() as conn:
+        assert readiness_validation(conn)["status"] == "insufficient"

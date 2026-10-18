@@ -869,3 +869,32 @@ def test_alertness_curve_peak_shifts_with_chronotype():
     late = alertness_curve(7.0, hours=16, circadian_peak_hour=17.0)
     peak = lambda c: max(c, key=lambda r: r["alertness"])["hour"]
     assert peak(late) > peak(early)
+
+
+# ── three-zone intensity model ───────────────────────────────────────────────
+
+# The real Garmin response for a marathon-pace rehearsal (avg HR 142, LTHR 162)
+_REHEARSAL = [(1, 9.0, 95.0), (2, 244.0, 111.0), (3, 1153.0, 127.0), (4, 2487.0, 143.0), (5, 1.0, 161.0)]
+
+
+def test_three_zone_marathon_pace_is_moderate_not_hard():
+    from app.readiness import three_zone_seconds
+    easy, moderate, hard, model = three_zone_seconds(_REHEARSAL, 162.0, {})
+    assert model == "lthr_3zone"
+    # Garmin's 5-zone mapping called ~64% of this run "hard"; below LT2 it's moderate.
+    assert hard < 0.01 * (easy + moderate + hard)
+    assert moderate > easy
+
+
+def test_three_zone_falls_back_without_lthr():
+    from app.readiness import three_zone_seconds
+    easy, moderate, hard, model = three_zone_seconds(_REHEARSAL, None, {})
+    assert model == "garmin_5zone"
+    assert (easy, moderate, hard) == (253.0, 1153.0, 2488.0)
+
+
+def test_three_zone_uses_latest_bounds_for_rows_without_them():
+    from app.readiness import three_zone_seconds
+    rows = [(z, s, None) for z, s, _ in _REHEARSAL]
+    bounds = {z: lo for z, _, lo in _REHEARSAL}
+    assert three_zone_seconds(rows, 162.0, bounds) == three_zone_seconds(_REHEARSAL, 162.0, {})

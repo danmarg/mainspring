@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS activity_hr_zones (
   activity_id TEXT NOT NULL,
   zone        INTEGER NOT NULL,
   seconds     REAL,
+  low_bpm     REAL,  -- Garmin's lower bound for this zone at the time (zoneLowBoundary)
   PRIMARY KEY (activity_id, zone)
 );
 
