@@ -19,7 +19,8 @@ import base64
 import types
 
 from app import auth
-from app.db import DB_PATH, SECRET_TABLES, deny_secret_reads
+import app.db as dbm
+from app.db import SECRET_TABLES, deny_secret_reads
 
 _COOKIE_NAME = "ms_ds_auth"
 _COOKIE_MAX_AGE = 8 * 3600  # 8 hours
@@ -139,7 +140,7 @@ def make_datasette():
     deny_secrets.prepare_connection = hookimpl(lambda conn: conn.set_authorizer(deny_secret_reads))
 
     ds = Datasette(
-        files=[str(DB_PATH)],
+        files=[str(dbm.DB_PATH)],  # read at call time, not import time
         settings={
             "base_url": "/datasette/",
             "sql_time_limit_ms": 5000,
