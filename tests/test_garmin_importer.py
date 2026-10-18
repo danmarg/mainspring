@@ -605,8 +605,10 @@ def test_compute_decoupling_ignores_malformed_laps():
 # ── HR time-in-zone ──────────────────────────────────────────────────────────
 
 def test_parse_hr_zones():
-    data = [{"zoneNumber": 1, "secsInZone": 300.0}, {"zoneNumber": 2, "secsInZone": 120.0}]
-    assert _parse_hr_zones(data) == [{"zone": 1, "seconds": 300.0}, {"zone": 2, "seconds": 120.0}]
+    data = [{"zoneNumber": 1, "secsInZone": 300.0, "zoneLowBoundary": 95},
+            {"zoneNumber": 2, "secsInZone": 120.0}]
+    assert _parse_hr_zones(data) == [{"zone": 1, "seconds": 300.0, "low_bpm": 95.0},
+                                     {"zone": 2, "seconds": 120.0, "low_bpm": None}]
 
 
 def test_parse_hr_zones_empty():
@@ -616,7 +618,7 @@ def test_parse_hr_zones_empty():
 
 def test_parse_hr_zones_ignores_zero_or_missing_zone():
     data = [{"zoneNumber": 0, "secsInZone": 50.0}, {"secsInZone": 50.0}, {"zoneNumber": 1, "secsInZone": 300.0}]
-    assert _parse_hr_zones(data) == [{"zone": 1, "seconds": 300.0}]
+    assert _parse_hr_zones(data) == [{"zone": 1, "seconds": 300.0, "low_bpm": None}]
 
 
 def test_fetch_and_store_hr_zones_skips_non_running(tmp_db):
@@ -764,3 +766,16 @@ def test_parse_sleep_episode_bounds(tmp_db):
     got = dict(tmp_db.execute(
         "SELECT metric, value FROM raw_daily_metrics WHERE metric LIKE 'sleep_%_epoch'").fetchall())
     assert got == {"sleep_start_epoch": 1792268679.0, "sleep_end_epoch": 1792298799.0}
+
+
+def test_compute_decoupling_skips_interval_sessions():
+    # 1km reps at 3:30 with 1km jogs at 6:00: pace structure, not aerobic drift
+    splits = [{"distance_m": 1000.0, "duration_s": 210 if i % 2 == 0 else 360, "avg_hr": 160 if i % 2 == 0 else 130}
+              for i in range(8)]
+    assert _compute_decoupling(splits) is None
+
+
+def test_compute_decoupling_ignores_short_final_lap_for_steadiness():
+    splits = [{"distance_m": 1000.0, "duration_s": 300, "avg_hr": 140} for _ in range(6)]
+    splits.append({"distance_m": 150.0, "duration_s": 30, "avg_hr": 150})  # sprint finish remainder
+    assert _compute_decoupling(splits) is not None

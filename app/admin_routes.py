@@ -431,9 +431,12 @@ def maintenance_vacuum(background_tasks: BackgroundTasks):
 
 @router.get("/calibration/energy", dependencies=[Depends(_import_auth)])
 def energy_calibration_status():
-    """Return the latest suggestion; this endpoint never changes the live model."""
-    from app.calibration import latest_energy_calibration
-    return latest_energy_calibration() or {"status": "not_run"}
+    """Return the latest suggestion and the readiness validation; this endpoint never
+    changes the live model."""
+    from app.calibration import latest_energy_calibration, readiness_validation
+    with db() as conn:
+        validation = readiness_validation(conn)
+    return {**(latest_energy_calibration() or {"status": "not_run"}), "readiness_validation": validation}
 
 
 @router.get("/export/db", dependencies=[Depends(_export_auth)])

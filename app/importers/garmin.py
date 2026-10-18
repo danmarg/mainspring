@@ -737,16 +737,34 @@ def _parse_splits(data: dict) -> list[dict]:
     return out
 
 
+# Decoupling is only meaningful on a steady aerobic run: intervals, fartlek, races
+# and progression runs change pace on purpose, and HR:pace drift across halves then
+# measures the workout's structure, not aerobic durability. Runs whose lap pace
+# varies more than this (coefficient of variation) are skipped.
+MAX_DECOUPLING_PACE_CV = 0.10
+
+
 def _compute_decoupling(splits: list[dict]) -> float | None:
     """Aerobic decoupling: % change in HR:pace ratio from the first half of a
     run to the second half, using per-lap splits. Positive = HR drifted up
-    relative to pace (aerobic fatigue); near 0 = steady effort."""
+    relative to pace (aerobic fatigue); near 0 = steady effort. None for runs
+    that aren't steady (see MAX_DECOUPLING_PACE_CV). Heat also raises cardiac
+    drift and isn't corrected for here."""
     valid = [
         s for s in splits
         if s.get("avg_hr") and s.get("duration_s") and s.get("distance_m")
         and s["avg_hr"] > 0 and s["duration_s"] > 0 and s["distance_m"] > 0
     ]
     if len(valid) < 4:
+        return None
+
+    # A short final partial lap (auto-lap remainder) has a noisy pace; leave it out
+    # of the steadiness check.
+    median_dist = sorted(s["distance_m"] for s in valid)[len(valid) // 2]
+    paces = [s["duration_s"] / s["distance_m"] for s in valid if s["distance_m"] >= 0.5 * median_dist]
+    mean_pace = sum(paces) / len(paces)
+    pace_cv = (sum((p - mean_pace) ** 2 for p in paces) / len(paces)) ** 0.5 / mean_pace
+    if pace_cv > MAX_DECOUPLING_PACE_CV:
         return None
 
     def _hr_pace_ratio(group: list[dict]) -> float:
@@ -796,7 +814,7 @@ def _fetch_and_store_decoupling(
 
 def _parse_hr_zones(data: Any) -> list[dict]:
     """Defensive parse of Garmin's undocumented .../hrTimeInZones response.
-    Expected shape: [{"zoneNumber": int, "secsInZone": float}, ...]. Field
+    Expected shape: [{"zoneNumber": int, "secsInZone": float, "zoneLowBoundary": bpm}, ...]. Field
     names are reverse-engineered — the raw payload is stored via _store_raw
     so this is a one-look fix if a real account returns a different shape."""
     rows = data if isinstance(data, list) else data.get("hrZones") or data.get("timeInZones") or []
@@ -804,8 +822,10 @@ def _parse_hr_zones(data: Any) -> list[dict]:
     for row in rows:
         zone = row.get("zoneNumber") or row.get("zone")
         secs = row.get("secsInZone") or row.get("secondsInZone")
+        low = row.get("zoneLowBoundary")
         if zone and secs is not None:
-            out.append({"zone": int(zone), "seconds": float(secs)})
+            out.append({"zone": int(zone), "seconds": float(secs),
+                        "low_bpm": float(low) if low is not None else None})
     return out
 
 
@@ -837,8 +857,8 @@ def _fetch_and_store_hr_zones(
     zones = _parse_hr_zones(data)
     for z in zones:
         conn.execute(
-            "INSERT OR REPLACE INTO activity_hr_zones (activity_id, zone, seconds) VALUES (?,?,?)",
-            (activity_id, z["zone"], z["seconds"]),
+            "INSERT OR REPLACE INTO activity_hr_zones (activity_id, zone, seconds, low_bpm) VALUES (?,?,?,?)",
+            (activity_id, z["zone"], z["seconds"], z["low_bpm"]),
         )
     if not zones:
         log.debug("garmin: could not parse hr zones for activity %s", activity_id)

@@ -198,3 +198,62 @@ def latest_energy_calibration() -> dict | None:
     if not row:
         return None
     return {"started_at": row[0], "finished_at": row[1], "status": row[2], "n_labels": row[3], "best_tau_hours": row[4], "log_likelihood": row[5], "auc": row[6], "details": json.loads(row[7]) if row[7] else None, "error": row[8]}
+
+
+# ── readiness validation ─────────────────────────────────────────────────────
+#
+# The readiness weights (HRV 35 / sleep 25 / RHR 15 / load 25) are hand-picked from
+# the literature, not fitted to this person. Morning energy ratings are the closest
+# thing to ground truth there is, so check — report only, never auto-applied —
+# whether the score and each component actually track how mornings feel. Spearman
+# rank correlation, since energy is an ordinal 1-5 rating.
+READINESS_VALIDATION_MIN_DAYS = 14
+
+
+def readiness_validation(conn: sqlite3.Connection, days: int = 180) -> dict:
+    from app.analysis import _p_value, _rank_transform
+    from app.readiness import readiness_from_db
+    import statistics
+
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        "SELECT ts, quantity FROM manual_logs WHERE type='energy' AND quantity BETWEEN 1 AND 5 AND ts >= ?",
+        (since,),
+    ).fetchall()
+    by_date: dict[str, list[float]] = {}
+    for ts, quantity in rows:
+        if classify_energy_log(conn, ts) == "morning":
+            by_date.setdefault(_local_context(conn, ts)[1], []).append(float(quantity))
+    if len(by_date) < READINESS_VALIDATION_MIN_DAYS:
+        return {"status": "insufficient", "n_days": len(by_date),
+                "reason": f"Need morning energy ratings (within 2h of waking) on {READINESS_VALIDATION_MIN_DAYS}+ days."}
+
+    series: dict[str, list[tuple[float, float]]] = {}
+    for d, ratings in by_date.items():
+        energy = sum(ratings) / len(ratings)
+        result = readiness_from_db(conn, d)
+        if result["score"] is not None:
+            series.setdefault("score", []).append((result["score"], energy))
+        for c in result["components"]:
+            series.setdefault(c["name"], []).append((c["score"], energy))
+
+    def _spearman(pairs: list[tuple[float, float]]) -> dict | None:
+        if len(pairs) < READINESS_VALIDATION_MIN_DAYS:
+            return None
+        try:
+            rho = statistics.correlation(_rank_transform([p[0] for p in pairs]),
+                                         _rank_transform([p[1] for p in pairs]))
+        except statistics.StatisticsError:
+            return None
+        return {"rho": round(rho, 3), "p": round(_p_value(rho, len(pairs)), 4), "n_days": len(pairs)}
+
+    overall = _spearman(series.pop("score", []))
+    return {
+        "status": "ok",
+        "n_days": len(by_date),
+        "overall": overall,
+        "components": {name: r for name, pairs in series.items() if (r := _spearman(pairs))},
+        "note": "Spearman correlation of each readiness component with same-morning energy "
+                "(1-5). A component with rho near 0 or negative isn't tracking how you feel; "
+                "weights are not changed automatically.",
+    }
