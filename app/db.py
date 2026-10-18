@@ -171,6 +171,9 @@ _ADDED_DAILY_METRICS_COLUMNS = [
     ("ftp_watts", "REAL"),
     ("sleep_breathing_rate", "REAL"),
     ("recovery_hours", "REAL"),
+    ("sleep_need_min", "REAL"),
+    ("sleep_need_next_min", "REAL"),
+    ("sleep_need_baseline_min", "REAL"),
 ]
 
 

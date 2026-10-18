@@ -185,7 +185,10 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
   lactate_threshold_pace_min_per_km REAL,
   ftp_watts            REAL,  -- cycling functional threshold power
   sleep_breathing_rate REAL,  -- overnight-only respiration, distinct from all-day breathing_rate
-  recovery_hours       REAL   -- estimated hours until ready for hard training again
+  recovery_hours       REAL,  -- estimated hours until ready for hard training again
+  sleep_need_min       REAL,  -- Garmin's adjusted sleep need for the night ending on this date
+  sleep_need_next_min  REAL,  -- ...and for the night after it, computed that morning
+  sleep_need_baseline_min REAL -- Garmin's learned baseline sleep need, before adjustments
 );
 
 -- personalized HR zone boundaries, derived from max_hr (%HRmax bands) — source-agnostic,

@@ -137,6 +137,36 @@ def test_parse_sleep_respiration_and_skin_temp(tmp_db):
     assert abs(temp[0] - 0.3) < 0.01
 
 
+def test_parse_sleep_need(tmp_db):
+    # Shape from a real get_sleep_data payload.
+    data = {
+        "dailySleepDTO": {
+            "sleepTimeSeconds": 30000,
+            "sleepNeed": {"calendarDate": "2025-01-01", "baseline": 470, "actual": 530,
+                          "feedback": "HIGHLY_INCREASED"},
+            "nextSleepNeed": {"calendarDate": "2025-01-02", "baseline": 470, "actual": 490},
+        },
+    }
+    _parse_sleep(tmp_db, "2025-01-01", data)
+    got = dict(tmp_db.execute(
+        "SELECT metric, value FROM raw_daily_metrics WHERE metric LIKE 'sleep_need%'"
+    ).fetchall())
+    assert got == {"sleep_need_min": 530.0, "sleep_need_next_min": 490.0,
+                   "sleep_need_baseline_min": 470.0}
+    # nextSleepNeed lands on the payload's date, never on a future-dated row.
+    assert tmp_db.execute(
+        "SELECT COUNT(*) FROM raw_daily_metrics WHERE date != '2025-01-01'"
+    ).fetchone()[0] == 0
+
+
+def test_parse_sleep_without_sleep_need(tmp_db):
+    # Older devices / payloads have no sleepNeed: nothing written, nothing breaks.
+    _parse_sleep(tmp_db, "2025-01-01", {"dailySleepDTO": {"sleepTimeSeconds": 30000}})
+    assert tmp_db.execute(
+        "SELECT COUNT(*) FROM raw_daily_metrics WHERE metric LIKE 'sleep_need%'"
+    ).fetchone()[0] == 0
+
+
 def test_parse_stress(tmp_db):
     data = {"avgStressLevel": 35, "maxStressLevel": 72}
     rows = _parse_stress(tmp_db, "2025-01-01", data)

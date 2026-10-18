@@ -231,10 +231,12 @@
   var sleepDebtMin = {{ sleep_debt_min | tojson }};
   var sleepTargetMin = {{ sleep_target_min | tojson }};
   var typicalSleep = {{ typical_sleep | tojson }};  // {typical_min, typical_low_min, typical_high_min} or null
+  var sleepNeed = {{ sleep_need | tojson }};        // Garmin's {tonight_min, baseline_min}, or null without Garmin
 
   function fmtDuration(hoursFloat) {
     var totalMin = Math.round(hoursFloat * 60);
     var h = Math.floor(totalMin / 60), m = totalMin % 60;
+    if (h === 0) return m + 'm';
     return h + 'h' + (m > 0 ? (m < 10 ? '0' : '') + m + 'm' : '');
   }
 
@@ -321,6 +323,12 @@
         ' (' + fmtDuration(typicalSleep.typical_low_min / 60) + '–' + fmtDuration(typicalSleep.typical_high_min / 60) +
         '), ' + fmtDuration((sleepTargetMin - typicalSleep.typical_min) / 60) + ' under your ' +
         fmtDuration(sleepTargetMin / 60) + ' target.';
+    }
+    // Garmin's estimate is context, not the goal: the bedtime above stays on your own target.
+    if (sleepNeed) {
+      bedtimeText += ' Garmin estimates tonight\'s need at ' + fmtDuration(sleepNeed.tonight_min / 60) +
+        (sleepNeed.baseline_min != null && sleepNeed.baseline_min !== sleepNeed.tonight_min
+          ? ' (baseline ' + fmtDuration(sleepNeed.baseline_min / 60) + ')' : '') + '.';
     }
 
     document.getElementById('live-rec-text').textContent =

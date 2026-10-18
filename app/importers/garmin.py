@@ -301,6 +301,25 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
                                   float(raw_val) * scale, now)
                 rows += 1
 
+        # Garmin's personal sleep need (minutes): a baseline it learns per user, and the
+        # night's need after adjusting for training load, HRV and recent sleep.
+        # sleepNeed is for the night ending on date_str; nextSleepNeed, computed that
+        # morning, is for the night that follows — i.e. "tonight" on the dashboard.
+        # Stored on date_str (not nextSleepNeed's own calendarDate) so it never
+        # creates a daily_metrics row dated in the future.
+        for need_key, actual_metric in (("sleepNeed", "sleep_need_min"),
+                                        ("nextSleepNeed", "sleep_need_next_min")):
+            need = score_obj.get(need_key)
+            if not isinstance(need, dict):
+                continue
+            if need.get("actual") is not None:
+                upsert_raw_metric(conn, date_str, SOURCE, actual_metric, float(need["actual"]), now)
+                rows += 1
+            if need_key == "sleepNeed" and need.get("baseline") is not None:
+                upsert_raw_metric(conn, date_str, SOURCE, "sleep_need_baseline_min",
+                                  float(need["baseline"]), now)
+                rows += 1
+
         # Sleep-specific respiration, distinct from the all-day average that
         # _parse_respiration writes to "breathing_rate" — this one only covers the
         # sleep window and is the more useful trend for illness/recovery disruption.
