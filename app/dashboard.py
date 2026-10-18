@@ -689,36 +689,50 @@ def _live_curve_json(wake_hour: float | None, sleep_score: float | None,
     return json.dumps([{"h": i / 4.0, "a": r["alertness"]} for i, r in enumerate(curve)])
 
 
-def _sleep_profile(recent_sleep_rows: list[dict], target_min: float,
-                   lookback_nights: int = 3, baseline_nights: int = 28,
+# Acute debt below this isn't worth acting on (or mentioning): three nights a little
+# under typical is ordinary variation, not something an earlier bedtime should chase.
+SLEEP_DEBT_ACT_MIN = 60.0
+
+
+def _sleep_profile(sleep_rows: list[dict], as_of: str, target_min: float,
+                   lookback_days: int = 3, baseline_days: int = 28,
                    min_baseline_nights: int = 7, cap_total_min: float = 180.0) -> dict:
     """
     What a normal night looks like for you, and how far the last few nights fell short of it.
 
-    "Typical" is the median (with interquartile range) of the baseline_nights nights before
-    the lookback window — your own normal, not a population number. Over a year of Garmin
-    data, next-morning HRV didn't move with duration above ~6h, so there's no outcome-based
-    "need" to fit; the distribution of what you actually sleep is the honest baseline.
+    Windows are calendar days ending on as_of, not "the last N rows with data", so a
+    gap in syncing never drags weeks-old nights into the "recent" window. Recent =
+    the lookback_days days ending as_of; baseline = the baseline_days days before that.
 
-    debt_min is the net shortfall over the last lookback_nights nights against
-    min(target, typical). Measuring against typical separates "the last few nights were
-    short" — actionable, worth an earlier bedtime — from "you usually sleep a bit under
-    target", which would otherwise read as permanent debt and pin the figure at the cap;
-    that chronic gap is reported separately as typical vs target. Long nights net against
-    short ones, so a catch-up night actually repays debt. Falls back to the target alone
+    "Typical" is the median (with interquartile range) of the baseline nights — your
+    own normal, not a population number. Over a year of Garmin data, next-morning HRV
+    didn't move with duration above ~6h, so there's no outcome-based "need" to fit;
+    the distribution of what you actually sleep is the honest baseline.
+
+    debt_min is the net shortfall of the recent nights against min(target, typical).
+    Measuring against typical separates "the last few nights were short" — actionable,
+    worth an earlier bedtime — from "you usually sleep under target", which would
+    otherwise read as permanent debt and pin the figure at the cap; that chronic gap is
+    reported separately as typical vs target (and the bedtime already aims at the full
+    target). Long nights net against short ones, so a catch-up night actually repays
+    debt. Below SLEEP_DEBT_ACT_MIN it's reported as 0. Falls back to the target alone
     (and no typical range) until there are min_baseline_nights of history. Capped at
-    cap_total_min so a long bad stretch doesn't produce an absurd bedtime recommendation.
+    cap_total_min so a long bad stretch doesn't produce an absurd bedtime.
     """
-    durations = [r["sleep_duration_min"] for r in recent_sleep_rows]
-    recent = durations[-lookback_nights:]
-    history = durations[:-lookback_nights][-baseline_nights:]
+    end = date.fromisoformat(as_of)
+    recent_start = (end - timedelta(days=lookback_days - 1)).isoformat()
+    baseline_start = (end - timedelta(days=lookback_days + baseline_days - 1)).isoformat()
+    recent = [r["sleep_duration_min"] for r in sleep_rows if recent_start <= r["date"] <= as_of]
+    history = [r["sleep_duration_min"] for r in sleep_rows
+               if baseline_start <= r["date"] < recent_start]
     typical = typical_low = typical_high = None
     reference = target_min
     if len(history) >= min_baseline_nights:
         typical_low, typical, typical_high = statistics.quantiles(history, n=4, method="inclusive")
         reference = min(target_min, typical)
+    debt = min(max(0.0, sum(reference - d for d in recent)), cap_total_min)
     return {
-        "debt_min": min(max(0.0, sum(reference - d for d in recent)), cap_total_min),
+        "debt_min": debt if debt >= SLEEP_DEBT_ACT_MIN else 0.0,
         "typical_min": typical,
         "typical_low_min": typical_low,
         "typical_high_min": typical_high,
@@ -1351,9 +1365,10 @@ def overview(request: Request,
 
         # Garmin's own personal estimate of tonight's need, shown alongside the
         # target. Garmin-only: absent (None) for other sources, and then simply not shown.
+        # Read from today's row only: an older row's "next" need was for a night already past.
         sleep_need_row = conn.execute(
             "SELECT sleep_need_next_min, sleep_need_baseline_min FROM daily_metrics WHERE date=?",
-            (metrics_date,),
+            (today,),
         ).fetchone()
         sleep_need = None
         if sleep_need_row and sleep_need_row[0] is not None:
@@ -1362,10 +1377,10 @@ def overview(request: Request,
 
         recent_sleep_rows = _rows(conn, """
             SELECT date, sleep_duration_min FROM daily_metrics
-            WHERE date <= ? AND date > date(?, '-32 days')
+            WHERE date <= ? AND date > date(?, '-31 days')
               AND sleep_duration_min IS NOT NULL
             ORDER BY date
-        """, (metrics_date, metrics_date))
+        """, (today, today))
 
         next_event_row = conn.execute(
             "SELECT date, type, description, goal_description FROM training_events "
@@ -1387,7 +1402,7 @@ def overview(request: Request,
     # Acute sleep debt over the last 3 nights (vs your typical night, see
     # _sleep_profile), repaid at up to 1h/night so a large deficit spreads
     # over several nights rather than producing an absurd bedtime.
-    sleep_profile = _sleep_profile(recent_sleep_rows, sleep_target_min)
+    sleep_profile = _sleep_profile(recent_sleep_rows, today, sleep_target_min)
     sleep_debt_min = sleep_profile["debt_min"]
     repay_min = min(sleep_debt_min, 60.0)
     recommended_sleep_hours = (sleep_target_min + repay_min) / 60.0

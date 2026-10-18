@@ -313,7 +313,7 @@
     // swing the recommendation.
     var bedtime = fmtClock(bedtimeWakeHour + (24 - recommendedSleepHours));
     var bedtimeText = 'Aim for bed by ~' + bedtime + ' (' + fmtDuration(recommendedSleepHours) + ')';
-    bedtimeText += sleepDebtMin >= 60
+    bedtimeText += sleepDebtMin > 0  // server zeroes debt below the act-on threshold
       ? ' — catching up on ' + fmtDuration(sleepDebtMin / 60) + ' of sleep debt from the last few nights.'
       : '.';
     // Chronic gap: your normal night vs target. Stated as a fact rather than as debt,
