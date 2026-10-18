@@ -242,34 +242,48 @@ def test_polarization_chart_valid():
 
 # ── _sleep_profile ───────────────────────────────────────────────────────────
 
-def _nights(*hours):
-    return [{"sleep_duration_min": h * 60} for h in hours]
+AS_OF = "2025-03-31"
+
+
+def _nights(*hours, end=AS_OF):
+    """One row per consecutive night, the last one dated `end`."""
+    from datetime import date, timedelta
+    last = date.fromisoformat(end)
+    return [{"date": (last - timedelta(days=len(hours) - 1 - i)).isoformat(),
+             "sleep_duration_min": h * 60} for i, h in enumerate(hours)]
 
 
 def test_sleep_profile_chronic_short_sleeper_has_no_acute_debt():
     # Habitually 7h against a 7.5h target: steady state, reported as typical, not as debt.
     from app.dashboard import _sleep_profile
-    p = _sleep_profile(_nights(*[7.0] * 31), 450)
+    p = _sleep_profile(_nights(*[7.0] * 31), AS_OF, 450)
     assert p["debt_min"] == 0
     assert p["typical_min"] == pytest.approx(420)
 
 
 def test_sleep_profile_counts_nights_below_typical():
     from app.dashboard import _sleep_profile
-    p = _sleep_profile(_nights(*[7.0] * 28, 6.0, 6.0, 6.5), 450)
+    p = _sleep_profile(_nights(*[7.0] * 28, 6.0, 6.0, 6.5), AS_OF, 450)
     assert p["debt_min"] == pytest.approx(150)
 
 
 def test_sleep_profile_long_night_repays():
     from app.dashboard import _sleep_profile
-    p = _sleep_profile(_nights(*[7.0] * 28, 6.0, 6.5, 8.5), 450)
+    p = _sleep_profile(_nights(*[7.0] * 28, 6.0, 6.5, 8.5), AS_OF, 450)
+    assert p["debt_min"] == 0
+
+
+def test_sleep_profile_small_debt_is_not_acted_on():
+    # 45 min under typical over three nights is ordinary variation.
+    from app.dashboard import _sleep_profile
+    p = _sleep_profile(_nights(*[7.0] * 28, 6.75, 6.75, 6.75), AS_OF, 450)
     assert p["debt_min"] == 0
 
 
 def test_sleep_profile_typical_range_is_interquartile():
     from app.dashboard import _sleep_profile
-    # History is everything before the last 3 nights: 6, 6.5, 6.5, 7, 7.5, 7.5, 8.
-    p = _sleep_profile(_nights(6.0, 6.5, 6.5, 7.0, 7.5, 7.5, 8.0, 7, 7, 7), 450)
+    # Baseline is everything before the last 3 nights: 6, 6.5, 6.5, 7, 7.5, 7.5, 8.
+    p = _sleep_profile(_nights(6.0, 6.5, 6.5, 7.0, 7.5, 7.5, 8.0, 7, 7, 7), AS_OF, 450)
     assert p["typical_low_min"] == pytest.approx(390)
     assert p["typical_min"] == pytest.approx(420)
     assert p["typical_high_min"] == pytest.approx(450)
@@ -278,13 +292,21 @@ def test_sleep_profile_typical_range_is_interquartile():
 def test_sleep_profile_reference_never_exceeds_target():
     # A long sleeper's typical night is capped at target: 8h nights vs a 7.5h target owe nothing.
     from app.dashboard import _sleep_profile
-    p = _sleep_profile(_nights(*[9.0] * 28, 8.0, 8.0, 8.0), 450)
+    p = _sleep_profile(_nights(*[9.0] * 28, 8.0, 8.0, 8.0), AS_OF, 450)
     assert p["debt_min"] == 0
 
 
 def test_sleep_profile_falls_back_to_target_without_history():
     from app.dashboard import _sleep_profile
-    p = _sleep_profile(_nights(7.0, 7.0, 7.0), 480)
+    p = _sleep_profile(_nights(7.0, 7.0, 7.0), AS_OF, 480)
     assert p["debt_min"] == pytest.approx(180)
     assert p["typical_min"] is None
-    assert _sleep_profile(_nights(5.0, 5.0, 5.0), 480)["debt_min"] == 180  # capped
+    assert _sleep_profile(_nights(5.0, 5.0, 5.0), AS_OF, 480)["debt_min"] == 180  # capped
+
+
+def test_sleep_profile_sync_gap_does_not_resurrect_old_nights():
+    # Short nights from two weeks ago, nothing since: no "recent" debt.
+    from app.dashboard import _sleep_profile
+    rows = _nights(*[7.0] * 14, 5.0, 5.0, 5.0, end="2025-03-17")
+    p = _sleep_profile(rows, AS_OF, 450)
+    assert p["debt_min"] == 0

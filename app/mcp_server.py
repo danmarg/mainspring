@@ -1000,7 +1000,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
                    weight_kg, resting_hr,
                    recovery_hours, sleep_breathing_rate, skin_temp_deviation,
                    hydration_ml, lactate_threshold_hr, lactate_threshold_pace_min_per_km,
-                   ftp_watts
+                   ftp_watts, sleep_need_min, sleep_need_next_min, sleep_need_baseline_min
             FROM daily_metrics WHERE date=?
             """,
             (d,),
@@ -1118,6 +1118,9 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             "lactate_threshold_hr": today_row[15],
             "lactate_threshold_pace_min_per_km": today_row[16],
             "ftp_watts": today_row[17],
+            "sleep_need_min": today_row[18],
+            "sleep_need_next_min": today_row[19],
+            "sleep_need_baseline_min": today_row[20],
         }
 
         if ctl is not None and atl is not None:
@@ -1323,7 +1326,8 @@ planning, and recommendations. The server never fetches weather or sends message
    - last 7 activities
    - `hr_zones`: personalized 5-zone bands derived from today's max_hr (%HRmax model)
    - `recovery_hours`, `sleep_breathing_rate`, `skin_temp_deviation`, `hydration_ml`,
-     `lactate_threshold_hr`/`_pace`, `ftp_watts` — see the metric table below
+     `lactate_threshold_hr`/`_pace`, `ftp_watts`, `sleep_need_min` (Garmin's need for the
+     night just slept; `sleep_need_next_min` is for tonight) — see the metric table below
    - `sleep_regularity`: night-to-night bed/wake-time consistency over 14 nights
      (independent of duration/score; erratic timing alone predicts worse recovery)
    - `recent_soreness`: soreness/injury logs from the last 3 days
