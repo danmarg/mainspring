@@ -769,3 +769,103 @@ def test_intensity_distribution_polarized_no_flag(tmp_db):
     conn.close()
     assert result["grey_zone_flag"] is False
     assert result["moderate_pct"] < 20.0
+
+
+def test_compute_illness_risk_respiratory_rate_signal():
+    day = _day("2026-01-01", rhr=54.0)  # RHR trigger
+    day.update({"resp": 16.5, "resp_baseline": 15.0, "resp_sd": 0.3})
+    result = compute_illness_risk([day])
+    assert result["level"] == "red"  # concordant with RHR on the same night
+    assert any("breathing" in s for s in result["signals"])
+
+
+def test_illness_baseline_excludes_the_tested_window():
+    # 28 normal days, then 3 days of RHR +6: with the window inside its own baseline the
+    # elevation would partly mask itself; with it excluded, all 3 days trigger.
+    from datetime import date as _d, timedelta as _td
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    end = _d(2025, 9, 30)
+    for i in range(31):
+        d = (end - _td(days=i)).isoformat()
+        rhr = 56.0 if i < 3 else (50.0 if i % 2 else 51.0)
+        conn.execute("INSERT INTO daily_metrics(date, resting_hr, source_flags_json) VALUES (?,?,?)",
+                     (d, rhr, "{}"))
+    conn.commit()
+    result = illness_risk_from_db(conn, end.isoformat())
+    conn.close()
+    assert result["level"] == "yellow"
+    assert "+6bpm" in result["detail"]
+
+
+# ── Sleep Regularity Index / chronotype ──────────────────────────────────────
+
+def _intervals(start_hours, dur_h=8.0, first="2025-03-01"):
+    """{date: (start, end)}: sleep starting at start_hours[i] UTC — the previous evening
+    for hours >= 12, after midnight otherwise."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    base = _dt.fromisoformat(first).replace(tzinfo=_tz.utc)
+    out = {}
+    for i, h in enumerate(start_hours):
+        day = base + _td(days=i)
+        start = day - _td(hours=24 - h) if h >= 12 else day + _td(hours=h)
+        out[day.date().isoformat()] = (start.timestamp(), (start + _td(hours=dur_h)).timestamp())
+    return out
+
+
+def test_sri_perfect_and_irregular():
+    from app.readiness import sleep_regularity_index
+    assert sleep_regularity_index(_intervals([23.0] * 8)) == pytest.approx(100.0)
+    # Alternating 2h shifts: each pair disagrees for 4h of 24 -> 100 - 200*240/1440
+    assert sleep_regularity_index(_intervals([22.0, 0.0] * 4)) == pytest.approx(66.67, abs=0.1)
+    assert sleep_regularity_index(_intervals([23.0] * 4)) is None  # too few pairs
+
+
+def test_sleep_regularity_uses_sri_when_intervals_present():
+    result = sleep_regularity([(7.0, 480.0)] * 8, _intervals([22.0, 0.0] * 4))
+    assert result["method"] == "sri"
+    assert result["score"] == 67
+
+
+def test_nights_from_db_bedtime_includes_awake_time(tmp_db):
+    from app.readiness import _nights_from_db
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    now = utc_now()
+    upsert_raw_metric(conn, "2025-03-01", "garmin", "sleep_wake_hour", 7.0, now)
+    upsert_raw_metric(conn, "2025-03-01", "garmin", "sleep_duration_min", 420.0, now)
+    upsert_raw_metric(conn, "2025-03-01", "garmin", "sleep_awake_min", 45.0, now)
+    conn.commit()
+    night = _nights_from_db(conn, "2025-03-01", 7)["2025-03-01"]
+    conn.close()
+    assert night["time_in_bed_min"] == 465.0  # Garmin's duration excludes awake time
+
+
+def test_circadian_peak_follows_weekend_mid_sleep(tmp_db):
+    from datetime import date as _d, timedelta as _td
+    from app.readiness import circadian_peak_hour_from_db
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    now = utc_now()
+    end = _d(2025, 3, 30)  # a Sunday
+    for i in range(28):
+        d = end - _td(days=i)
+        wake = 9.0 if d.weekday() >= 5 else 6.5  # late riser on free days
+        upsert_raw_metric(conn, d.isoformat(), "garmin", "sleep_wake_hour", wake, now)
+        upsert_raw_metric(conn, d.isoformat(), "garmin", "sleep_duration_min", 480.0, now)
+    conn.commit()
+    peak = circadian_peak_hour_from_db(conn, end.isoformat())
+    conn.close()
+    # Free-day mid-sleep 05:00 -> peak 16:00 (weekday 02:30 would give 13:30)
+    assert peak == pytest.approx(16.0, abs=0.05)
+
+
+def test_circadian_peak_default_without_data(tmp_db):
+    from app.readiness import circadian_peak_hour_from_db
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    assert circadian_peak_hour_from_db(conn, "2025-03-30") == 15.0
+    conn.close()
+
+
+def test_alertness_curve_peak_shifts_with_chronotype():
+    early = alertness_curve(7.0, hours=16, circadian_peak_hour=13.0)
+    late = alertness_curve(7.0, hours=16, circadian_peak_hour=17.0)
+    peak = lambda c: max(c, key=lambda r: r["alertness"])["hour"]
+    assert peak(late) > peak(early)

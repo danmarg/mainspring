@@ -145,3 +145,47 @@ def reparse_garmin_hrv_and_renormalize() -> dict:
     log.warning("HRV reparse: %s; re-normalized %d dates", result, len(dates))
     return {**result, "renormalized_dates": len(dates)}
 
+
+
+def reparse_garmin_sleep(conn: sqlite3.Connection) -> dict:
+    """Re-run the current sleep parser over the newest retained get_sleep_data payload for
+    each date, so fields added to _parse_sleep later (episode start/end, Garmin sleep need)
+    cover history, not just days imported since. Upserts only; idempotent."""
+    from app.importers.garmin import _parse_sleep
+    import json
+
+    latest: dict[str, int] = {}
+    for rid, day in conn.execute(
+        "SELECT id, date FROM raw_import_payloads "
+        "WHERE source='garmin' AND endpoint='get_sleep_data' AND date IS NOT NULL"
+    ):
+        if rid > latest.get(day, -1):
+            latest[day] = rid
+
+    dates: list[str] = []
+    for i, day in enumerate(sorted(latest), 1):
+        payload = conn.execute("SELECT payload_json FROM raw_import_payloads WHERE id=?", (latest[day],)).fetchone()[0]
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and _parse_sleep(conn, day, data):
+            dates.append(day)
+        if i % 100 == 0:
+            conn.commit()
+    conn.commit()
+    return {"reparsed": len(dates), "dates": dates}
+
+
+def reparse_garmin_sleep_and_renormalize() -> dict:
+    """reparse_garmin_sleep, then refresh daily_metrics for the dates it touched."""
+    from app.normalize import rebuild_daily_metrics
+
+    with dbm.db() as conn:
+        result = reparse_garmin_sleep(conn)
+    dates = result.pop("dates")
+    for i in range(0, len(dates), 50):  # small committed chunks: never a long write lock
+        with dbm.db() as conn:
+            rebuild_daily_metrics(conn, set(dates[i:i + 50]))
+    log.warning("sleep reparse: %s; re-normalized %d dates", result, len(dates))
+    return {**result, "renormalized_dates": len(dates)}

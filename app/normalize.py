@@ -311,8 +311,20 @@ def _sleep_window_utc_bounds(date_str: str, wake_hour: float | None, duration_mi
 
 
 def _hrv_overnight_from_intraday(conn, date_str: str, source: str, duration_min: float | None) -> float | None:
-    wake_hour, _ = resolve_metric(conn, date_str, "sleep_wake_hour")
-    utc_start, utc_end = _sleep_window_utc_bounds(date_str, wake_hour, duration_min)
+    start = conn.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date=? AND source=? AND metric='sleep_start_epoch'",
+        (date_str, source)).fetchone()
+    end = conn.execute(
+        "SELECT value FROM raw_daily_metrics WHERE date=? AND source=? AND metric='sleep_end_epoch'",
+        (date_str, source)).fetchone()
+    if start and end and end[0] > start[0]:
+        # The source's own sleep episode: exact, no bedtime estimate needed
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        utc_start = datetime.fromtimestamp(start[0], tz=timezone.utc).strftime(fmt)
+        utc_end = datetime.fromtimestamp(end[0], tz=timezone.utc).strftime(fmt)
+    else:
+        wake_hour, _ = resolve_metric(conn, date_str, "sleep_wake_hour")
+        utc_start, utc_end = _sleep_window_utc_bounds(date_str, wake_hour, duration_min)
     rows = conn.execute(
         "SELECT rmssd FROM intraday_hrv WHERE source=? AND ts >= ? AND ts < ?",
         (source, utc_start, utc_end),

@@ -276,6 +276,16 @@ def _parse_sleep(conn, date_str: str, data: dict) -> int:
         if val is not None:
             upsert_raw_metric(conn, date_str, SOURCE, "sleep_score", float(val), now)
             rows += 1
+        # Sleep episode as real UTC instants (epoch seconds): exact time in bed for
+        # bedtime/regularity (sleepTimeSeconds excludes awake minutes) and the
+        # Sleep Regularity Index, which compares timing 24h apart.
+        for api_key, metric in (("sleepStartTimestampGMT", "sleep_start_epoch"),
+                                ("sleepEndTimestampGMT", "sleep_end_epoch")):
+            ts_ms = score_obj.get(api_key)
+            if ts_ms:
+                upsert_raw_metric(conn, date_str, SOURCE, metric, int(ts_ms) / 1000, now)
+                rows += 1
+
         # Wake time: sleepEndTimestampLocal is epoch ms in local time
         wake_ts_ms = score_obj.get("sleepEndTimestampLocal")
         if wake_ts_ms is not None:

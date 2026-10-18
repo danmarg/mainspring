@@ -410,6 +410,14 @@ def maintenance_reparse_hrv(background_tasks: BackgroundTasks):
     return _start_maintenance("reparse_hrv", reparse_garmin_hrv_and_renormalize, background_tasks)
 
 
+@router.post("/maintenance/reparse_sleep", dependencies=[Depends(_import_auth)])
+def maintenance_reparse_sleep(background_tasks: BackgroundTasks):
+    """Backfill sleep fields added to the parser later (episode start/end for the Sleep
+    Regularity Index, Garmin sleep need) from the retained raw payloads — no re-fetch."""
+    from app.maintenance import reparse_garmin_sleep_and_renormalize
+    return _start_maintenance("reparse_sleep", reparse_garmin_sleep_and_renormalize, background_tasks)
+
+
 @router.post("/maintenance/vacuum", dependencies=[Depends(_import_auth)])
 def maintenance_vacuum(background_tasks: BackgroundTasks):
     """Rewrite the database file to return freed pages to the volume. Refused unless
