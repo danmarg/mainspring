@@ -1349,6 +1349,17 @@ def overview(request: Request,
         sleep_target_hours = float(sleep_target_row[0]) if sleep_target_row else 8.0
         sleep_target_min = sleep_target_hours * 60.0
 
+        # Garmin's own personal estimate of tonight's need, shown alongside the
+        # target. Garmin-only: absent (None) for other sources, and then simply not shown.
+        sleep_need_row = conn.execute(
+            "SELECT sleep_need_next_min, sleep_need_baseline_min FROM daily_metrics WHERE date=?",
+            (metrics_date,),
+        ).fetchone()
+        sleep_need = None
+        if sleep_need_row and sleep_need_row[0] is not None:
+            sleep_need = {"tonight_min": round(sleep_need_row[0]),
+                          "baseline_min": round(sleep_need_row[1]) if sleep_need_row[1] is not None else None}
+
         recent_sleep_rows = _rows(conn, """
             SELECT date, sleep_duration_min FROM daily_metrics
             WHERE date <= ? AND date > date(?, '-32 days')
@@ -1458,6 +1469,7 @@ def overview(request: Request,
         "recommended_sleep_hours": round(recommended_sleep_hours, 2),
         "sleep_debt_min": round(sleep_debt_min),
         "sleep_target_min": round(sleep_target_min),
+        "sleep_need": sleep_need,
         "typical_sleep": {k: round(v) for k, v in sleep_profile.items()
                           if k != "debt_min" and v is not None} or None,
     })

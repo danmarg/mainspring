@@ -506,6 +506,7 @@ def get_daily_metrics(
                    skin_temp_deviation, hydration_ml, max_hr,
                    lactate_threshold_hr, lactate_threshold_pace_min_per_km, ftp_watts,
                    sleep_breathing_rate, recovery_hours,
+                   sleep_need_min, sleep_need_next_min, sleep_need_baseline_min,
                    source_flags_json
             FROM daily_metrics
             WHERE date BETWEEN ? AND ?
@@ -552,7 +553,10 @@ def get_daily_metrics(
             "ftp_watts": r[33],
             "sleep_breathing_rate": r[34],
             "recovery_hours": r[35],
-            "sources": _notable_sources(r[36]),
+            "sleep_need_min": r[36],
+            "sleep_need_next_min": r[37],
+            "sleep_need_baseline_min": r[38],
+            "sources": _notable_sources(r[39]),
         }
         for r in rows
     ]
@@ -1380,6 +1384,7 @@ planning, and recommendations. The server never fetches weather or sends message
 | readiness.score | ≥65 (Ready/Primed) | 50–65 (Moderate) | <50 → Low/Rest, favour recovery |
 | body_battery_high | >70 | 40–70 | <40 suggests poor recovery |
 | sleep_regularity.score | >80 | 50–80 | <50 → bed/wake times swinging 2h+, a recovery drag on its own |
+| sleep_duration_min vs sleep_need_min | at or above need | within ~30 min | >1h short on consecutive nights → sleep is the limiter; Garmin-only (null without a Garmin device), adjusted daily for load/HRV, so a rising need after hard days is expected |
 | recovery_hours | 0 (ready now) | a few hours left | still elapsing → favour easy/rest until it hits 0 |
 | skin_temp_deviation | near 0°C | ±0.3°C | >0.5°C above baseline → elevated, could be illness, poor sleep, heat, or dehydration — treat other signals cautiously |
 | illness_risk.level | green/None | yellow (1 signal, or 2+ non-concordant across the window — informational only, don't act on it alone) | red (2+ signals concordant on the SAME night, still active) → bias toward easy/rest. Not a diagnosis — as often driven by poor sleep, heat, dehydration, or ordinary stress as by illness |

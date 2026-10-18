@@ -608,6 +608,9 @@ def test_new_metrics_in_daily_metrics(tmp_db):
         ("ftp_watts", 245.0),
         ("sleep_breathing_rate", 13.8),
         ("recovery_hours", 22.0),
+        ("sleep_need_min", 530.0),
+        ("sleep_need_next_min", 490.0),
+        ("sleep_need_baseline_min", 470.0),
     ]:
         upsert_raw_metric(tmp_db, "2025-07-01", "garmin", metric, val, now)
     tmp_db.commit()
@@ -615,10 +618,11 @@ def test_new_metrics_in_daily_metrics(tmp_db):
     tmp_db.commit()
     row = tmp_db.execute(
         "SELECT skin_temp_deviation, hydration_ml, max_hr, lactate_threshold_hr, "
-        "lactate_threshold_pace_min_per_km, ftp_watts, sleep_breathing_rate, recovery_hours "
+        "lactate_threshold_pace_min_per_km, ftp_watts, sleep_breathing_rate, recovery_hours, "
+        "sleep_need_min, sleep_need_next_min, sleep_need_baseline_min "
         "FROM daily_metrics WHERE date='2025-07-01'"
     ).fetchone()
-    assert tuple(row) == (0.3, 1800.0, 182.0, 168.0, 4.76, 245.0, 13.8, 22.0)
+    assert tuple(row) == (0.3, 1800.0, 182.0, 168.0, 4.76, 245.0, 13.8, 22.0, 530.0, 490.0, 470.0)
 
 
 def test_hr_zones_use_rolling_max_not_todays_low_reading(tmp_db):

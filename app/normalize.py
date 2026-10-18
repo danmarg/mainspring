@@ -51,6 +51,9 @@ DAILY_METRIC_COLUMNS = [
     "ftp_watts",
     "sleep_breathing_rate",
     "recovery_hours",
+    "sleep_need_min",
+    "sleep_need_next_min",
+    "sleep_need_baseline_min",
 ]
 
 # ── timezone resolution ─────────────────────────────────────────────────────
@@ -574,8 +577,9 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             skin_temp_deviation, hydration_ml, max_hr,
             lactate_threshold_hr, lactate_threshold_pace_min_per_km, ftp_watts,
             sleep_breathing_rate, recovery_hours,
+            sleep_need_min, sleep_need_next_min, sleep_need_baseline_min,
             source_flags_json
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(date) DO UPDATE SET
             resting_hr=excluded.resting_hr,
             hrv=excluded.hrv,
@@ -612,6 +616,9 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             ftp_watts=excluded.ftp_watts,
             sleep_breathing_rate=excluded.sleep_breathing_rate,
             recovery_hours=excluded.recovery_hours,
+            sleep_need_min=excluded.sleep_need_min,
+            sleep_need_next_min=excluded.sleep_need_next_min,
+            sleep_need_baseline_min=excluded.sleep_need_baseline_min,
             source_flags_json=excluded.source_flags_json
         """,
         (
@@ -651,6 +658,9 @@ def _rebuild_one_day(conn, date_str: str) -> None:
             values.get("ftp_watts"),
             values.get("sleep_breathing_rate"),
             values.get("recovery_hours"),
+            values.get("sleep_need_min"),
+            values.get("sleep_need_next_min"),
+            values.get("sleep_need_baseline_min"),
             json.dumps(source_flags),
         ),
     )
