@@ -806,7 +806,7 @@ def log_rpe(
 @mcp.tool()
 def set_training_goal(metric: str, value: float, unit: Optional[str] = None) -> str:
     """Set a steady-state weekly training target.
-    Common metrics: weekly_runs, weekly_volume_km, weekly_strength_sessions.
+    Common metrics: weekly_runs, weekly_volume_km, weekly_strength_sessions, sleep_target_hours.
     Examples: set_training_goal('weekly_runs', 3), set_training_goal('weekly_volume_km', 50, 'km')."""
     with db() as conn:
         conn.execute(

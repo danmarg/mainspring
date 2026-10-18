@@ -238,3 +238,40 @@ def test_polarization_chart_valid():
     result = _polarization_chart(rows)
     assert _is_valid_json(result)
     assert result != "{}"
+
+
+# ── _sleep_debt_minutes ──────────────────────────────────────────────────────
+
+def _nights(*hours):
+    return [{"sleep_duration_min": h * 60} for h in hours]
+
+
+def test_sleep_debt_chronic_short_sleeper_has_no_acute_debt():
+    # Habitually 7h against a 7.5h target: steady state, not debt to catch up on.
+    from app.dashboard import _sleep_debt_minutes
+    assert _sleep_debt_minutes(_nights(*[7.0] * 17), 450) == 0
+
+
+def test_sleep_debt_counts_nights_below_personal_baseline():
+    from app.dashboard import _sleep_debt_minutes
+    rows = _nights(*[7.0] * 14, 6.0, 6.0, 6.5)
+    assert _sleep_debt_minutes(rows, 450) == pytest.approx(150)
+
+
+def test_sleep_debt_long_night_repays():
+    from app.dashboard import _sleep_debt_minutes
+    rows = _nights(*[7.0] * 14, 6.0, 6.5, 8.5)
+    assert _sleep_debt_minutes(rows, 450) == 0
+
+
+def test_sleep_debt_baseline_never_exceeds_target():
+    # A long-sleeper's baseline is capped at target: 8h nights vs a 7.5h target owe nothing.
+    from app.dashboard import _sleep_debt_minutes
+    rows = _nights(*[9.0] * 14, 8.0, 8.0, 8.0)
+    assert _sleep_debt_minutes(rows, 450) == 0
+
+
+def test_sleep_debt_falls_back_to_target_without_history():
+    from app.dashboard import _sleep_debt_minutes
+    assert _sleep_debt_minutes(_nights(7.0, 7.0, 7.0), 480) == pytest.approx(180)
+    assert _sleep_debt_minutes(_nights(5.0, 5.0, 5.0), 480) == 180  # capped
