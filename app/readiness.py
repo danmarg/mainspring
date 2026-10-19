@@ -550,6 +550,52 @@ def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, wind
     }
 
 
+# Garmin's own 4-week "training load focus": load (EPOC-based, Firstbeat) split into
+# low aerobic / high aerobic / anaerobic, with Garmin's target range for each and a
+# verdict phrase. Complements the time split above rather than replacing it: being
+# load-based and interval-aware, it registers hard work that HR time misses, but its
+# "high aerobic" bucket mixes threshold/marathon-pace running with VO2max work, so it
+# can't answer the easy-vs-moderate (grey zone) question. Read from the stored raw
+# payload because the verdict is text, which raw_daily_metrics can't hold.
+_LOAD_FOCUS_KEYS = (("low_aerobic", "monthlyLoadAerobicLow"),
+                    ("high_aerobic", "monthlyLoadAerobicHigh"),
+                    ("anaerobic", "monthlyLoadAnaerobic"))
+
+
+def garmin_load_focus_from_db(conn: sqlite3.Connection, date_str: str) -> dict | None:
+    from app.importers.garmin import load_balance_entry
+
+    row = conn.execute(
+        "SELECT date, payload_json FROM raw_import_payloads "
+        "WHERE source='garmin' AND endpoint='get_training_status' AND date <= ? AND date > date(?, '-7 days') "
+        "ORDER BY date DESC, id DESC LIMIT 1", (date_str, date_str)).fetchone()
+    if not row:
+        return None
+    try:
+        entry = load_balance_entry(json.loads(row[1]))
+    except (ValueError, TypeError):
+        return None
+    if not entry:
+        return None
+    loads = {name: entry.get(key) for name, key in _LOAD_FOCUS_KEYS}
+    if not any(isinstance(v, (int, float)) for v in loads.values()):
+        return None
+    total = sum(v for v in loads.values() if isinstance(v, (int, float)))
+    targets = {
+        name: {"min": entry.get(f"{key}TargetMin"), "max": entry.get(f"{key}TargetMax")}
+        for name, key in _LOAD_FOCUS_KEYS
+        if entry.get(f"{key}TargetMin") is not None or entry.get(f"{key}TargetMax") is not None
+    }
+    return {
+        "as_of": row[0],
+        "load": {k: round(v) for k, v in loads.items() if isinstance(v, (int, float))},
+        "share_pct": {k: round(v / total * 100) for k, v in loads.items()
+                      if isinstance(v, (int, float)) and total > 0},
+        "targets": targets or None,
+        "feedback": entry.get("trainingBalanceFeedbackPhrase"),
+    }
+
+
 # Exponential multipliers approximating Banister TRIMP's HRR-exponential shape,
 # applied to real per-zone time (activity_hr_zones) instead of Garmin's proprietary
 # training-effect score — self-computed so it doesn't depend on Garmin's algorithm.

@@ -478,6 +478,20 @@ def _parse_training_readiness(conn, date_str: str, data: list | dict) -> int:
     return rows
 
 
+def load_balance_entry(data: dict) -> dict | None:
+    """The primary device's entry from get_training_status →
+    mostRecentTrainingLoadBalance.metricsTrainingLoadBalanceDTOMap: Garmin's 4-week
+    "training load focus" (low aerobic / high aerobic / anaerobic load, its target
+    ranges, and a feedback phrase such as ANAEROBIC_SHORTAGE)."""
+    mlb = (data or {}).get("mostRecentTrainingLoadBalance") or {}
+    dmap = mlb.get("metricsTrainingLoadBalanceDTOMap") or {}
+    entry: dict | None = None
+    for v in dmap.values():
+        if isinstance(v, dict) and (v.get("primaryTrainingDevice") or entry is None):
+            entry = v
+    return entry
+
+
 def _parse_training_status(conn, date_str: str, data: dict) -> int:
     now = utc_now()
     rows = 0
@@ -498,12 +512,7 @@ def _parse_training_status(conn, date_str: str, data: dict) -> int:
             pass
 
     # Monthly zone load from mostRecentTrainingLoadBalance
-    mlb = data.get("mostRecentTrainingLoadBalance") or {}
-    dmap = mlb.get("metricsTrainingLoadBalanceDTOMap") or {}
-    entry: dict | None = None
-    for v in dmap.values():
-        if isinstance(v, dict) and (v.get("primaryTrainingDevice") or entry is None):
-            entry = v
+    entry = load_balance_entry(data)
     if entry:
         for metric, key in [
             ("monthly_load_aerobic_low",  "monthlyLoadAerobicLow"),

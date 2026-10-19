@@ -983,6 +983,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     from app.analysis import compute_correlations
     from app.readiness import (
         decoupling_trend_from_db,
+        garmin_load_focus_from_db,
         illness_risk_from_db,
         intensity_distribution_from_db,
         readiness_from_db,
@@ -1097,6 +1098,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
         monotony_strain = training_monotony_strain(conn, d)
         decoupling_trend = decoupling_trend_from_db(conn, d)
         intensity_distribution = intensity_distribution_from_db(conn, d)
+        garmin_load_focus = garmin_load_focus_from_db(conn, d)
 
     # ── today ────────────────────────────────────────────────────────────────
     today: dict = {}
@@ -1158,6 +1160,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     today["training_monotony_strain"] = monotony_strain
     today["decoupling_trend"] = decoupling_trend
     today["intensity_distribution"] = intensity_distribution
+    today["garmin_load_focus"] = garmin_load_focus
     today["hr_zones"] = [
         {"zone": r[0], "min_bpm": r[1], "max_bpm": r[2]} for r in hr_zone_rows
     ]
@@ -1213,6 +1216,10 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             "weeks_away": days_away // 7,
             "days_away": days_away,
         }
+    # Within two weeks of a race, a load-balance "shortage" is the taper working, not
+    # something to fix with extra hard sessions.
+    if garmin_load_focus is not None:
+        garmin_load_focus["near_race"] = bool(next_event and 0 <= next_event["days_away"] <= 14)
 
     # ── aerobic efficiency trend ──────────────────────────────────────────────
     aerobic_efficiency = None
@@ -1364,6 +1371,13 @@ planning, and recommendations. The server never fetches weather or sends message
      reps HR often never reaches LT1 at all — so judge hard work by `sessions.hard`
      (hard sessions in the 14-day window; ~1-2 per week is typical in a build), and use
      the time percentages for the easy vs moderate balance.
+   - `garmin_load_focus`: Garmin's own 4-week load split (low aerobic / high aerobic /
+     anaerobic), its target ranges, and its verdict (`feedback`, e.g. ANAEROBIC_SHORTAGE,
+     HIGH_AEROBIC_SHORTAGE, BALANCED). Load-based and interval-aware, so it's the better
+     "is there enough hard work?" signal; but "high aerobic" mixes threshold/marathon-pace
+     running with VO2max work, so use intensity_distribution for the grey-zone question.
+     When `near_race` is true (race within 14 days), a shortage verdict is the taper
+     working — do NOT add hard sessions to fix it
      `lt1_source: "estimated"` means LT1 is assumed at 89% of LTHR — the split is very
      sensitive to it, so treat grey_zone_flag as soft and suggest the user set a measured
      value with set_training_goal('lt1_hr', bpm) (talk test: the fastest steady pace
