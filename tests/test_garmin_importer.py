@@ -654,12 +654,24 @@ def test_fetch_and_store_hr_zones_stores_zones_and_raw_payload(tmp_db):
 
 
 def test_fetch_and_store_hr_zones_skips_if_already_fetched(tmp_db):
-    tmp_db.execute("INSERT INTO activity_hr_zones(activity_id, zone, seconds) VALUES ('42', 1, 100.0)")
+    tmp_db.execute("INSERT INTO activity_hr_zones(activity_id, zone, seconds, low_bpm) VALUES ('42', 1, 100.0, 95)")
     tmp_db.commit()
 
     client = MagicMock()
     _fetch_and_store_hr_zones(tmp_db, client, "42", "running", 1800)
     client.get_activity_hr_in_timezones.assert_not_called()
+
+
+def test_fetch_and_store_hr_zones_refetches_rows_stored_without_boundaries(tmp_db):
+    # Stored before low_bpm existed: fetch once more so the LTHR three-zone split has bounds.
+    tmp_db.execute("INSERT INTO activity_hr_zones(activity_id, zone, seconds) VALUES ('42', 1, 100.0)")
+    tmp_db.commit()
+    client = MagicMock()
+    client.get_activity_hr_in_timezones.return_value = [
+        {"zoneNumber": 1, "secsInZone": 100.0, "zoneLowBoundary": 95}]
+    _fetch_and_store_hr_zones(tmp_db, client, "42", "running", 1800)
+    assert tmp_db.execute(
+        "SELECT low_bpm FROM activity_hr_zones WHERE activity_id='42'").fetchone()[0] == 95.0
 
 
 def test_run_import_no_credentials(tmp_db, monkeypatch):

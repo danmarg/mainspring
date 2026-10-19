@@ -841,8 +841,10 @@ def _fetch_and_store_hr_zones(
         return
     if not duration_s or duration_s < _MIN_DECOUPLING_DURATION_S:
         return
+    # Re-fetch once for activities stored before zone boundaries were kept: the
+    # LTHR three-zone split needs at least one activity's boundaries to work at all.
     existing = conn.execute(
-        "SELECT 1 FROM activity_hr_zones WHERE activity_id=?", (activity_id,)
+        "SELECT 1 FROM activity_hr_zones WHERE activity_id=? AND low_bpm IS NOT NULL", (activity_id,)
     ).fetchone()
     if existing:
         return
