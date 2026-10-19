@@ -228,6 +228,20 @@ def _migrate_garmin_start_times(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _migrate_lactate_threshold_pace(conn: sqlite3.Connection) -> None:
+    """One-off, idempotent: threshold pace was stored 10x too slow (e.g. 43.8 min/km for
+    4:23/km) because Garmin's lactate-threshold speed is in units of 10 m/s. No runner's
+    threshold pace is slower than 15 min/km, so anything above that is the bad scale."""
+    conn.execute(
+        "UPDATE raw_daily_metrics SET value = ROUND(value / 10, 2) "
+        "WHERE metric = 'lactate_threshold_pace_min_per_km' AND value > 15")
+    conn.execute(
+        "UPDATE daily_metrics SET lactate_threshold_pace_min_per_km = "
+        "ROUND(lactate_threshold_pace_min_per_km / 10, 2) "
+        "WHERE lactate_threshold_pace_min_per_km > 15")
+    conn.commit()
+
+
 def init_db(path: Path | None = None) -> None:
     """Apply schema.sql idempotently, then reconcile any columns added since."""
     with get_connection(path or DB_PATH) as conn:
@@ -236,6 +250,7 @@ def init_db(path: Path | None = None) -> None:
         _drop_legacy_columns(conn)
         _add_missing_columns(conn)
         _migrate_garmin_start_times(conn)
+        _migrate_lactate_threshold_pace(conn)
 
 
 def utc_now() -> str:

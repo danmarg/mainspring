@@ -19,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 
 from app import auth
 from app.db import db, DEFAULT_SOURCE_PRIORITY
-from app.readiness import _latest_lthr, _latest_zone_bounds, three_zone_seconds
+from app.readiness import _latest_lthr, _latest_zone_bounds, _lt1_setting, three_zone_seconds
 from app.readiness import alertness_curve, average_wake_hour_from_db, circadian_peak_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db, hr_ceiling, trimp_from_hr_samples, zone_weighted_training_load_rows
 
 log = logging.getLogger(__name__)
@@ -1575,6 +1575,7 @@ def trends(request: Request, days: str = "30",
         """, (clause,))
         polarization_lthr = _latest_lthr(conn, date.today().isoformat())
         polarization_bounds = _latest_zone_bounds(conn)
+        polarization_lt1 = _lt1_setting(conn)
 
         steps_rows = _rows(conn, """
             SELECT date, steps FROM daily_metrics
@@ -1618,7 +1619,7 @@ def trends(request: Request, days: str = "30",
     for week in sorted(week_zone_seconds):
         # Same LTHR-anchored three-zone split as intensity_distribution_from_db
         easy, moderate, hard, _ = three_zone_seconds(
-            week_zone_seconds[week], polarization_lthr, polarization_bounds)
+            week_zone_seconds[week], polarization_lthr, polarization_bounds, polarization_lt1)
         total = easy + moderate + hard
         if total <= 0:
             continue

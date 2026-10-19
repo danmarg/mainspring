@@ -912,3 +912,31 @@ def test_three_zone_uses_latest_bounds_for_rows_without_them():
     rows = [(z, s, None) for z, s, _ in _REHEARSAL]
     bounds = {z: lo for z, _, lo in _REHEARSAL}
     assert three_zone_seconds(rows, 162.0, bounds) == three_zone_seconds(_REHEARSAL, 162.0, {})
+
+
+def test_three_zone_uses_measured_lt1_when_set():
+    from app.readiness import three_zone_seconds
+    estimated = three_zone_seconds(_REHEARSAL, 162.0, {})
+    measured = three_zone_seconds(_REHEARSAL, 162.0, {}, lt1=135.0)
+    assert measured[1] > estimated[1]  # lower LT1 moves more time into moderate
+    # An LT1 at/above LTHR is nonsense input: ignored, falls back to the estimate
+    assert three_zone_seconds(_REHEARSAL, 162.0, {}, lt1=170.0) == estimated
+
+
+def test_intensity_distribution_reports_lt1_source(tmp_db):
+    from app.readiness import intensity_distribution_from_db
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    conn.execute("INSERT INTO daily_metrics(date, lactate_threshold_hr) VALUES ('2025-06-30', 162)")
+    conn.execute("INSERT INTO activities(date, garmin_activity_id, type, canonical_source) "
+                 "VALUES ('2025-06-30', 'a1', 'running', 'garmin')")
+    for z, s, lo in _REHEARSAL:
+        conn.execute("INSERT INTO activity_hr_zones(activity_id, zone, seconds, low_bpm) VALUES ('a1',?,?,?)", (z, s, lo))
+    conn.commit()
+    est = intensity_distribution_from_db(conn, "2025-06-30")
+    conn.execute("INSERT INTO training_goals(metric, value, updated_at) VALUES ('lt1_hr', 138, 'x')")
+    conn.commit()
+    measured = intensity_distribution_from_db(conn, "2025-06-30")
+    conn.close()
+    assert (est["lt1_source"], est["lt1_hr"]) == ("estimated", 144)
+    assert (measured["lt1_source"], measured["lt1_hr"]) == ("setting", 138.0)
+    assert measured["moderate_pct"] > est["moderate_pct"]

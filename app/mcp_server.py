@@ -814,7 +814,8 @@ def log_rpe(
 @mcp.tool()
 def set_training_goal(metric: str, value: float, unit: Optional[str] = None) -> str:
     """Set a steady-state weekly training target.
-    Common metrics: weekly_runs, weekly_volume_km, weekly_strength_sessions, sleep_target_hours.
+    Common metrics: weekly_runs, weekly_volume_km, weekly_strength_sessions, sleep_target_hours,
+    lt1_hr (aerobic threshold HR in bpm, from a lab/talk test — Garmin doesn't measure it).
     Examples: set_training_goal('weekly_runs', 3), set_training_goal('weekly_volume_km', 50, 'km')."""
     with db() as conn:
         conn.execute(
@@ -1355,9 +1356,12 @@ planning, and recommendations. The server never fetches weather or sends message
    - `intensity_distribution`: real time-in-zone % across the trailing 14 days, from
      Garmin's per-activity zone data — not whole-session avg HR, which would hide
      interval recoveries inside "moderate". With `model: "lthr_3zone"` the zones are the
-     research three-zone model anchored on lactate threshold: easy = below LT1 (~89% of
-     LTHR), moderate = between LT1 and LTHR (marathon/tempo pace lives here), hard =
-     above LTHR. `"garmin_5zone"` is the fallback without an LTHR (Garmin zones 1-2/3/4-5).
+     research three-zone model anchored on lactate threshold: easy = below LT1, moderate
+     = between LT1 and LTHR (marathon/tempo pace lives here), hard = above LTHR.
+     `lt1_source: "estimated"` means LT1 is assumed at 89% of LTHR — the split is very
+     sensitive to it, so treat grey_zone_flag as soft and suggest the user set a measured
+     value with set_training_goal('lt1_hr', bpm) (talk test: the fastest steady pace
+     where full sentences are still easy). `"setting"` = their own measured value. `"garmin_5zone"` is the fallback without an LTHR (Garmin zones 1-2/3/4-5).
      `grey_zone_flag: true` means recent training hasn't been polarized (too much
      moderate-intensity, not enough true easy or true hard) — expect it during a
      marathon-specific block, where race-pace work is moderate by definition

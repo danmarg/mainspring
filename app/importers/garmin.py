@@ -608,6 +608,10 @@ def _parse_lactate_threshold(conn, date_str: str, data: dict) -> int:
         rows += 1
     speed = shr.get("speed")
     if speed:
+        # Garmin reports this speed in units of 10 m/s (0.38 = 3.8 m/s = 4:23/km), unlike
+        # activity speeds. Below 1.5 "m/s" (11 min/km) at threshold can only be that scale.
+        if speed < 1.5:
+            speed *= 10
         pace_min_per_km = 1000 / speed / 60
         upsert_raw_metric(conn, date_str, SOURCE, "lactate_threshold_pace_min_per_km",
                           round(pace_min_per_km, 2), now)
