@@ -940,3 +940,51 @@ def test_intensity_distribution_reports_lt1_source(tmp_db):
     assert (est["lt1_source"], est["lt1_hr"]) == ("estimated", 144)
     assert (measured["lt1_source"], measured["lt1_hr"]) == ("setting", 138.0)
     assert measured["moderate_pct"] > est["moderate_pct"]
+
+
+def test_session_kind_from_garmin_labels():
+    from app.readiness import session_kind
+    assert session_kind("VO2MAX") == "hard"
+    assert session_kind("ANAEROBIC_CAPACITY") == "hard"
+    assert session_kind("SPRINT") == "hard"
+    assert session_kind("LACTATE_THRESHOLD") == "moderate"
+    assert session_kind("TEMPO") == "moderate"
+    assert session_kind("AEROBIC_BASE") == "easy"
+    assert session_kind(None) == "easy"
+
+
+# Real Garmin zones for a VO2max session (Oct 6): only 2 min in zone 5 by HR
+_VO2 = [(1, 28.0, 95.0), (2, 334.0, 111.0), (3, 1143.0, 127.0), (4, 1128.0, 143.0), (5, 120.0, 161.0)]
+
+
+def test_split_sessions_counts_interval_work_as_hard():
+    from app.readiness import split_sessions, three_zone_seconds
+    hr_only = three_zone_seconds(_VO2, 162.0, {})
+    hybrid = split_sessions([("VO2MAX", _VO2)], 162.0, {})
+    assert hr_only[2] < 0.05 * sum(hr_only[:3])           # HR alone: ~nothing hard
+    assert hybrid["hard"] == pytest.approx(hr_only[1] + hr_only[2])
+    assert hybrid["moderate"] == 0 and hybrid["easy"] == pytest.approx(hr_only[0])
+    assert hybrid["sessions"] == {"easy": 0, "moderate": 0, "hard": 1}
+    # A labelled-easy or threshold session keeps its HR split
+    assert split_sessions([("TEMPO", _REHEARSAL)], 162.0, {})["moderate"] == pytest.approx(
+        three_zone_seconds(_REHEARSAL, 162.0, {})[1])
+
+
+def test_intensity_distribution_uses_session_labels(tmp_db):
+    import json as _json
+    from app.readiness import intensity_distribution_from_db
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    conn.execute("INSERT INTO daily_metrics(date, lactate_threshold_hr) VALUES ('2025-06-30', 162)")
+    for aid, label, zones in (("v", "VO2MAX", _VO2), ("e", "AEROBIC_BASE", _REHEARSAL)):
+        conn.execute("INSERT INTO activities(date, garmin_activity_id, type, canonical_source) "
+                     "VALUES ('2025-06-30', ?, 'running', 'garmin')", (aid,))
+        conn.execute("INSERT INTO garmin_activities(activity_id, date, raw_json) VALUES (?, '2025-06-30', ?)",
+                     (aid, _json.dumps({"trainingEffectLabel": label})))
+        for z, s, lo in zones:
+            conn.execute("INSERT INTO activity_hr_zones(activity_id, zone, seconds, low_bpm) VALUES (?,?,?,?)",
+                         (aid, z, s, lo))
+    conn.commit()
+    result = intensity_distribution_from_db(conn, "2025-06-30")
+    conn.close()
+    assert result["sessions"] == {"easy": 1, "moderate": 0, "hard": 1}
+    assert result["hard_pct"] > 15  # VO2 session's above-LT1 time, not its 2 min in zone 5

@@ -463,28 +463,72 @@ def three_zone_seconds(zone_rows: list[tuple[int, float, float | None]], lthr: f
     return easy, moderate, hard, "lthr_3zone"
 
 
+# Hard work is classified by session, not heart rate. In intervals HR lags each rep by
+# 1-2 min and drops in the recoveries, so HR time above LTHR badly undercounts it (here:
+# six VO2max/anaerobic sessions in 12 weeks showed < 7 min above LTHR in total). Seiler &
+# Kjerland 2006 found the same: HR time-in-zone shows a few % hard where session-goal
+# classification of the same training shows ~15%. So for a session Garmin labels as
+# hard (its training-effect label), all time above LT1 counts as hard; warm-up,
+# cool-down and recoveries below LT1 stay easy. Easy vs moderate stays HR-based, which
+# HR tracks well (steady efforts drifting across LT1).
+HARD_SESSION_LABELS = ("VO2MAX", "ANAEROBIC", "SPRINT")
+MODERATE_SESSION_LABELS = ("TEMPO", "THRESHOLD", "LACTATE")
+
+
+def session_kind(label: str | None) -> str:
+    """'hard' / 'moderate' / 'easy' from Garmin's trainingEffectLabel (e.g. VO2MAX,
+    ANAEROBIC_CAPACITY, TEMPO, LACTATE_THRESHOLD, AEROBIC_BASE, RECOVERY)."""
+    label = (label or "").upper()
+    if any(k in label for k in HARD_SESSION_LABELS):
+        return "hard"
+    if any(k in label for k in MODERATE_SESSION_LABELS):
+        return "moderate"
+    return "easy"
+
+
+def split_sessions(sessions: list[tuple[str | None, list[tuple[int, float, float | None]]]],
+                   lthr: float | None, fallback_bounds: dict[int, float],
+                   lt1: float | None = None) -> dict:
+    """Hybrid intensity split over sessions [(training_effect_label, zone_rows), ...]:
+    HR three-zone time per session (three_zone_seconds), with above-LT1 time in hard
+    sessions reclassified as hard (see HARD_SESSION_LABELS). Also counts sessions by kind."""
+    easy = moderate = hard = 0.0
+    model = None
+    counts = {"easy": 0, "moderate": 0, "hard": 0}
+    for label, zone_rows in sessions:
+        e, m, h, model = three_zone_seconds(zone_rows, lthr, fallback_bounds, lt1)
+        kind = session_kind(label)
+        counts[kind] += 1
+        if kind == "hard":
+            m, h = 0.0, m + h
+        easy, moderate, hard = easy + e, moderate + m, hard + h
+    return {"easy": easy, "moderate": moderate, "hard": hard, "model": model, "sessions": counts}
+
+
 def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, window_days: int = 14) -> dict:
     """
-    Polarization: % of trailing running time below LT1 (easy), between thresholds
-    (moderate), and above LT2 (hard) — see three_zone_seconds — from Garmin's real
-    per-activity time-in-zone (activity_hr_zones) rather than whole-session avg HR:
-    an interval session's recovery jogs would otherwise drag its average into
-    "moderate" and hide the exact grey-zone drift this metric exists to catch.
-    grey_zone_flag fires when moderate time dominates, the pattern polarized-training
-    research associates with a plateau. 14-day window: a single week swings with one
-    long run or one workout.
+    Polarization over trailing running time: easy (below LT1), moderate (LT1 to LTHR),
+    hard — see three_zone_seconds for the HR split and split_sessions for why hard is
+    classified by session. From Garmin's real per-activity time-in-zone
+    (activity_hr_zones) rather than whole-session avg HR. grey_zone_flag fires when
+    moderate time dominates, the pattern polarized-training research associates with a
+    plateau. 14-day window: a single week swings with one long run or one workout.
     """
     rows = conn.execute(
-        """SELECT z.zone, z.seconds, z.low_bpm
+        """SELECT a.garmin_activity_id, json_extract(g.raw_json, '$.trainingEffectLabel'),
+                  z.zone, z.seconds, z.low_bpm
            FROM activities a
            JOIN activity_hr_zones z ON z.activity_id = a.garmin_activity_id
+           LEFT JOIN garmin_activities g ON g.activity_id = a.garmin_activity_id
            WHERE a.date <= ? AND a.date > date(?, ?)""",
         (date_str, date_str, f"-{window_days} days"),
     ).fetchall()
-    zone_rows = [(int(z), s or 0.0, lo) for z, s, lo in rows]
+    by_activity: dict[str, tuple[str | None, list]] = {}
+    for activity_id, label, z, secs, lo in rows:
+        by_activity.setdefault(activity_id, (label, []))[1].append((int(z), secs or 0.0, lo))
     lthr, lt1 = _latest_lthr(conn, date_str), _lt1_setting(conn)
-    easy, moderate, hard, model = three_zone_seconds(
-        zone_rows, lthr, _latest_zone_bounds(conn), lt1)
+    split = split_sessions(list(by_activity.values()), lthr, _latest_zone_bounds(conn), lt1)
+    easy, moderate, hard, model = split["easy"], split["moderate"], split["hard"], split["model"]
     total = easy + moderate + hard
     if total <= 0:
         return {"easy_pct": None, "moderate_pct": None, "hard_pct": None, "grey_zone_flag": None,
@@ -498,6 +542,7 @@ def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, wind
         "moderate_pct": round(moderate / total * 100, 1),
         "hard_pct": round(hard / total * 100, 1),
         "grey_zone_flag": (moderate / total) > 0.30,
+        "sessions": split["sessions"],
         "model": model,
         "lt1_hr": lt1_used,
         "lt1_source": None if lt1_used is None else ("setting" if lt1 and lt1 < lthr else "estimated"),

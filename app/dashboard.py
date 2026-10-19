@@ -19,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 
 from app import auth
 from app.db import db, DEFAULT_SOURCE_PRIORITY
-from app.readiness import _latest_lthr, _latest_zone_bounds, _lt1_setting, three_zone_seconds
+from app.readiness import _latest_lthr, _latest_zone_bounds, _lt1_setting, split_sessions
 from app.readiness import alertness_curve, average_wake_hour_from_db, circadian_peak_hour_from_db, illness_risk_from_db, readiness_from_db, sleep_regularity_from_db, hr_ceiling, trimp_from_hr_samples, zone_weighted_training_load_rows
 
 log = logging.getLogger(__name__)
@@ -1568,9 +1568,12 @@ def trends(request: Request, days: str = "30",
         """, (clause,))
 
         zone_time_rows = _rows(conn, """
-            SELECT a.date, z.zone, z.seconds, z.low_bpm
+            SELECT a.date, a.garmin_activity_id AS activity_id,
+                   json_extract(g.raw_json, '$.trainingEffectLabel') AS label,
+                   z.zone, z.seconds, z.low_bpm
             FROM activities a
             JOIN activity_hr_zones z ON z.activity_id = a.garmin_activity_id
+            LEFT JOIN garmin_activities g ON g.activity_id = a.garmin_activity_id
             WHERE a.date >= date('now', ?)
         """, (clause,))
         polarization_lthr = _latest_lthr(conn, date.today().isoformat())
@@ -1609,17 +1612,19 @@ def trends(request: Request, days: str = "30",
                  for r in all_load_rows_acwr]
 
     # Weekly polarization: bucket per-activity zone-seconds by Monday-start week,
-    week_zone_seconds: dict[str, list[tuple[int, float, float | None]]] = {}
+    week_zone_seconds: dict[str, dict[str, tuple[str | None, list]]] = {}
     week_zone_seconds: dict[str, dict[int, float]] = {}
     for r in zone_time_rows:
         d = date.fromisoformat(r["date"])
         week = (d - timedelta(days=d.weekday())).isoformat()
-        week_zone_seconds.setdefault(week, []).append((int(r["zone"]), r["seconds"] or 0.0, r["low_bpm"]))
+        week_zone_seconds.setdefault(week, {}).setdefault(r["activity_id"], (r["label"], []))[1].append(
+            (int(r["zone"]), r["seconds"] or 0.0, r["low_bpm"]))
     polarization_rows = []
     for week in sorted(week_zone_seconds):
-        # Same LTHR-anchored three-zone split as intensity_distribution_from_db
-        easy, moderate, hard, _ = three_zone_seconds(
-            week_zone_seconds[week], polarization_lthr, polarization_bounds, polarization_lt1)
+        # Same hybrid split as intensity_distribution_from_db
+        split = split_sessions(list(week_zone_seconds[week].values()),
+                               polarization_lthr, polarization_bounds, polarization_lt1)
+        easy, moderate, hard = split["easy"], split["moderate"], split["hard"]
         total = easy + moderate + hard
         if total <= 0:
             continue
