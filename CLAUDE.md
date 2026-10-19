@@ -87,7 +87,7 @@ Import endpoints gracefully no-op if the corresponding source's credentials are 
 
 ```
 log_meal(ts?, description, estimated_calories?, estimated_macros?, confidence)
-log_caffeine(ts?, description, amount_mg?)
+log_caffeine(ts?, description, amount_mg)          # amount required; unitless input is rejected
 log_alcohol(ts?, description, units?)
 amend_log(log_id, ts?, description?, quantity?, unit?, estimated_calories?, estimated_macros?, confidence?)
 delete_log(log_id)

@@ -174,6 +174,29 @@ def _notable_sources(source_flags_json: Optional[str]) -> dict:
     return {k: v for k, v in flags.items() if v != "garmin"}
 
 
+# Units are carried by key/parameter names (protein_g, amount_mg), so a value is only
+# meaningful under a name that states its unit. Anything else is rejected rather than
+# stored, since a unitless or mislabelled amount silently corrupts daily totals and the
+# correlations built on them.
+MACRO_KEYS = ("protein_g", "carbs_g", "fat_g", "fiber_g", "sugar_g", "sodium_mg")
+LOG_UNITS = {"caffeine": "mg", "alcohol": "units", "hydration": "ml", "weight": "kg",
+             "blood_pressure": "mmHg", "rpe": "/10", "energy": "/5"}
+
+
+def _macros_error(macros) -> str | None:
+    if not isinstance(macros, dict):
+        return "Error: estimated_macros must be an object like {\"protein_g\": 30, \"carbs_g\": 45, \"fat_g\": 12}"
+    unknown = [k for k in macros if k not in MACRO_KEYS]
+    if unknown:
+        return (f"Error: estimated_macros keys must state their unit — got {', '.join(map(str, unknown))}; "
+                f"use {', '.join(MACRO_KEYS)} (grams, sodium in mg)")
+    bad = [k for k, v in macros.items() if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0]
+    if bad:
+        return (f"Error: estimated_macros values must be plain non-negative numbers in the key's unit "
+                f"(e.g. 30, not \"30g\") — check {', '.join(bad)}")
+    return None
+
+
 def _fmt_num(x: float) -> str:
     """Render a number for a status string without a spurious .0 (e.g. 95 not 95.0)."""
     r = round(x, 2)
@@ -274,7 +297,11 @@ def log_meal(
     confidence: Optional[str] = None,
 ) -> str:
     """Log a meal. ts is UTC ISO-8601 (defaults to now). estimated_macros is
-    {protein_g, carbs_g, fat_g}. confidence: 'photo_estimate' | 'user_confirmed'."""
+    {protein_g, carbs_g, fat_g} in grams (optionally fiber_g, sugar_g, sodium_mg); keys
+    without a unit suffix or non-numeric values are rejected. confidence:
+    'photo_estimate' | 'user_confirmed'."""
+    if estimated_macros is not None and (err := _macros_error(estimated_macros)):
+        return err
     event_ts = _ts_or_now(ts)
     with db() as conn:
         conn.execute(
@@ -303,7 +330,11 @@ def log_caffeine(
     ts: Optional[str] = None,
     amount_mg: Optional[float] = None,
 ) -> str:
-    """Log a caffeine intake. amount_mg is milligrams."""
+    """Log a caffeine intake. amount_mg (milligrams) is required — estimate it if the user
+    didn't say (espresso ~65 mg, filter coffee ~95 mg/cup, black tea ~45 mg)."""
+    if amount_mg is None or isinstance(amount_mg, bool) or not isinstance(amount_mg, (int, float)) or amount_mg <= 0:
+        return ("Error: amount_mg is required — a positive number of milligrams "
+                "(estimate if unknown: espresso ~65 mg, filter coffee ~95 mg/cup)")
     event_ts = _ts_or_now(ts)
     with db() as conn:
         conn.execute(
@@ -371,7 +402,11 @@ def amend_log(
 ) -> str:
     """Amend an existing manual log entry (meal/caffeine/alcohol/note) by id.
     Only the fields provided are updated; omitted fields are left unchanged.
+    unit must be the log type's own unit (caffeine mg, alcohol units, hydration ml,
+    weight kg); estimated_macros follows log_meal's unit-suffixed keys.
     Use get_logs to find the id."""
+    if estimated_macros is not None and (err := _macros_error(estimated_macros)):
+        return err
     fields = {
         "ts": ts,
         "description": description,
@@ -388,10 +423,15 @@ def amend_log(
         return "No fields provided to amend."
 
     with db() as conn:
-        existing = conn.execute("SELECT ts FROM manual_logs WHERE id=?", (log_id,)).fetchone()
+        existing = conn.execute("SELECT ts, type FROM manual_logs WHERE id=?", (log_id,)).fetchone()
         if not existing:
             return f"Error: no log with id {log_id}"
-        old_ts = existing[0]
+        old_ts, log_type = existing[0], existing[1]
+        expected_unit = LOG_UNITS.get(log_type)
+        if unit is not None and unit != expected_unit:
+            return (f"Error: {log_type} logs are recorded in {expected_unit!r}; convert the quantity "
+                    f"instead of changing the unit to {unit!r}" if expected_unit
+                    else f"Error: {log_type} logs don't take a unit")
         set_clause = ", ".join(f"{k}=?" for k in fields)
         conn.execute(
             f"UPDATE manual_logs SET {set_clause} WHERE id=?",
