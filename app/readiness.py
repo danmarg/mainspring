@@ -416,17 +416,14 @@ def _lt1_setting(conn: sqlite3.Connection) -> float | None:
 
 
 def _latest_zone_bounds(conn: sqlite3.Connection) -> dict[int, float]:
-    """Garmin zone lower bounds from the most recent activity that recorded them —
-    used for activities stored before boundaries were kept (they're an account
-    setting, so the latest is the best guess)."""
-    row = conn.execute(
-        "SELECT activity_id FROM activity_hr_zones WHERE low_bpm IS NOT NULL "
-        "ORDER BY rowid DESC LIMIT 1").fetchone()
-    if not row:
-        return {}
+    """Most recently recorded Garmin lower bound for each zone — used for activities
+    stored before boundaries were kept (they're an account setting, so the latest is
+    the best guess). Per zone rather than from a single activity: an easy run may not
+    have recorded the upper zones at all."""
     return {int(z): lo for z, lo in conn.execute(
-        "SELECT zone, low_bpm FROM activity_hr_zones WHERE activity_id=? AND low_bpm IS NOT NULL",
-        (row[0],))}
+        """SELECT zone, low_bpm FROM activity_hr_zones h
+           WHERE low_bpm IS NOT NULL AND rowid = (
+               SELECT MAX(rowid) FROM activity_hr_zones WHERE zone = h.zone AND low_bpm IS NOT NULL)""")}
 
 
 def three_zone_seconds(zone_rows: list[tuple[int, float, float | None]], lthr: float | None,
@@ -435,7 +432,8 @@ def three_zone_seconds(zone_rows: list[tuple[int, float, float | None]], lthr: f
     """(easy, moderate, hard) seconds and the model used, from one activity's (or a
     pooled set of) Garmin (zone, seconds, low_bpm) rows. lt1 overrides the
     LT1_FRACTION_OF_LTHR estimate when the user has a measured value."""
-    bounds = {z: lo for z, _, lo in zone_rows if lo is not None} or fallback_bounds
+    # The activity's own bounds win; the latest known bounds fill any zones it lacks.
+    bounds = {**fallback_bounds, **{z: lo for z, _, lo in zone_rows if lo is not None}}
     if not lthr or len(bounds) < len({z for z, _, _ in zone_rows}):
         easy = sum(s for z, s, _ in zone_rows if z <= 2)
         moderate = sum(s for z, s, _ in zone_rows if z == 3)

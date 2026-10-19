@@ -1009,3 +1009,25 @@ def test_garmin_load_focus_from_stored_payload(tmp_db):
     assert focus["share_pct"] == {"low_aerobic": 63, "high_aerobic": 31, "anaerobic": 5}
     assert focus["targets"] == {"anaerobic": {"min": 200, "max": 500}}
     assert stale is None  # older than a week: not current
+
+
+def test_latest_zone_bounds_merges_across_activities(tmp_db):
+    # The most recent activity was easy (no zone 4/5 rows); bounds for 4/5 come from earlier.
+    from app.readiness import _latest_zone_bounds
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    for aid, zones in (("hard", _REHEARSAL), ("easy", _REHEARSAL[:3])):
+        for z, s, lo in zones:
+            conn.execute("INSERT INTO activity_hr_zones(activity_id, zone, seconds, low_bpm) VALUES (?,?,?,?)",
+                         (aid, z, s, lo))
+    conn.commit()
+    bounds = _latest_zone_bounds(conn)
+    conn.close()
+    assert bounds == {1: 95.0, 2: 111.0, 3: 127.0, 4: 143.0, 5: 161.0}
+
+
+def test_three_zone_fills_missing_own_bounds_from_fallback():
+    # Own bounds only for zones 1-3 (zero-second zones weren't stored): fill 4-5, don't drop to 5-zone.
+    from app.readiness import three_zone_seconds
+    partial = [(z, s, lo if z <= 3 else None) for z, s, lo in _REHEARSAL]
+    fallback = {z: lo for z, _, lo in _REHEARSAL}
+    assert three_zone_seconds(partial, 162.0, fallback)[3] == "lthr_3zone"

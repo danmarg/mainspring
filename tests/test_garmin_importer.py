@@ -799,3 +799,10 @@ def test_parse_lactate_threshold_speed_in_tens_of_mps(tmp_db):
     pace = tmp_db.execute(
         "SELECT value FROM raw_daily_metrics WHERE metric='lactate_threshold_pace_min_per_km'").fetchone()[0]
     assert pace == pytest.approx(4.38, abs=0.01)
+
+
+def test_parse_hr_zones_keeps_zero_second_zones():
+    data = [{"zoneNumber": 4, "secsInZone": 0.0, "zoneLowBoundary": 143},
+            {"zoneNumber": 5, "secsInZone": 0.0, "zoneLowBoundary": 161}]
+    assert _parse_hr_zones(data) == [{"zone": 4, "seconds": 0.0, "low_bpm": 143.0},
+                                     {"zone": 5, "seconds": 0.0, "low_bpm": 161.0}]
