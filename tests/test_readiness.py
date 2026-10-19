@@ -988,3 +988,24 @@ def test_intensity_distribution_uses_session_labels(tmp_db):
     conn.close()
     assert result["sessions"] == {"easy": 1, "moderate": 0, "hard": 1}
     assert result["hard_pct"] > 15  # VO2 session's above-LT1 time, not its 2 min in zone 5
+
+
+def test_garmin_load_focus_from_stored_payload(tmp_db):
+    import json as _json
+    from app.readiness import garmin_load_focus_from_db
+    payload = {"mostRecentTrainingLoadBalance": {"metricsTrainingLoadBalanceDTOMap": {"123": {
+        "primaryTrainingDevice": True,
+        "monthlyLoadAerobicLow": 1638.2, "monthlyLoadAerobicHigh": 811.9, "monthlyLoadAnaerobic": 133.8,
+        "monthlyLoadAnaerobicTargetMin": 200, "monthlyLoadAnaerobicTargetMax": 500,
+        "trainingBalanceFeedbackPhrase": "ANAEROBIC_SHORTAGE"}}}}
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    conn.execute("INSERT INTO raw_import_payloads(source, endpoint, date, payload_json, fetched_at) "
+                 "VALUES ('garmin', 'get_training_status', '2026-10-18', ?, 'x')", (_json.dumps(payload),))
+    conn.commit()
+    focus = garmin_load_focus_from_db(conn, "2026-10-18")
+    stale = garmin_load_focus_from_db(conn, "2026-11-30")
+    conn.close()
+    assert focus["feedback"] == "ANAEROBIC_SHORTAGE"
+    assert focus["share_pct"] == {"low_aerobic": 63, "high_aerobic": 31, "anaerobic": 5}
+    assert focus["targets"] == {"anaerobic": {"min": 200, "max": 500}}
+    assert stale is None  # older than a week: not current
