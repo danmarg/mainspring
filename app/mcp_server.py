@@ -1357,7 +1357,13 @@ planning, and recommendations. The server never fetches weather or sends message
      Garmin's per-activity zone data — not whole-session avg HR, which would hide
      interval recoveries inside "moderate". With `model: "lthr_3zone"` the zones are the
      research three-zone model anchored on lactate threshold: easy = below LT1, moderate
-     = between LT1 and LTHR (marathon/tempo pace lives here), hard = above LTHR.
+     = between LT1 and LTHR (marathon/tempo pace lives here), hard = interval work. Hard
+     is classified by session (Garmin's training-effect label: VO2max/anaerobic/sprint →
+     their above-LT1 time counts as hard), because HR lags short reps and HR time above
+     LTHR undercounts it badly. Even so, hard_pct stays low (a few %), because in short
+     reps HR often never reaches LT1 at all — so judge hard work by `sessions.hard`
+     (hard sessions in the 14-day window; ~1-2 per week is typical in a build), and use
+     the time percentages for the easy vs moderate balance.
      `lt1_source: "estimated"` means LT1 is assumed at 89% of LTHR — the split is very
      sensitive to it, so treat grey_zone_flag as soft and suggest the user set a measured
      value with set_training_goal('lt1_hr', bpm) (talk test: the fastest steady pace
