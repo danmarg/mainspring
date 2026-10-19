@@ -66,8 +66,10 @@ Training load: acute:chronic ratio (25%)
   is exactly 1 − ACWR, so scoring TSB alongside ACWR counted the same number
   twice — and raw TSB (CTL − ATL) isn't scale-free at all: Garmin's loads are
   in the hundreds, so the TrainingPeaks-style ±25 bands pinned it at 0 or 100.
-  Form % is still reported in the detail. Sweet spot 0.8-1.3, high side
-  penalized more steeply. ACWR is contested (mathematical coupling of acute
+  Form % is still reported in the detail. Scores best slightly fresh (0.85-0.95),
+  neutral when building in the 0.8-1.3 sweet spot, high side penalized more
+  steeply. Like every baseline-relative component, "at your normal" scores
+  NEUTRAL_SCORE (65), so an ordinary day reads "Ready", not "Primed". ACWR is contested (mathematical coupling of acute
   into chronic; weak causal evidence for injury), so the self-computed
   fallback uses the uncoupled form (chronic excludes the acute week), and the
   weight is moderate.
@@ -526,17 +528,39 @@ def zone_weighted_training_load_rows(conn: sqlite3.Connection, since_clause: str
     ]
 
 
+# Every baseline-relative component scores NEUTRAL_SCORE when you're exactly at your
+# own normal, so an ordinary day composes to ~65-70 ("Ready") and "Primed"/"Low" are
+# reserved for days genuinely above/below normal. Calibrated on a year of real data:
+# median ~68, Primed ~2% of days, Low/Rest ~13% — the latter concentrated in a
+# stretch of HRV ~2 SD below normal with training dropped off, i.e. real dips.
+NEUTRAL_SCORE = 65.0
+
+
+def _interp(x: float, points: list[tuple[float, float]]) -> float:
+    """Piecewise-linear lookup, flat beyond the end points."""
+    if x <= points[0][0]:
+        return points[0][1]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return points[-1][1]
+
+
+# z = SDs of the 7-day lnRMSSD mean from the 60-day normal. Normal range (-0.5 to +1
+# SD) scores ~60-85; below it falls off steeply (a sustained drop is the fatigue
+# signal); far above it eases back rather than rising (possible overreaching,
+# Le Meur 2013) — never below 60 there, since high HRV alone isn't evidence of fatigue.
+_HRV_BAND = [(-3.0, 5.0), (-0.5, 60.0), (0.0, NEUTRAL_SCORE + 1), (1.0, 85.0), (3.5, 60.0)]
+
+# Acute:chronic ratio. Peaks when slightly fresh (0.85-0.95: form +5-15%, room for a
+# hard day), neutral when building in the sweet spot, penalized more steeply on the
+# high side (Gabbett 2016) than the low (detraining) side.
+_ACWR_BAND = [(0.5, 15.0), (0.8, 75.0), (0.9, 88.0), (1.0, 75.0), (1.3, 58.0), (1.5, 15.0)]
+
+
 def _hrv_band_score(z: float) -> float:
-    """Score for the 7-day lnRMSSD rolling mean, z = SDs from the 60-day normal.
-    Inside the normal range (-0.5 to +1 SD) scores 75-90; below it falls off
-    steeply (a sustained drop is the fatigue signal); well above it eases back
-    toward 50 rather than rising (possible overreaching, Le Meur 2013) — never
-    below 50, since high HRV alone isn't evidence of fatigue."""
-    if z < -0.5:
-        return max(0.0, 75.0 - (-0.5 - z) * 30.0)
-    if z <= 1.0:
-        return 75.0 + (z + 0.5) * 10.0
-    return max(50.0, 90.0 - (z - 1.0) * 20.0)
+    """Score for the 7-day lnRMSSD rolling mean vs the 60-day normal (see _HRV_BAND)."""
+    return _interp(z, _HRV_BAND)
 
 
 def compute_readiness(
@@ -578,8 +602,8 @@ def compute_readiness(
             detail = f"{hrv:.0f}ms; " + detail
     elif hrv is not None and hrv_7d and hrv_7d > 0:
         ratio = hrv / hrv_7d
-        # 50 at baseline, +/- 2.5 points per percent deviation; capped 0-100
-        hrv_score = min(100.0, max(0.0, 50.0 + (ratio - 1.0) * 250.0))
+        # Neutral at baseline, +/- 2.5 points per percent deviation; capped 0-100
+        hrv_score = min(100.0, max(0.0, NEUTRAL_SCORE + (ratio - 1.0) * 250.0))
         sign = "+" if ratio >= 1 else ""
         detail = f"{hrv:.0f}ms vs {hrv_7d:.0f}ms avg ({sign}{(ratio-1)*100:.0f}%)"
     if hrv_score is not None:
@@ -603,13 +627,13 @@ def compute_readiness(
     # RHR vs 7-day rolling mean, inverted (weight 0.15)
     if rhr is not None and rhr_7d and rhr_7d > 0:
         if rhr_sd and rhr_sd > 0:
-            # In SDs of normal day-to-day noise: 50 at baseline, -15 per SD elevated
+            # In SDs of normal day-to-day noise: neutral at baseline, -18 per SD elevated
             z = (rhr - rhr_7d) / rhr_sd
-            rhr_score = min(100.0, max(0.0, 50.0 - z * 15.0))
+            rhr_score = min(100.0, max(0.0, NEUTRAL_SCORE - z * 18.0))
             rhr_detail = f"{rhr:.0f}bpm vs {rhr_7d:.0f}bpm avg ({z:+.1f} SD)"
         else:
             ratio = rhr / rhr_7d
-            rhr_score = min(100.0, max(0.0, 50.0 - (ratio - 1.0) * 500.0))
+            rhr_score = min(100.0, max(0.0, NEUTRAL_SCORE - (ratio - 1.0) * 500.0))
             rhr_detail = f"{rhr:.0f}bpm vs {rhr_7d:.0f}bpm avg"
         components.append({
             "name": "Resting HR",
@@ -620,17 +644,12 @@ def compute_readiness(
 
     load_suffix = " (self-estimated)" if load_source == "self" else ""
 
-    # Training load (weight 0.25): acute:chronic ratio. Gabbett 2016 sweet spot
-    # 0.8-1.3, high side penalized more steeply. Form % = (CTL-ATL)/CTL = 1-ACWR
-    # is the same information, so it's reported here rather than scored separately.
+    # Training load (weight 0.25): acute:chronic ratio (see _ACWR_BAND). Form % =
+    # (CTL-ATL)/CTL = 1-ACWR is the same information, so it's reported here rather
+    # than scored separately.
     if atl is not None and ctl is not None and ctl > 0:
         acwr = atl / ctl
-        if 0.8 <= acwr <= 1.3:
-            acwr_score = 100.0
-        elif acwr < 0.8:
-            acwr_score = max(0.0, 100.0 - (0.8 - acwr) * 150.0)
-        else:
-            acwr_score = max(0.0, 100.0 - (acwr - 1.3) * 220.0)
+        acwr_score = _interp(acwr, _ACWR_BAND)
         form_pct = (1.0 - acwr) * 100
         components.append({
             "name": "ACWR",

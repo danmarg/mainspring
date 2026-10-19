@@ -114,13 +114,16 @@ def test_compute_readiness_no_cv_data_unaffected():
 
 # ── compute_readiness: ACWR ───────────────────────────────────────────────────
 
-def test_compute_readiness_acwr_sweet_spot_scores_100():
-    result = compute_readiness(
-        hrv=None, hrv_7d=None, hrv_cv=None, sleep_debt_score=None,
-        rhr=None, rhr_7d=None, atl=100.0, ctl=100.0,  # ratio = 1.0
-    )
-    acwr = next(c for c in result["components"] if c["name"] == "ACWR")
-    assert acwr["score"] == 100.0
+def test_compute_readiness_acwr_neutral_when_building_peaks_when_fresh():
+    def acwr_score(atl):
+        result = compute_readiness(
+            hrv=None, hrv_7d=None, hrv_cv=None, sleep_debt_score=None,
+            rhr=None, rhr_7d=None, atl=atl, ctl=100.0,
+        )
+        return next(c for c in result["components"] if c["name"] == "ACWR")["score"]
+    assert acwr_score(100.0) == pytest.approx(75.0)   # steady building: ordinary, not primed
+    assert acwr_score(90.0) == pytest.approx(88.0)    # slightly fresh: best
+    assert acwr_score(140.0) < acwr_score(100.0)
 
 
 def test_compute_readiness_acwr_penalizes_high_ratio_more_than_low():
@@ -150,17 +153,17 @@ def test_compute_readiness_scores_load_once_scale_free():
     )
     names = [c["name"] for c in garmin["components"]]
     assert names == ["ACWR"]
-    assert garmin["components"][0]["score"] == small["components"][0]["score"]
+    assert garmin["components"][0]["score"] == pytest.approx(small["components"][0]["score"])
     assert "form +17%" in garmin["components"][0]["detail"]
 
 
 def test_hrv_band_score_shape():
     from app.readiness import _hrv_band_score
-    assert _hrv_band_score(0.0) == pytest.approx(80.0)
+    assert _hrv_band_score(0.0) == pytest.approx(66.0)
     assert _hrv_band_score(-2.0) < _hrv_band_score(-0.5) < _hrv_band_score(0.0)
-    # Well above normal eases off rather than rising, but never below 50.
+    # Well above normal eases off rather than rising, but never below 60.
     assert _hrv_band_score(3.0) < _hrv_band_score(1.0)
-    assert _hrv_band_score(10.0) == 50.0
+    assert _hrv_band_score(10.0) == 60.0
 
 
 def test_compute_readiness_prefers_hrv_z_over_ratio():
@@ -169,8 +172,19 @@ def test_compute_readiness_prefers_hrv_z_over_ratio():
         rhr=None, rhr_7d=None, atl=None, ctl=None, hrv_z=0.0,
     )
     hrv_component = result["components"][0]
-    assert hrv_component["score"] == pytest.approx(80.0)
+    assert hrv_component["score"] == pytest.approx(66.0)
     assert "SD vs your 60-day normal" in hrv_component["detail"]
+
+
+def test_ordinary_day_composes_to_ready():
+    # Everything exactly at personal normal, decent sleep, steady building load:
+    # "Ready", not "Primed" — Primed is reserved for genuinely above-normal days.
+    result = compute_readiness(
+        hrv=50.0, hrv_7d=50.0, hrv_cv=0.04, sleep_debt_score=75.0,
+        rhr=50.0, rhr_7d=50.0, atl=100.0, ctl=100.0, hrv_z=0.0, rhr_sd=1.5,
+    )
+    assert 65 <= result["score"] < 80
+    assert result["label"] == "Ready"
 
 
 def test_compute_readiness_rhr_scaled_by_personal_sd():
@@ -179,8 +193,8 @@ def test_compute_readiness_rhr_scaled_by_personal_sd():
                               rhr=51.0, rhr_7d=50.0, atl=None, ctl=None, rhr_sd=0.5)
     loose = compute_readiness(hrv=None, hrv_7d=None, hrv_cv=None, sleep_debt_score=None,
                               rhr=51.0, rhr_7d=50.0, atl=None, ctl=None, rhr_sd=3.0)
-    assert tight["components"][0]["score"] == pytest.approx(20.0)
-    assert loose["components"][0]["score"] == pytest.approx(45.0)
+    assert tight["components"][0]["score"] == pytest.approx(29.0)
+    assert loose["components"][0]["score"] == pytest.approx(59.0)
 
 
 def test_hrv_rolling_z_from_db():
