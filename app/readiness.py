@@ -495,14 +495,21 @@ def split_sessions(sessions: list[tuple[str | None, list[tuple[int, float, float
     easy = moderate = hard = 0.0
     model = None
     counts = {"easy": 0, "moderate": 0, "hard": 0}
+    models: dict[str, int] = {}
     for label, zone_rows in sessions:
         e, m, h, model = three_zone_seconds(zone_rows, lthr, fallback_bounds, lt1)
+        models[model] = models.get(model, 0) + 1
         kind = session_kind(label)
         counts[kind] += 1
         if kind == "hard":
             m, h = 0.0, m + h
         easy, moderate, hard = easy + e, moderate + m, hard + h
-    return {"easy": easy, "moderate": moderate, "hard": hard, "model": model, "sessions": counts}
+    # Mixed windows (some activities without zone bounds and no fallback) report the
+    # fallback model, so a partly-unanchored split isn't presented as fully LTHR-based.
+    if len(models) > 1:
+        model = "mixed"
+    return {"easy": easy, "moderate": moderate, "hard": hard, "model": model,
+            "models": models, "sessions": counts}
 
 
 def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, window_days: int = 14) -> dict:
@@ -535,7 +542,7 @@ def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, wind
                 "model": None, "detail": "no zone data in window"}
 
     lt1_used = None
-    if model == "lthr_3zone":
+    if model in ("lthr_3zone", "mixed") and lthr:
         lt1_used = lt1 if lt1 and lt1 < lthr else round(LT1_FRACTION_OF_LTHR * lthr)
     return {
         "easy_pct": round(easy / total * 100, 1),
@@ -544,6 +551,7 @@ def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, wind
         "grey_zone_flag": (moderate / total) > 0.30,
         "sessions": split["sessions"],
         "model": model,
+        "activities_by_model": split["models"],
         "lt1_hr": lt1_used,
         "lt1_source": None if lt1_used is None else ("setting" if lt1 and lt1 < lthr else "estimated"),
         "detail": None,
