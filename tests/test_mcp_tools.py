@@ -551,3 +551,31 @@ async def test_tool_call_logging_records_exception_and_still_raises():
     assert row[1] == "error"
     assert "not_a_real_tool" in row[2] or "Unknown tool" in row[2]
 
+
+
+def test_log_meal_rejects_unitless_macros():
+    from app.mcp_server import log_meal, get_logs
+    assert log_meal(description="steak", estimated_macros={"protein": 40}).startswith("Error")
+    assert log_meal(description="steak", estimated_macros={"protein_g": "40g"}).startswith("Error")
+    assert log_meal(description="steak", estimated_macros={"protein_g": -1}).startswith("Error")
+    assert get_logs(start_date=str(date.today()), end_date=str(date.today())) == []  # nothing stored
+
+
+def test_log_caffeine_requires_amount():
+    from app.mcp_server import log_caffeine, get_logs
+    assert log_caffeine(description="coffee").startswith("Error")
+    assert log_caffeine(description="coffee", amount_mg=0).startswith("Error")
+    assert get_logs(start_date=str(date.today()), end_date=str(date.today())) == []
+
+
+def test_amend_log_rejects_wrong_unit_and_unitless_macros():
+    from app.mcp_server import log_caffeine, log_meal, amend_log, get_logs
+    log_caffeine(description="espresso", amount_mg=65.0, ts="2025-01-01T07:30:00+00:00")
+    caf_id = get_logs(start_date="2025-01-01", end_date="2025-01-01")[0]["id"]
+    assert amend_log(log_id=caf_id, quantity=2, unit="cups").startswith("Error")
+    assert get_logs(start_date="2025-01-01", end_date="2025-01-01")[0]["quantity"] == 65.0
+    assert amend_log(log_id=caf_id, quantity=130.0, unit="mg").startswith("Amended")
+
+    log_meal(description="oats")
+    meal_id = get_logs(start_date=str(date.today()), end_date=str(date.today()))[0]["id"]
+    assert amend_log(log_id=meal_id, estimated_macros={"carbs": 50}).startswith("Error")
