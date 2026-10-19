@@ -791,3 +791,11 @@ def test_compute_decoupling_ignores_short_final_lap_for_steadiness():
     splits = [{"distance_m": 1000.0, "duration_s": 300, "avg_hr": 140} for _ in range(6)]
     splits.append({"distance_m": 150.0, "duration_s": 30, "avg_hr": 150})  # sprint finish remainder
     assert _compute_decoupling(splits) is not None
+
+
+def test_parse_lactate_threshold_speed_in_tens_of_mps(tmp_db):
+    # Real Garmin payload shape: 0.3806 means 3.806 m/s (4:23/km), not 0.38 m/s (43.8 min/km)
+    _parse_lactate_threshold(tmp_db, "2025-01-01", {"speed_and_heart_rate": {"speed": 0.3806, "heartRate": 162}})
+    pace = tmp_db.execute(
+        "SELECT value FROM raw_daily_metrics WHERE metric='lactate_threshold_pace_min_per_km'").fetchone()[0]
+    assert pace == pytest.approx(4.38, abs=0.01)

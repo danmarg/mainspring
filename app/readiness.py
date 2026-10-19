@@ -393,7 +393,10 @@ def decoupling_trend_from_db(conn: sqlite3.Connection, date_str: str, window_run
 # watch's 5-zone %HRmax bands: for a runner with LTHR 162 and Garmin zone 4 at
 # 143-161, marathon-pace running sits in Garmin's "zone 4" yet below LT2. LT2 is taken
 # as Garmin's lactate-threshold HR; LT1 isn't measured by the watch, so it's
-# approximated at 89% of LTHR (the conventional top of an LTHR-based endurance zone).
+# approximated at 89% of LTHR (the conventional top of an LTHR-based endurance zone)
+# unless the user has set a measured one (training goal 'lt1_hr': lab test, talk test,
+# DFA-alpha1) — the split is very sensitive to it, since much easy/steady running sits
+# just either side of LT1.
 # Time is apportioned from Garmin's per-zone seconds assuming HR is spread evenly
 # within each Garmin zone. Falls back to Garmin zones 1-2 / 3 / 4-5 without an LTHR
 # or zone boundaries.
@@ -404,6 +407,11 @@ def _latest_lthr(conn: sqlite3.Connection, date_str: str) -> float | None:
     row = conn.execute(
         "SELECT lactate_threshold_hr FROM daily_metrics WHERE date <= ? AND lactate_threshold_hr > 0 "
         "ORDER BY date DESC LIMIT 1", (date_str,)).fetchone()
+    return float(row[0]) if row else None
+
+
+def _lt1_setting(conn: sqlite3.Connection) -> float | None:
+    row = conn.execute("SELECT value FROM training_goals WHERE metric='lt1_hr' AND value > 0").fetchone()
     return float(row[0]) if row else None
 
 
@@ -422,9 +430,11 @@ def _latest_zone_bounds(conn: sqlite3.Connection) -> dict[int, float]:
 
 
 def three_zone_seconds(zone_rows: list[tuple[int, float, float | None]], lthr: float | None,
-                       fallback_bounds: dict[int, float]) -> tuple[float, float, float, str]:
+                       fallback_bounds: dict[int, float],
+                       lt1: float | None = None) -> tuple[float, float, float, str]:
     """(easy, moderate, hard) seconds and the model used, from one activity's (or a
-    pooled set of) Garmin (zone, seconds, low_bpm) rows."""
+    pooled set of) Garmin (zone, seconds, low_bpm) rows. lt1 overrides the
+    LT1_FRACTION_OF_LTHR estimate when the user has a measured value."""
     bounds = {z: lo for z, _, lo in zone_rows if lo is not None} or fallback_bounds
     if not lthr or len(bounds) < len({z for z, _, _ in zone_rows}):
         easy = sum(s for z, s, _ in zone_rows if z <= 2)
@@ -432,7 +442,8 @@ def three_zone_seconds(zone_rows: list[tuple[int, float, float | None]], lthr: f
         hard = sum(s for z, s, _ in zone_rows if z >= 4)
         return easy, moderate, hard, "garmin_5zone"
 
-    lt1, lt2 = LT1_FRACTION_OF_LTHR * lthr, lthr
+    lt2 = lthr
+    lt1 = lt1 if lt1 and lt1 < lt2 else LT1_FRACTION_OF_LTHR * lthr
     zones = sorted(bounds)
     easy = moderate = hard = 0.0
     for z, secs, _ in zone_rows:
@@ -471,19 +482,25 @@ def intensity_distribution_from_db(conn: sqlite3.Connection, date_str: str, wind
         (date_str, date_str, f"-{window_days} days"),
     ).fetchall()
     zone_rows = [(int(z), s or 0.0, lo) for z, s, lo in rows]
+    lthr, lt1 = _latest_lthr(conn, date_str), _lt1_setting(conn)
     easy, moderate, hard, model = three_zone_seconds(
-        zone_rows, _latest_lthr(conn, date_str), _latest_zone_bounds(conn))
+        zone_rows, lthr, _latest_zone_bounds(conn), lt1)
     total = easy + moderate + hard
     if total <= 0:
         return {"easy_pct": None, "moderate_pct": None, "hard_pct": None, "grey_zone_flag": None,
                 "model": None, "detail": "no zone data in window"}
 
+    lt1_used = None
+    if model == "lthr_3zone":
+        lt1_used = lt1 if lt1 and lt1 < lthr else round(LT1_FRACTION_OF_LTHR * lthr)
     return {
         "easy_pct": round(easy / total * 100, 1),
         "moderate_pct": round(moderate / total * 100, 1),
         "hard_pct": round(hard / total * 100, 1),
         "grey_zone_flag": (moderate / total) > 0.30,
         "model": model,
+        "lt1_hr": lt1_used,
+        "lt1_source": None if lt1_used is None else ("setting" if lt1 and lt1 < lthr else "estimated"),
         "detail": None,
     }
 

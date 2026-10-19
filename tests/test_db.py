@@ -81,3 +81,21 @@ def test_upsert_raw_payload(tmp_db):
     assert row[0] == "garmin"
     assert row[1] == "daily_summary"
     conn.close()
+
+
+def test_migrate_lactate_threshold_pace_fixes_tenfold_values(tmp_path):
+    from app.db import get_connection, init_db
+    path = tmp_path / "m.db"
+    init_db(path)
+    conn = get_connection(path)
+    conn.execute("INSERT INTO raw_daily_metrics(date, source, metric, value, fetched_at) "
+                 "VALUES ('2026-10-06', 'garmin', 'lactate_threshold_pace_min_per_km', 43.8, 'x')")
+    conn.execute("INSERT INTO daily_metrics(date, lactate_threshold_pace_min_per_km) VALUES ('2026-10-06', 43.8)")
+    conn.commit()
+    conn.close()
+    init_db(path)
+    init_db(path)  # idempotent
+    conn = get_connection(path)
+    assert conn.execute("SELECT value FROM raw_daily_metrics").fetchone()[0] == 4.38
+    assert conn.execute("SELECT lactate_threshold_pace_min_per_km FROM daily_metrics").fetchone()[0] == 4.38
+    conn.close()
