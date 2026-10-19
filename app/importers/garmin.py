@@ -834,7 +834,11 @@ def _parse_hr_zones(data: Any) -> list[dict]:
     out = []
     for row in rows:
         zone = row.get("zoneNumber") or row.get("zone")
-        secs = row.get("secsInZone") or row.get("secondsInZone")
+        # Not `or`: a zone with 0.0 seconds is falsy but must still be stored, since its
+        # zoneLowBoundary is what the three-zone split needs to bound the zone below it.
+        secs = row.get("secsInZone")
+        if secs is None:
+            secs = row.get("secondsInZone")
         low = row.get("zoneLowBoundary")
         if zone and secs is not None:
             out.append({"zone": int(zone), "seconds": float(secs),
