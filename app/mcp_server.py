@@ -15,12 +15,14 @@ The login page lives at /mcp-auth/login on the main FastAPI app.
 
 import asyncio
 import functools
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import json
 import math
 import os
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -709,6 +711,31 @@ def log_note(description: str, ts: Optional[str] = None) -> str:
             (event_ts, "note", description, utc_now()),
         )
     return f"Logged note at {event_ts}: {description}"
+
+
+ROUTINES_DIR = Path(__file__).parent / "routines"
+
+
+def _routine_names() -> list[str]:
+    return sorted(p.stem for p in ROUTINES_DIR.glob("*.md"))
+
+
+@mcp.tool()
+def get_routine_instructions(name: str) -> dict:
+    """Return the version-controlled instructions for an automated routine (e.g.
+    "daily_workout"). Routines keep only a short bootstrap prompt (recipient, home
+    timezone) and fetch their real instructions here, so instructions ship and are
+    reviewed together with the tools and fields they reference. Follow the returned
+    `instructions` exactly. Unknown names return an error listing the available ones."""
+    if name not in _routine_names():
+        return {"error": f"unknown routine {name!r}", "available": _routine_names()}
+    path = ROUTINES_DIR / f"{name}.md"
+    text = path.read_text(encoding="utf-8")
+    return {
+        "name": name,
+        "version": hashlib.sha256(text.encode()).hexdigest()[:12],
+        "instructions": text,
+    }
 
 
 @mcp.tool()

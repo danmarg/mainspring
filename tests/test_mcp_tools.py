@@ -627,3 +627,51 @@ def test_workout_context_reports_zone_source_and_checks():
     assert result["today"]["hr_zones_source"] == "garmin"
     z2 = next(z for z in result["today"]["hr_zones"] if z["zone"] == 2)
     assert (z2["min_bpm"], z2["max_bpm"]) == (111, 126)
+
+
+# ── routine instructions ─────────────────────────────────────────────────────
+
+def test_get_routine_instructions_returns_text_and_version():
+    from app.mcp_server import get_routine_instructions
+    r = get_routine_instructions("daily_workout")
+    assert "claim_daily_recommendation" in r["instructions"]
+    assert len(r["version"]) == 12
+
+
+def test_get_routine_instructions_rejects_unknown_and_traversal():
+    from app.mcp_server import get_routine_instructions
+    for name in ("nope", "../schema", "daily_workout.md"):
+        r = get_routine_instructions(name)
+        assert "error" in r and "daily_workout" in r["available"]
+
+
+def test_routines_reference_only_real_mainspring_tools():
+    """Every `Mainspring:<tool>` a routine names must exist, so renaming a tool can't
+    silently break a routine."""
+    import re
+    from app.mcp_server import ROUTINES_DIR, mcp
+    tools = set(mcp._tool_manager._tools)
+    for path in ROUTINES_DIR.glob("*.md"):
+        referenced = set(re.findall(r"Mainspring:([a-z_]+)", path.read_text()))
+        assert referenced, path
+        assert referenced <= tools, (path.name, referenced - tools)
+
+
+def test_routines_reference_real_workout_context_fields():
+    from app.mcp_server import ROUTINES_DIR
+    import inspect
+    import app.mcp_server as m
+    src = inspect.getsource(m)
+    text = (ROUTINES_DIR / "daily_workout.md").read_text()
+    for field in ("hr_zones_source", "consistency_checks", "hr_zones", "illness_risk"):
+        assert field in text and f'"{field}"' in src
+
+
+def test_routines_contain_no_personal_details():
+    """The repo is public: routines get recipient/home details from the routine's own
+    prompt, never from this file."""
+    import re
+    from app.mcp_server import ROUTINES_DIR
+    for path in ROUTINES_DIR.glob("*.md"):
+        text = path.read_text()
+        assert not re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", text), path.name

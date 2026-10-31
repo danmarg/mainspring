@@ -346,9 +346,9 @@ def _hrv_overnight_from_intraday(conn, date_str: str, source: str, duration_min:
 #      LTHR but no zone-tagged activities yet.
 #   3. "hrmax": standard %HRmax bands, but from a robust ceiling (95th percentile of
 #      daily max HR over 180 days) rather than the raw rolling max. A single optical or
-#      strap spike used to set the raw max to ~190 and push every band up (Z2 114-133
-#      instead of Garmin's 111-126), which made "easy" runs read as easy when they
-#      weren't — same failure readiness.hr_ceiling already guards against.
+#      strap spike used to set the raw max and push every band up by several bpm,
+#      which made "easy" runs read as easy when they weren't — same failure
+#      readiness.hr_ceiling already guards against.
 _HR_ZONE_BANDS = [
     (1, 0.50, 0.60),
     (2, 0.60, 0.70),
@@ -357,8 +357,7 @@ _HR_ZONE_BANDS = [
     (5, 0.90, 1.00),
 ]
 
-# Lower bounds as a fraction of LTHR. Matches the zones Garmin computes for an
-# LTHR-based account on this data (floors 95/111/127/143/161 at LTHR 162): zone 5
+# Lower bounds as a fraction of LTHR, approximating Garmin's LTHR-based zones: zone 5
 # starts at threshold, zone 2 tops out around 78% of LTHR.
 _LTHR_ZONE_FLOORS = [(1, 0.59), (2, 0.685), (3, 0.785), (4, 0.885), (5, 0.995)]
 

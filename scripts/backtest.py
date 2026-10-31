@@ -10,8 +10,8 @@ have shown: readiness score/label, HR zones and their source, the three-zone int
 split, Garmin's load focus verdict, and the consistency checks. It prints the days
 where Mainspring and Garmin disagree plus a summary, so a change to readiness,
 zones or the intensity model can be checked against real history before it ships.
-The summer-2026 regression (weeks of "grey zone" while Garmin reported a high-aerobic
-shortage) shows up here as a run of intensity_vs_garmin_load_focus conflicts.
+A stretch of "grey zone" days while Garmin reports a high-aerobic shortage shows up
+here as a run of intensity_vs_garmin_load_focus conflicts.
 """
 
 from __future__ import annotations

@@ -819,9 +819,9 @@ def _hrv_method(source_flags_json: str | None) -> str:
     """Which HRV methodology produced a day's value. Baselines only compare like with
     like: Garmin's overnight HRV, Google Health's all-day rollup, and the overnight
     recompute from Google Health intraday samples ("google_health_intraday") are three
-    different scales. The intraday recompute is overnight-only like Garmin's but reads
-    far lower on the same nights (~22 ms vs Garmin's ~33 ms here), so mixing it into a
-    Garmin baseline turned a source switch into a fake HRV crash. Days without a flag
+    different scales. The intraday recompute is overnight-only like Garmin's but can read
+    roughly a third lower on the same nights, so mixing it into a Garmin baseline turns
+    a source switch into a fake HRV crash. Days without a flag
     are Garmin (first in DEFAULT_SOURCE_PRIORITY)."""
     return _source_flag(source_flags_json, "hrv") or "garmin"
 
@@ -1558,9 +1558,9 @@ def trimp_from_hr_samples(
 #
 # Mainspring's derived signals and Garmin's own analysis are computed independently.
 # When they contradict each other, at least one is wrong, and a coach acting on either
-# alone can drift for weeks: in summer 2026 Mainspring flagged "too much grey zone"
-# for ~7 weeks while Garmin flagged a high-aerobic (threshold) shortage the whole time,
-# and the coaching routine kept cutting intensity. These checks surface the conflict
+# alone can drift for weeks — e.g. Mainspring flagging "too much grey zone" while
+# Garmin flags a high-aerobic (threshold) shortage, with the coaching routine cutting
+# intensity on the former. These checks surface the conflict
 # in the same payload so it's seen the day it starts.
 
 def _is_high_aerobic_shortage(feedback: str | None) -> bool:
