@@ -579,3 +579,51 @@ def test_amend_log_rejects_wrong_unit_and_unitless_macros():
     log_meal(description="oats")
     meal_id = get_logs(start_date=str(date.today()), end_date=str(date.today()))[0]["id"]
     assert amend_log(log_id=meal_id, estimated_macros={"carbs": 50}).startswith("Error")
+
+
+# ── claim_daily_recommendation ────────────────────────────────────────────────
+
+def test_claim_daily_recommendation_only_once():
+    from app.mcp_server import claim_daily_recommendation
+    first = claim_daily_recommendation(date="2026-11-02")
+    second = claim_daily_recommendation(date="2026-11-02")
+    assert first["claimed"] is True
+    assert second["claimed"] is False
+    assert second["claimed_at"] == first["claimed_at"]
+    # A different kind or day is independent.
+    assert claim_daily_recommendation(date="2026-11-03")["claimed"] is True
+    assert claim_daily_recommendation(date="2026-11-02", kind="weekly_review")["claimed"] is True
+
+
+def test_claim_daily_recommendation_concurrent_callers():
+    from concurrent.futures import ThreadPoolExecutor
+    from app.mcp_server import claim_daily_recommendation
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: claim_daily_recommendation(date="2026-11-04"), range(8)))
+    assert sum(r["claimed"] for r in results) == 1
+
+
+def test_release_daily_recommendation_allows_retry():
+    from app.mcp_server import claim_daily_recommendation, release_daily_recommendation
+    assert claim_daily_recommendation(date="2026-11-05")["claimed"] is True
+    release_daily_recommendation(date="2026-11-05")
+    assert claim_daily_recommendation(date="2026-11-05")["claimed"] is True
+
+
+def test_workout_context_reports_zone_source_and_checks():
+    from app.mcp_server import get_workout_context
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    conn.execute("INSERT INTO daily_metrics(date, hrv, source_flags_json) VALUES ('2026-10-12', 33, '{}')")
+    conn.execute("INSERT INTO activities(date, start_time, type, garmin_activity_id) "
+                 "VALUES ('2026-10-11','2026-10-11T08:00:00Z','running','a1')")
+    for z, lo in {1: 95, 2: 111, 3: 127, 4: 143, 5: 161}.items():
+        conn.execute("INSERT INTO activity_hr_zones(activity_id, zone, seconds, low_bpm) VALUES ('a1',?,60,?)", (z, lo))
+    conn.commit()
+    from app.normalize import _rebuild_hr_zones
+    _rebuild_hr_zones(conn, "2026-10-12", 171)
+    conn.commit()
+    conn.close()
+    result = get_workout_context(date="2026-10-12")
+    assert result["today"]["hr_zones_source"] == "garmin"
+    z2 = next(z for z in result["today"]["hr_zones"] if z["zone"] == 2)
+    assert (z2["min_bpm"], z2["max_bpm"]) == (111, 126)

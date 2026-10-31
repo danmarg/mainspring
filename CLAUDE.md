@@ -94,6 +94,9 @@ delete_log(log_id)
 get_logs(start_date, end_date, type?)
 get_daily_metrics(start_date, end_date)
 get_suggested_workout(date?)
+get_workout_context(date?)                         # includes hr_zones_source + consistency_checks
+claim_daily_recommendation(date?, kind?)           # atomic once-per-day guard for webhook routines
+release_daily_recommendation(date?, kind?)
 get_source_config()
 set_source_preference(metric, source)
 ```

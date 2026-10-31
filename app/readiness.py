@@ -811,11 +811,19 @@ def _is_computed_rhr_flag(source_flags_json: str | None) -> bool:
 
 
 def _is_all_day_hrv_flag(source_flags_json: str | None) -> bool:
-    """True only for Google Health's raw daily rollup (a 24h aggregate) — Garmin's
-    hrv and the "google_health_intraday" recompute are both overnight-only and
-    comparable to each other; the raw google_health rollup isn't comparable to
-    either (see _hrv_overnight_from_intraday in normalize.py)."""
+    """True only for Google Health's raw daily rollup (a 24h aggregate)."""
     return _source_flag(source_flags_json, "hrv") == "google_health"
+
+
+def _hrv_method(source_flags_json: str | None) -> str:
+    """Which HRV methodology produced a day's value. Baselines only compare like with
+    like: Garmin's overnight HRV, Google Health's all-day rollup, and the overnight
+    recompute from Google Health intraday samples ("google_health_intraday") are three
+    different scales. The intraday recompute is overnight-only like Garmin's but reads
+    far lower on the same nights (~22 ms vs Garmin's ~33 ms here), so mixing it into a
+    Garmin baseline turned a source switch into a fake HRV crash. Days without a flag
+    are Garmin (first in DEFAULT_SOURCE_PRIORITY)."""
+    return _source_flag(source_flags_json, "hrv") or "garmin"
 
 
 def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> dict:
@@ -829,11 +837,12 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
     ).fetchone()
 
     hrv = sleep_score = rhr = None
-    today_rhr_computed = today_hrv_all_day = False
+    today_rhr_computed = False
+    today_hrv_method = "garmin"
     if row:
         hrv, sleep_score, rhr, today_flags = row
         today_rhr_computed = _is_computed_rhr_flag(today_flags)
-        today_hrv_all_day = _is_all_day_hrv_flag(today_flags)
+        today_hrv_method = _hrv_method(today_flags)
 
     trailing = conn.execute(
         """SELECT hrv, resting_hr, source_flags_json FROM daily_metrics
@@ -846,7 +855,7 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
     # on methodology-transition days, not real signal.
     hrv_values_7d = [
         r[0] for r in trailing
-        if r[0] is not None and _is_all_day_hrv_flag(r[2]) == today_hrv_all_day
+        if r[0] is not None and _hrv_method(r[2]) == today_hrv_method
     ]
     rhr_values_7d = [
         r[1] for r in trailing
@@ -855,7 +864,7 @@ def readiness_from_db(conn: sqlite3.Connection, date_str: str | None = None) -> 
     hrv_7d = sum(hrv_values_7d) / len(hrv_values_7d) if hrv_values_7d else None
     rhr_7d = sum(rhr_values_7d) / len(rhr_values_7d) if rhr_values_7d else None
     hrv_cv = _ln_rmssd_cv(hrv_values_7d + ([hrv] if hrv is not None else []))
-    hrv_z = _hrv_rolling_z(conn, date_str, today_hrv_all_day)
+    hrv_z = _hrv_rolling_z(conn, date_str, today_hrv_method)
     rhr_sd = _rhr_sd(conn, date_str, today_rhr_computed)
 
     sleep_rows = conn.execute(
@@ -898,7 +907,7 @@ RHR_SD_DAYS = 28
 RHR_SD_MIN_DAYS = 10
 
 
-def _hrv_rolling_z(conn: sqlite3.Connection, date_str: str, all_day: bool) -> float | None:
+def _hrv_rolling_z(conn: sqlite3.Connection, date_str: str, method: str | bool) -> float | None:
     """7-day rolling mean of ln(RMSSD) ending date_str, in SDs from the mean of the
     HRV_BASELINE_DAYS nights before it (Plews 2013). Methodology-matched like the 7-day
     baseline. None until there are >= 4 recent and HRV_BASELINE_MIN_NIGHTS baseline nights."""
@@ -907,10 +916,12 @@ def _hrv_rolling_z(conn: sqlite3.Connection, date_str: str, all_day: bool) -> fl
            WHERE date <= ? AND date > date(?, ?) AND hrv > 0""",
         (date_str, date_str, f"-{HRV_BASELINE_DAYS + 7} days"),
     ).fetchall()
+    if isinstance(method, bool):  # legacy call style: True = Google all-day rollup
+        method = "google_health" if method else "garmin"
     week_start = (date.fromisoformat(date_str) - timedelta(days=6)).isoformat()
     recent, baseline = [], []
     for d, v, flags in rows:
-        if _is_all_day_hrv_flag(flags) != all_day:
+        if _hrv_method(flags) != method:
             continue
         (recent if d >= week_start else baseline).append(math.log(v))
     if len(recent) < 4 or len(baseline) < HRV_BASELINE_MIN_NIGHTS:
@@ -1160,7 +1171,7 @@ def illness_risk_from_db(conn: sqlite3.Connection, date_str: str | None = None, 
 
     today_flags = window_rows[-1][4]
     today_rhr_computed = _is_computed_rhr_flag(today_flags)
-    today_hrv_all_day = _is_all_day_hrv_flag(today_flags)
+    today_hrv_method = _hrv_method(today_flags)
 
     window_start = (date.fromisoformat(date_str) - timedelta(days=window_days - 1)).isoformat()
     baseline_rows = conn.execute(
@@ -1170,7 +1181,7 @@ def illness_risk_from_db(conn: sqlite3.Connection, date_str: str | None = None, 
     ).fetchall()
     hrv_values = [
         r[0] for r in baseline_rows
-        if r[0] is not None and _is_all_day_hrv_flag(r[2]) == today_hrv_all_day
+        if r[0] is not None and _hrv_method(r[2]) == today_hrv_method
     ]
     rhr_values = [
         r[1] for r in baseline_rows
@@ -1194,7 +1205,9 @@ def illness_risk_from_db(conn: sqlite3.Connection, date_str: str | None = None, 
             "rhr": r[1],
             "rhr_baseline": rhr_baseline,
             "rhr_sd": rhr_sd,
-            "hrv": r[2],
+            # A window day measured by a different HRV method than the baseline
+            # can't be compared to it (see _hrv_method) — leave it out.
+            "hrv": r[2] if _hrv_method(r[4]) == today_hrv_method else None,
             "hrv_baseline": hrv_baseline,
             "hrv_log_sd": hrv_log_sd,
             "skin_temp_deviation": r[3],
@@ -1539,3 +1552,103 @@ def trimp_from_hr_samples(
         hrr = min(1.0, max(0.0, (bpm - resting_hr) / reserve))
         weighted.append(hrr * math.exp(k * hrr))
     return round(duration_minutes * sum(weighted) / len(weighted), 2)
+
+
+# ── cross-source consistency checks ──────────────────────────────────────────
+#
+# Mainspring's derived signals and Garmin's own analysis are computed independently.
+# When they contradict each other, at least one is wrong, and a coach acting on either
+# alone can drift for weeks: in summer 2026 Mainspring flagged "too much grey zone"
+# for ~7 weeks while Garmin flagged a high-aerobic (threshold) shortage the whole time,
+# and the coaching routine kept cutting intensity. These checks surface the conflict
+# in the same payload so it's seen the day it starts.
+
+def _is_high_aerobic_shortage(feedback: str | None) -> bool:
+    fb = (feedback or "").upper()
+    return "SHORTAGE" in fb and "HIGH" in fb and "AEROBIC" in fb
+
+
+def _is_any_shortage(feedback: str | None) -> bool:
+    return "SHORTAGE" in (feedback or "").upper()
+
+
+def consistency_checks(
+    readiness: dict | None,
+    garmin_training_readiness: float | None,
+    intensity_distribution: dict | None,
+    garmin_load_focus: dict | None,
+    hr_zones_source: str | None,
+    hrv_method_today: str | None = None,
+    hrv_method_usual: str | None = None,
+) -> list[dict]:
+    """Return [{check, status: 'conflict'|'warning', detail, guidance}] — only the
+    checks that fired. An empty list means the sources agree (or there's nothing to
+    compare)."""
+    out: list[dict] = []
+    near_race = bool(garmin_load_focus and garmin_load_focus.get("near_race"))
+    feedback = (garmin_load_focus or {}).get("feedback")
+
+    if intensity_distribution and intensity_distribution.get("grey_zone_flag") and \
+            _is_high_aerobic_shortage(feedback) and not near_race:
+        out.append({
+            "check": "intensity_vs_garmin_load_focus",
+            "status": "conflict",
+            "detail": (f"Mainspring flags grey-zone drift (moderate "
+                       f"{intensity_distribution.get('moderate_pct')}%) but Garmin reports "
+                       f"{feedback}: too little threshold-type work."),
+            "guidance": "Don't cut intensity on grey_zone_flag alone. Garmin's load focus is "
+                        "interval-aware; trust it for 'is there enough hard work?' and "
+                        "check the LT1 setting behind the grey-zone split.",
+        })
+
+    sessions = (intensity_distribution or {}).get("sessions") or {}
+    if _is_any_shortage(feedback) and not near_race and \
+            (sessions.get("hard", 0) + sessions.get("moderate", 0)) == 0 and sessions:
+        out.append({
+            "check": "no_quality_sessions",
+            "status": "warning",
+            "detail": f"No tempo/threshold/interval sessions in the last 14 days and Garmin reports {feedback}.",
+            "guidance": "Outside a taper, a build needs 1-2 quality sessions per week; "
+                        "schedule one unless there's a red flag.",
+        })
+
+    if readiness and readiness.get("score") is not None and garmin_training_readiness is not None:
+        diff = readiness["score"] - garmin_training_readiness
+        if abs(diff) >= 25:
+            out.append({
+                "check": "readiness_vs_garmin",
+                "status": "conflict",
+                "detail": (f"Mainspring readiness {readiness['score']} ({readiness.get('label')}) vs "
+                           f"Garmin training readiness {garmin_training_readiness:.0f}."),
+                "guidance": "Look at the raw HRV/RHR/sleep numbers rather than either score.",
+            })
+
+    if hr_zones_source and hr_zones_source != "garmin":
+        out.append({
+            "check": "hr_zones_source",
+            "status": "warning",
+            "detail": f"HR zones are estimated ({hr_zones_source}), not the watch's own zones.",
+            "guidance": "Quote zone targets loosely; they may not match the watch's alerts.",
+        })
+
+    if hrv_method_today and hrv_method_usual and hrv_method_today != hrv_method_usual:
+        out.append({
+            "check": "hrv_source_switch",
+            "status": "warning",
+            "detail": (f"Today's HRV comes from {hrv_method_today}, not the usual "
+                       f"{hrv_method_usual}; the two read on different scales."),
+            "guidance": "Don't read today's HRV against recent nights; lean on RHR and sleep.",
+        })
+    return out
+
+
+def usual_hrv_method(conn: sqlite3.Connection, date_str: str, days: int = 28) -> str | None:
+    """Most common HRV methodology over the trailing window (today excluded)."""
+    counts: dict[str, int] = {}
+    for (flags,) in conn.execute(
+        "SELECT source_flags_json FROM daily_metrics WHERE date < ? AND date >= date(?, ?) AND hrv > 0",
+        (date_str, date_str, f"-{days} days"),
+    ):
+        m = _hrv_method(flags)
+        counts[m] = counts.get(m, 0) + 1
+    return max(counts, key=counts.get) if counts else None

@@ -1031,3 +1031,72 @@ def test_three_zone_fills_missing_own_bounds_from_fallback():
     partial = [(z, s, lo if z <= 3 else None) for z, s, lo in _REHEARSAL]
     fallback = {z: lo for z, _, lo in _REHEARSAL}
     assert three_zone_seconds(partial, 162.0, fallback)[3] == "lthr_3zone"
+
+
+def test_hrv_baseline_excludes_intraday_recompute_from_garmin_baseline():
+    """google_health_intraday HRV reads ~10ms below Garmin's on the same nights;
+    a day measured that way must not be scored against a Garmin baseline."""
+    import pathlib
+    import tempfile
+    from datetime import date, timedelta
+
+    from app.readiness import readiness_from_db
+    tmp = pathlib.Path(tempfile.mkdtemp()) / "t.db"
+    db_module.init_db(tmp)
+    conn = db_module.get_connection(tmp)
+    end = date(2026, 10, 25)
+    for i in range(1, 8):
+        d = (end - timedelta(days=i)).isoformat()
+        conn.execute("INSERT INTO daily_metrics(date, hrv, source_flags_json) VALUES (?,?,?)",
+                     (d, 33.0, json.dumps({"hrv": "garmin"})))
+    conn.execute("INSERT INTO daily_metrics(date, hrv, source_flags_json) VALUES (?,?,?)",
+                 (end.isoformat(), 21.7, json.dumps({"hrv": "google_health_intraday"})))
+    conn.commit()
+    result = readiness_from_db(conn, end.isoformat())
+    hrv = next((c for c in result["components"] if c["name"] == "HRV"), None)
+    # No comparable baseline: the HRV component is left out rather than scored as a -35% crash.
+    assert hrv is None
+
+
+def test_hrv_method_defaults_to_garmin():
+    from app.readiness import _hrv_method
+    assert _hrv_method(None) == "garmin"
+    assert _hrv_method("{}") == "garmin"
+    assert _hrv_method(json.dumps({"hrv": "google_health_intraday"})) == "google_health_intraday"
+
+
+# ── consistency checks ─────────────────────────────────────────────────────────
+
+def test_consistency_flags_grey_zone_vs_garmin_high_aerobic_shortage():
+    from app.readiness import consistency_checks
+    out = consistency_checks(
+        readiness={"score": 60, "label": "Moderate"},
+        garmin_training_readiness=None,
+        intensity_distribution={"grey_zone_flag": True, "moderate_pct": 58.0,
+                                "sessions": {"easy": 6, "moderate": 0, "hard": 0}},
+        garmin_load_focus={"feedback": "AEROBIC_HIGH_SHORTAGE", "near_race": False},
+        hr_zones_source="garmin",
+    )
+    checks = {c["check"]: c for c in out}
+    assert checks["intensity_vs_garmin_load_focus"]["status"] == "conflict"
+    assert "no_quality_sessions" in checks
+
+
+def test_consistency_quiet_near_race_and_when_sources_agree():
+    from app.readiness import consistency_checks
+    assert consistency_checks(
+        readiness={"score": 70, "label": "Ready"}, garmin_training_readiness=72,
+        intensity_distribution={"grey_zone_flag": True, "sessions": {"hard": 0, "moderate": 0}},
+        garmin_load_focus={"feedback": "AEROBIC_HIGH_SHORTAGE", "near_race": True},
+        hr_zones_source="garmin", hrv_method_today="garmin", hrv_method_usual="garmin",
+    ) == []
+
+
+def test_consistency_flags_readiness_gap_estimated_zones_and_hrv_switch():
+    from app.readiness import consistency_checks
+    out = consistency_checks(
+        readiness={"score": 40, "label": "Low"}, garmin_training_readiness=80,
+        intensity_distribution=None, garmin_load_focus=None, hr_zones_source="hrmax",
+        hrv_method_today="google_health_intraday", hrv_method_usual="garmin",
+    )
+    assert {c["check"] for c in out} == {"readiness_vs_garmin", "hr_zones_source", "hrv_source_switch"}
