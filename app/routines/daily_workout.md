@@ -14,10 +14,10 @@ Call `Mainspring:get_daily_metrics` with start_date and end_date both set to tod
 
 ## Step 0.5: Claim today's run (duplicate guard)
 
-This routine is fired by a webhook that can fire more than once a day, sometimes at the same moment. Call `Mainspring:claim_daily_recommendation()` (defaults: today, kind "daily_workout").
+This routine is fired by a webhook that can fire more than once a day, sometimes at the same moment. Call `Mainspring:claim_daily_recommendation(date=<the same local date used in Step 0>)` (kind defaults to "daily_workout"). Always pass the date: the server's own default is its UTC date, which can differ from the athlete's local date around midnight.
 
 - If it returns `claimed: false`, another run already owns today. **Exit immediately and silently.**
-- If it returns `claimed: true`, continue. If anything later fails **before the email is sent**, call `Mainspring:release_daily_recommendation()` before exiting so a later run can retry. Never release after sending.
+- If it returns `claimed: true`, continue. If anything later fails **before the email is sent**, call `Mainspring:release_daily_recommendation(date=<same date>)` before exiting so a later run can retry. Never release after sending.
 
 Do not use a Gmail "already sent?" search as the guard: concurrent runs all pass it before either sends.
 
@@ -80,4 +80,4 @@ Optional short parenthetical on the same line if something drove the call. Optio
 ### 5. Constraints
 - If Mainspring or Garmin data is unavailable or incomplete (but sleep data is present), default to a conservative easy run (30–40 min, zone 2) or rest, never a quality session, and say what was missing.
 - Send directly; never leave a draft.
-- If sending fails, call `Mainspring:release_daily_recommendation()` before exiting.
+- If sending fails, call `Mainspring:release_daily_recommendation(date=<same date>)` before exiting.
