@@ -15,12 +15,14 @@ The login page lives at /mcp-auth/login on the main FastAPI app.
 
 import asyncio
 import functools
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import json
 import math
 import os
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -610,7 +612,8 @@ def get_daily_metrics(
 @_clean_and_prune
 def get_suggested_workout(date: Optional[str] = None) -> dict | None:
     """Return Garmin's suggested workout for a given date (YYYY-MM-DD, defaults to today),
-    plus the training-load context behind it: Garmin's own training_readiness alongside
+    plus the training-load context behind it: Garmin's own training_readiness (only on
+    watches with that feature; omitted otherwise) alongside
     this service's own composite readiness score (HRV incl. day-to-day variability,
     debt-adjusted sleep, resting HR, and acute:chronic load — see app/readiness.py), plus a
     trailing-window illness/physiological-stress signal (RHR/HRV/skin-temp
@@ -708,6 +711,67 @@ def log_note(description: str, ts: Optional[str] = None) -> str:
             (event_ts, "note", description, utc_now()),
         )
     return f"Logged note at {event_ts}: {description}"
+
+
+ROUTINES_DIR = Path(__file__).parent / "routines"
+
+
+def _routine_names() -> list[str]:
+    return sorted(p.stem for p in ROUTINES_DIR.glob("*.md"))
+
+
+@mcp.tool()
+def get_routine_instructions(name: str) -> dict:
+    """Return the version-controlled instructions for an automated routine (e.g.
+    "daily_workout"). Routines keep only a short bootstrap prompt (recipient, home
+    timezone) and fetch their real instructions here, so instructions ship and are
+    reviewed together with the tools and fields they reference. Follow the returned
+    `instructions` exactly. Unknown names return an error listing the available ones."""
+    if name not in _routine_names():
+        return {"error": f"unknown routine {name!r}", "available": _routine_names()}
+    path = ROUTINES_DIR / f"{name}.md"
+    text = path.read_text(encoding="utf-8")
+    return {
+        "name": name,
+        "version": hashlib.sha256(text.encode()).hexdigest()[:12],
+        "instructions": text,
+    }
+
+
+@mcp.tool()
+def claim_daily_recommendation(date: Optional[str] = None, kind: str = "daily_workout",
+                               note: Optional[str] = None) -> dict:
+    """Atomically claim today's recommendation so it's produced exactly once.
+
+    Call this FIRST in a routine that may fire more than once a day (webhooks retry and
+    syncs repeat). Returns {"claimed": true} to exactly one caller per (date, kind); every
+    later or concurrent caller gets {"claimed": false, "claimed_at": ...} and should stop
+    without sending anything. A Gmail "already sent?" check can't do this: concurrent runs
+    all pass it before any of them sends. date is YYYY-MM-DD (defaults to today)."""
+    d = _date_or_today(date)
+    now = utc_now()
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO recommendation_claims(date, kind, claimed_at, note) VALUES (?,?,?,?)",
+            (d, kind, now, note),
+        )
+        claimed = cur.rowcount == 1
+        row = conn.execute(
+            "SELECT claimed_at FROM recommendation_claims WHERE date=? AND kind=?", (d, kind)
+        ).fetchone()
+    return {"date": d, "kind": kind, "claimed": claimed, "claimed_at": row[0] if row else now}
+
+
+@mcp.tool()
+def release_daily_recommendation(date: Optional[str] = None, kind: str = "daily_workout") -> str:
+    """Undo a claim — only when the claiming run failed before sending anything, so a
+    later run can retry. date is YYYY-MM-DD (defaults to today)."""
+    d = _date_or_today(date)
+    with db() as conn:
+        n = conn.execute(
+            "DELETE FROM recommendation_claims WHERE date=? AND kind=?", (d, kind)
+        ).rowcount
+    return f"Released {kind} for {d}" if n else f"No {kind} claim for {d}"
 
 
 @mcp.tool()
@@ -1023,12 +1087,15 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     from app.analysis import compute_correlations
     from app.readiness import (
         decoupling_trend_from_db,
+        _hrv_method,
+        consistency_checks,
         garmin_load_focus_from_db,
         illness_risk_from_db,
         intensity_distribution_from_db,
         readiness_from_db,
         sleep_regularity_from_db,
         training_monotony_strain,
+        usual_hrv_method,
     )
     from datetime import date as date_cls, timedelta
 
@@ -1052,8 +1119,10 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             (d,),
         ).fetchone()
 
+        # Latest zone set on/before d: today's row may not be rebuilt yet at plan time.
         hr_zone_rows = conn.execute(
-            "SELECT zone, min_bpm, max_bpm FROM hr_zones WHERE date=? ORDER BY zone",
+            """SELECT zone, min_bpm, max_bpm, source FROM hr_zones
+               WHERE date = (SELECT MAX(date) FROM hr_zones WHERE date <= ?) ORDER BY zone""",
             (d,),
         ).fetchall()
 
@@ -1063,11 +1132,17 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
             ((today_obj - timedelta(days=3)).isoformat(), d),
         ).fetchall()
 
-        hrv_rows = conn.execute(
-            "SELECT date, hrv FROM daily_metrics WHERE date <= ? AND hrv IS NOT NULL "
+        # Trend only within one HRV methodology (see readiness._hrv_method): the most
+        # recent night's method decides, other-method nights are dropped.
+        hrv_rows_all = conn.execute(
+            "SELECT date, hrv, source_flags_json FROM daily_metrics WHERE date <= ? AND hrv IS NOT NULL "
             "ORDER BY date DESC LIMIT ?",
-            (d, hrv_window),
+            (d, hrv_window * 2),
         ).fetchall()
+        hrv_method_today = _hrv_method(hrv_rows_all[0][2]) if hrv_rows_all else None
+        hrv_rows = [
+            (r[0], r[1]) for r in hrv_rows_all if _hrv_method(r[2]) == hrv_method_today
+        ][:hrv_window]
 
         yest_row = conn.execute(
             "SELECT alcohol_units, caffeine_mg, calories_estimated FROM daily_metrics WHERE date=?",
@@ -1139,6 +1214,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
         decoupling_trend = decoupling_trend_from_db(conn, d)
         intensity_distribution = intensity_distribution_from_db(conn, d)
         garmin_load_focus = garmin_load_focus_from_db(conn, d)
+        hrv_method_usual = usual_hrv_method(conn, d)
 
     # ── today ────────────────────────────────────────────────────────────────
     today: dict = {}
@@ -1204,6 +1280,7 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     today["hr_zones"] = [
         {"zone": r[0], "min_bpm": r[1], "max_bpm": r[2]} for r in hr_zone_rows
     ]
+    today["hr_zones_source"] = hr_zone_rows[0][3] if hr_zone_rows else None
 
     recent_soreness = [
         {"date": r[0], "body_part": r[1], "severity": r[2], "notes": r[3]}
@@ -1260,6 +1337,16 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     # something to fix with extra hard sessions.
     if garmin_load_focus is not None:
         garmin_load_focus["near_race"] = bool(next_event and 0 <= next_event["days_away"] <= 14)
+
+    today["consistency_checks"] = consistency_checks(
+        readiness,
+        today.get("training_readiness"),
+        intensity_distribution,
+        garmin_load_focus,
+        today.get("hr_zones_source"),
+        hrv_method_today=hrv_method_today if today.get("hrv") is not None else None,
+        hrv_method_usual=hrv_method_usual,
+    )
 
     # ── aerobic efficiency trend ──────────────────────────────────────────────
     aerobic_efficiency = None
@@ -1364,13 +1451,20 @@ planning, and recommendations. The server never fetches weather or sends message
 
 ## Morning planning workflow
 
+0. If this runs from an automation that can fire more than once a day (webhook,
+   retries, repeated syncs), call `claim_daily_recommendation()` first and stop
+   silently unless it returns `claimed: true`. If the run then fails before sending,
+   call `release_daily_recommendation()` so a later run can retry.
+
 1. Call `get_workout_context()` — one call returns everything needed:
-   - today's HRV, sleep, stress, body battery, training readiness
+   - today's HRV, sleep, stress, body battery, and `training_readiness` (Garmin's own
+     score; device-dependent: it's absent on watches without the Training Readiness
+     feature, including many Forerunners. Use `readiness` instead when it's missing)
    - `readiness`: this service's own composite score (0-100, label Primed/Ready/
      Moderate/Low/Rest) blending HRV (7-day rolling average vs your 60-day normal range)
      + day-to-day HRV variability, debt-adjusted sleep (trailing ~10 nights, not just
      last night), resting HR (in SDs of your normal noise), and acute:chronic load —
-     independent of Garmin's own training_readiness, useful as a cross-check
+     independent of Garmin's own training_readiness (a cross-check when the watch has it)
    - HRV trend (improving/stable/declining over 7 days)
    - `form_pct`: form = (CTL − ATL) / CTL as a % (positive = fresh, negative =
      fatigued/building). Scale-free on purpose: Garmin's load units are in the hundreds
@@ -1382,7 +1476,15 @@ planning, and recommendations. The server never fetches weather or sends message
    - Garmin's suggested workout for today
    - personalized insights from historical correlations
    - last 7 activities
-   - `hr_zones`: personalized 5-zone bands derived from today's max_hr (%HRmax model)
+   - `hr_zones` + `hr_zones_source`: 5-zone HR bands. `"garmin"` = the watch's own
+     account zones (what its alerts and time-in-zone use), so quote these in workout
+     targets; `"lthr"` (anchored on lactate-threshold HR) and `"hrmax"` (%HRmax of a
+     robust max) are estimates for when Garmin's zones aren't known yet. An easy/Z2 run
+     means zone 2: below zone 3's floor
+   - `consistency_checks`: places where Mainspring's derived signals and Garmin's own
+     analysis disagree (empty list = they agree). A `"conflict"` means at least one
+     source is wrong: say so in the recommendation and don't act on the disputed
+     signal alone — see step 3 rule 0
    - `recovery_hours`, `sleep_breathing_rate`, `skin_temp_deviation`, `hydration_ml`,
      `lactate_threshold_hr`/`_pace`, `ftp_watts`, `sleep_need_min` (Garmin's need for the
      night just slept; `sleep_need_next_min` is for tonight) — see the metric table below
@@ -1429,12 +1531,29 @@ planning, and recommendations. The server never fetches weather or sends message
 2. Use `get_correlations()` periodically (weekly / when patterns are unclear) to surface
    which behaviours most affect recovery. Results feed the insights in `get_workout_context`.
 
-3. Recommend a workout. Consider in order:
+3. Recommend a workout. Rules that override the list below:
+   0. Read `consistency_checks` first. Never cut intensity on a signal that a check
+      marks as in conflict with Garmin (e.g. grey_zone_flag vs a Garmin high-aerobic
+      shortage): resolve it toward the interval-aware Garmin load focus.
+   1. Protect quality sessions. In a build (more than ~3 weeks from the goal race),
+      plan 1-2 quality sessions per week (threshold, tempo/marathon pace, intervals, or
+      a long run with a marathon-pace block). Being under the weekly km target is NEVER
+      a reason to replace one with an easy run: volume and intensity are separate
+      levers. Only a real red flag (illness_risk red, HRV below −1 SD for several days,
+      RPE 8+ yesterday, active soreness, sleep well short of need) moves it — and then
+      move it to another day rather than drop it.
+   2. Never schedule two quality days back to back; a long run near marathon pace
+      counts as one.
+   Then consider in order:
    a. form_pct: positive → fine to go hard; below about −30% → favour recovery
    b. HRV trend: declining → back off intensity; improving → good to build
    c. load_status: overreaching → rest or easy; detraining → safe to add load
    d. next_event weeks_away: taper starts ~2–3 weeks out; peak week ~4–6 weeks out
-   e. aerobic_efficiency trend: improving = adaptation working; declining = too much stress
+   e. aerobic_efficiency trend: improving = adaptation working. Declining is ambiguous:
+      it can mean accumulated fatigue, heat, or too LITTLE intensity (detraining from
+      weeks of easy-only running). Check garmin_load_focus and recent quality sessions
+      before reading it as "too much stress"; never use it alone to skip a planned
+      quality session
    f. yesterday_rpe: 8–10 → likely need easy day regardless of other signals
    g. recent_soreness: an active entry for the muscle group in question outweighs
       good numbers elsewhere — modify or substitute, don't push through it
@@ -1465,7 +1584,7 @@ planning, and recommendations. The server never fetches weather or sends message
 | form_pct | −10% to +25% | −30% to −10% | below −30% → high fatigue, rest (form_pct = 1 − training_load_ratio) |
 | training_load_ratio | 0.8–1.3 | 1.3–1.5 | >1.5 overreaching |
 | sleep_score | >75 | 60–75 | <60 compounds other signals |
-| training_readiness | >70 | 50–70 | <50 favour recovery |
+| training_readiness (only on watches with the feature; else null — use readiness.score) | >70 | 50–70 | <50 favour recovery |
 | readiness.score | ≥65 (Ready/Primed) | 50–65 (Moderate) | <50 → Low/Rest, favour recovery |
 | body_battery_high | >70 | 40–70 | <40 suggests poor recovery |
 | sleep_regularity.score | >80 | 70–80 (SRI) / 50–80 (spread) | <70 (SRI) / <50 (spread) → timing swinging by hours, a recovery drag on its own |
