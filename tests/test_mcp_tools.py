@@ -675,3 +675,9 @@ def test_routines_contain_no_personal_details():
     for path in ROUTINES_DIR.glob("*.md"):
         text = path.read_text()
         assert not re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", text), path.name
+        # Concrete personal numbers: HR bpm ranges, per-km paces, ISO dates, coordinates.
+        assert not re.search(r"\b\d{2,3}\s*[–-]\s*\d{3}\s*bpm", text), path.name
+        assert not re.search(r"\b\d:\d{2}\s*/\s*km", text), path.name
+        assert not re.search(r"\b20\d{2}-\d{2}-\d{2}\b", text), path.name
+        assert not re.search(r"-?\d{1,3}\.\d{3,},\s*-?\d{1,3}\.\d{3,}", text), path.name
+        assert not re.search(r"https?://", text), path.name
