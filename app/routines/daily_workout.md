@@ -81,16 +81,24 @@ Only if a device/calendar connector is available; otherwise go to step 4. Tool n
 - Rest day: schedule nothing.
 
 ### 4. Send the email
-Send directly with `Gmail:send_message` (not a draft) to **the recipient**, subject `Daily Workout`.
+Send directly with `Gmail:send_message` (not a draft) to **the recipient**, subject `Daily Workout`. Send an `htmlBody` using only `<b>`, `<p>`, `<br>`, `<ul>` and `<li>` (no headings, colors or styling), plus a plain-text `body` with the same content as a fallback. No greetings or sign-offs.
 
-First line, exactly one of:
-- `Target workout: [session, with zone or pace targets, e.g. "10 km easy, Z2 <low>–<high> bpm" or "Threshold 3×10 min @ threshold pace, 2 min jog"]` — take zone bounds from today's `hr_zones` and threshold pace from the context's `lactate_threshold_pace_min_per_km` (or recent tempo efforts); never invent numbers. Say so if `hr_zones_source` is an estimate rather than the device's own zones
-- `Target workout: Strength session (~30 min) — [loaded / plyometric emphasis]`
-- `Take a rest day`
+Layout (omit any optional section that has nothing to say):
 
-Optional short parenthetical on the same line if something drove the call. Optional second line for rationale: phase, quality sessions done/remaining this week, weather, any consistency conflict, recovery context. No greetings or sign-offs.
+**1. Headline (required)** — bold label, then exactly one of:
+- `<b>Target workout:</b> [session, with zone or pace targets, e.g. "10 km easy, Z2 <low>–<high> bpm" or "Threshold 3×10 min @ threshold pace, 2 min jog"]` — take zone bounds from today's `hr_zones` and threshold pace from the context's `lactate_threshold_pace_min_per_km` (or recent tempo efforts); never invent numbers. Put any one-line execution cue (e.g. a HR ceiling, "walk if HR drifts above it") on the next line, not in the headline.
+- `<b>Target workout:</b> Strength session (~30 min) — [loaded / plyometric emphasis]`
+- `<b>Take a rest day</b>`
+
+**2. Why (required)** — `<b>Why</b>` then 2–4 bullets, in this order, each starting with a bold label: **Phase** (where the athlete is relative to events), **Recovery** (readiness, resting HR vs baseline, sleep), **Quality** or **Week** (quality sessions done/remaining, volume vs target, and why a quality session was or wasn't chosen), and **Weather** only if it drove the call.
+
+**3. Heads-up (optional)** — `<b>Heads-up</b>` then bullets, only for things the athlete should discount or double-check: a `consistency_checks` conflict, estimated zones (say so when `hr_zones_source` is not the device's own), an HRV source switch, or missing data.
+
+**4. Calendar & watch (optional)** — one line: an existing calendar entry that was left untouched or replaced, or that nothing was pushed to a device.
+
+**5. Weather (one line)** — the conditions that matter, or "not checked".
 
 ### 5. Constraints
 - If Mainspring or device data is unavailable or incomplete (but sleep data is present), default to a conservative easy run (30–40 min, zone 2) or rest, never a quality session, and say what was missing.
-- Send directly; never leave a draft.
+- Send directly; never leave a draft. Use the step 4 layout; never invent sections.
 - If sending fails, call `Mainspring:release_daily_recommendation(token=<token>, date=<same date>)` before exiting.
