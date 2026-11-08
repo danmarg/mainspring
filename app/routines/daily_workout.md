@@ -32,7 +32,7 @@ This routine is fired by a webhook that can fire more than once a day, sometimes
 
 - If it returns `claimed: false`, another run already owns today. **Exit immediately and silently.**
 - If it returns `claimed: true`, keep the returned `token` and continue. If anything later fails **before the email is sent**, call `Mainspring:release_daily_recommendation(token=<token>, date=<same date>)` before exiting so a later run can retry. Never release after sending.
-- After the email is sent, call `Mainspring:complete_daily_recommendation(token=<token>, date=<same date>)`. The claim is a 30-minute lease: if a run dies without completing or releasing, a later run can take over once it expires. This is at-least-once, not exactly-once — a send that succeeded but whose completion was lost can be repeated.
+- After the email is sent, call `Mainspring:complete_daily_recommendation(token=<token>, date=<same date>)`. The claim is a 2-hour lease, far longer than a normal run, and is not renewed: if a run dies without completing or releasing, a later run can take over once it expires (and a run that somehow outlives the lease could be duplicated). This is at-least-once, not exactly-once — a send that succeeded but whose completion was lost can be repeated.
 
 Do not use a Gmail "already sent?" search as the guard: concurrent runs all pass it before either sends.
 

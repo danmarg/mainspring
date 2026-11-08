@@ -95,7 +95,7 @@ get_logs(start_date, end_date, type?)
 get_daily_metrics(start_date, end_date)
 get_suggested_workout(date?)
 get_workout_context(date?)                         # includes hr_zones_source + consistency_checks
-claim_daily_recommendation(date?, kind?)           # atomic 30-min lease per (date, kind); returns an owner token
+claim_daily_recommendation(date?, kind?)           # atomic 2-hour lease per (date, kind); returns an owner token
 complete_daily_recommendation(token, date?, kind?)  # mark sent; the claim then never expires
 release_daily_recommendation(token, date?, kind?)   # owner-only undo if the run failed before sending
 get_source_config()

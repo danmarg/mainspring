@@ -190,10 +190,17 @@ def _sleep_debt_score(nights: list[tuple[str, float]], half_life_days: float = 2
     return weighted_sum / total_weight if total_weight > 0 else None
 
 
+MIN_MAX_HR_OBSERVATIONS = 20  # ~3 weeks of daily peaks
+
+
 def robust_max_hr(conn: sqlite3.Connection, date_str: str, todays_max_hr: float | None = None,
-                  window_days: int = 180, min_credible: float = 150.0) -> float | None:
+                  window_days: int = 180, min_credible: float = 150.0,
+                  min_observations: int = MIN_MAX_HR_OBSERVATIONS) -> float | None:
     """Spike-resistant estimate of max HR: the 95th percentile of daily max_hr over the
-    trailing window, or None without a credible peak (>= min_credible).
+    trailing window, or None without a credible peak (>= min_credible) or with fewer than
+    min_observations days of data. With few points the 95th percentile *is* the maximum
+    (five days -> the fifth-highest value), so one sensor spike would set the estimate;
+    better no estimate than a falsely confident one.
 
     This is an *estimate*, not a measured physiological max. A percentile resists single
     optical/strap spikes, but it also reads low for an athlete who rarely trains hard
@@ -212,7 +219,7 @@ def robust_max_hr(conn: sqlite3.Connection, date_str: str, todays_max_hr: float 
             (date_str, date_str, f"-{window_days} days"),
         ).fetchall()
         values = sorted([r[0] for r in rows] + [todays_max_hr])
-    if not values:
+    if len(values) < min_observations:
         return None
     peak = values[min(len(values) - 1, math.ceil(0.95 * (len(values) - 1)))]
     return float(peak) if peak >= min_credible else None

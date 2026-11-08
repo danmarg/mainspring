@@ -739,7 +739,10 @@ def get_routine_instructions(name: str) -> dict:
     }
 
 
-CLAIM_LEASE_MINUTES = 30
+# Comfortably longer than a routine run (data gathering + composing + sending takes a few
+# minutes); there is deliberately no renewal/heartbeat, so a run that outlives the lease
+# could be duplicated by a takeover.
+CLAIM_LEASE_MINUTES = 120
 
 
 @mcp.tool()
@@ -755,7 +758,7 @@ def claim_daily_recommendation(date: Optional[str] = None, kind: str = "daily_wo
     concurrent runs all pass it before any of them sends.
 
     The claim is a lease, not a permanent lock: if the claiming run dies before calling
-    complete_daily_recommendation(), the claim expires after lease_minutes and a later
+    complete_daily_recommendation(), the claim expires after lease_minutes (default 120, no renewal) and a later
     run can take it over (claimed: true, reclaimed: true). Keep the returned token and
     pass it to release_/complete_daily_recommendation. This is at-least-once, not
     exactly-once: if the email send succeeded but the run then failed to complete the
@@ -1510,7 +1513,7 @@ planning, and recommendations. The server never fetches weather or sends message
 0. If this runs from an automation that can fire more than once a day (webhook,
    retries, repeated syncs), call `claim_daily_recommendation()` first and stop
    silently unless it returns `claimed: true`; keep the returned `token`. The claim is a
-   30-minute lease: after sending, call `complete_daily_recommendation(token)`; if the
+   2-hour lease: after sending, call `complete_daily_recommendation(token)`; if the
    run fails before sending, call `release_daily_recommendation(token)` so a later run
    can retry. An unfinished claim expires and can be taken over. This is at-least-once,
    not exactly-once: a send that succeeded but whose completion was lost can repeat.

@@ -629,6 +629,9 @@ def test_hr_zones_use_rolling_max_not_todays_low_reading(tmp_db):
     """A rest-day max_hr of 108 shouldn't collapse zones down from a true peak
     of 190 seen earlier in the rolling window."""
     now = utc_now()
+    for i in range(25):  # enough history for a trustworthy ceiling
+        d = (date(2025, 5, 31) - timedelta(days=i)).isoformat()
+        tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (?, 190)", (d,))
     upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "max_hr", 190.0, now)
     tmp_db.commit()
     rebuild_daily_metrics(tmp_db, {"2025-06-01"})
@@ -647,6 +650,9 @@ def test_hr_zones_use_rolling_max_not_todays_low_reading(tmp_db):
 
 def test_hr_zones_derived_from_max_hr(tmp_db):
     now = utc_now()
+    for i in range(25):  # enough history for a trustworthy ceiling
+        d = (date(2025, 6, 30) - timedelta(days=i)).isoformat()
+        tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (?, 180)", (d,))
     upsert_raw_metric(tmp_db, "2025-07-01", "garmin", "max_hr", 180.0, now)
     tmp_db.commit()
     rebuild_daily_metrics(tmp_db)
