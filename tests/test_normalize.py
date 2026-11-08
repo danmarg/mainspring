@@ -820,3 +820,44 @@ def test_rebuild_hr_zones_replaces_legacy_rows(tmp_db):
 def test_zones_from_floors_top_zone_uses_ceiling():
     zones = zones_from_floors(GARMIN_FLOORS, ceiling=175)
     assert zones[-1] == {"zone": 5, "min_bpm": 161, "max_bpm": 175}
+
+
+def test_zones_prefer_one_complete_snapshot_over_a_per_zone_mix(tmp_db):
+    # Garmin's bounds changed. The newest run only has zones 1-3 (new config); an older
+    # run has all five (old config). The old complete set is the one that really existed
+    # on the watch; mixing new 1-3 with old 4-5 would invent a set that never did.
+    _add_zoned_activity(tmp_db, "old", "2026-09-01", {1: 90, 2: 105, 3: 120, 4: 135, 5: 150})
+    _add_zoned_activity(tmp_db, "new", "2026-10-10", {1: 95, 2: 111, 3: 127})
+    source, zones = resolve_hr_zones(tmp_db, "2026-10-12")
+    assert source == "garmin"
+    assert [z["min_bpm"] for z in zones] == [90, 105, 120, 135, 150]
+
+
+def test_zones_fall_back_to_per_zone_merge_when_no_complete_snapshot(tmp_db):
+    _add_zoned_activity(tmp_db, "hard", "2026-09-01", {4: 143, 5: 161})
+    _add_zoned_activity(tmp_db, "easy", "2026-10-10", {1: 95, 2: 111, 3: 127})
+    source, zones = resolve_hr_zones(tmp_db, "2026-10-12")
+    assert source == "garmin"
+    assert [z["min_bpm"] for z in zones] == [95, 111, 127, 143, 161]
+
+
+def test_rebuild_hr_zones_clears_stale_rows_when_nothing_resolves(tmp_db):
+    tmp_db.execute("INSERT INTO hr_zones(date, source, zone, min_bpm, max_bpm) "
+                   "VALUES ('2026-10-12','derived',2,114,133)")
+    _rebuild_hr_zones(tmp_db, "2026-10-12", None)  # no history, no LTHR, no max HR
+    assert tmp_db.execute("SELECT COUNT(*) FROM hr_zones WHERE date='2026-10-12'").fetchone()[0] == 0
+
+
+def test_resolve_hr_zones_matches_stored_row_when_given_todays_inputs(tmp_db):
+    # The backtest replays a day with that day's own max HR / LTHR; with them passed,
+    # resolving from a committed row must equal resolving mid-rebuild.
+    for i in range(30):
+        d = (date(2026, 9, 1) + timedelta(days=i)).isoformat()
+        tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (?, ?)", (d, 160 + i % 5))
+    tmp_db.execute("INSERT INTO daily_metrics(date, max_hr, lactate_threshold_hr) VALUES ('2026-10-01', 185, 170)")
+    mid_rebuild = resolve_hr_zones(tmp_db, "2026-10-01", todays_max_hr=185, todays_lthr=170)
+    replay = resolve_hr_zones(tmp_db, "2026-10-01", todays_max_hr=185.0, todays_lthr=170.0)
+    assert mid_rebuild == replay and mid_rebuild[0] == "lthr"
+    # ...and the row not being committed yet (the real rebuild path) gives the same zones.
+    tmp_db.execute("DELETE FROM daily_metrics WHERE date='2026-10-01'")
+    assert resolve_hr_zones(tmp_db, "2026-10-01", todays_max_hr=185, todays_lthr=170) == mid_rebuild

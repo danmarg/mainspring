@@ -21,6 +21,7 @@ import logging
 import json
 import math
 import os
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -738,40 +739,95 @@ def get_routine_instructions(name: str) -> dict:
     }
 
 
+CLAIM_LEASE_MINUTES = 30
+
+
 @mcp.tool()
 def claim_daily_recommendation(date: Optional[str] = None, kind: str = "daily_workout",
-                               note: Optional[str] = None) -> dict:
-    """Atomically claim today's recommendation so it's produced exactly once.
+                               note: Optional[str] = None,
+                               lease_minutes: int = CLAIM_LEASE_MINUTES) -> dict:
+    """Atomically claim today's recommendation so it's produced once.
 
     Call this FIRST in a routine that may fire more than once a day (webhooks retry and
-    syncs repeat). Returns {"claimed": true} to exactly one caller per (date, kind); every
-    later or concurrent caller gets {"claimed": false, "claimed_at": ...} and should stop
-    without sending anything. A Gmail "already sent?" check can't do this: concurrent runs
-    all pass it before any of them sends. date is YYYY-MM-DD (defaults to today)."""
+    syncs repeat). Returns {"claimed": true, "token": ...} to one caller per (date, kind);
+    every concurrent or later caller gets {"claimed": false, "status": ...} and should
+    stop without sending anything. A Gmail "already sent?" check can't do this:
+    concurrent runs all pass it before any of them sends.
+
+    The claim is a lease, not a permanent lock: if the claiming run dies before calling
+    complete_daily_recommendation(), the claim expires after lease_minutes and a later
+    run can take it over (claimed: true, reclaimed: true). Keep the returned token and
+    pass it to release_/complete_daily_recommendation. This is at-least-once, not
+    exactly-once: if the email send succeeded but the run then failed to complete the
+    claim, a takeover can send a duplicate. date is YYYY-MM-DD (defaults to today)."""
+    if not 0 <= lease_minutes <= 24 * 60:
+        raise ValueError("lease_minutes must be between 0 and 1440")
     d = _date_or_today(date)
-    now = utc_now()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    expires = (now_dt + timedelta(minutes=lease_minutes)).isoformat()
+    token = uuid.uuid4().hex
     with db() as conn:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO recommendation_claims(date, kind, claimed_at, note) VALUES (?,?,?,?)",
-            (d, kind, now, note),
+            "INSERT OR IGNORE INTO recommendation_claims"
+            "(date, kind, claimed_at, note, token, lease_expires_at) VALUES (?,?,?,?,?,?)",
+            (d, kind, now, note, token, expires),
         )
-        claimed = cur.rowcount == 1
+        if cur.rowcount == 1:
+            return {"date": d, "kind": kind, "claimed": True, "token": token,
+                    "claimed_at": now, "lease_expires_at": expires}
+        # Take over only an unfinished claim whose lease has run out; one UPDATE keeps
+        # that atomic when several runs find the same expired claim.
+        cur = conn.execute(
+            "UPDATE recommendation_claims SET token=?, claimed_at=?, note=?, lease_expires_at=? "
+            "WHERE date=? AND kind=? AND completed_at IS NULL "
+            "AND lease_expires_at IS NOT NULL AND lease_expires_at < ?",
+            (token, now, note, expires, d, kind, now),
+        )
+        if cur.rowcount == 1:
+            return {"date": d, "kind": kind, "claimed": True, "reclaimed": True, "token": token,
+                    "claimed_at": now, "lease_expires_at": expires}
         row = conn.execute(
-            "SELECT claimed_at FROM recommendation_claims WHERE date=? AND kind=?", (d, kind)
+            "SELECT claimed_at, completed_at, lease_expires_at FROM recommendation_claims "
+            "WHERE date=? AND kind=?", (d, kind),
         ).fetchone()
-    return {"date": d, "kind": kind, "claimed": claimed, "claimed_at": row[0] if row else now}
+    claimed_at, completed_at, lease_expires_at = row if row else (None, None, None)
+    return {"date": d, "kind": kind, "claimed": False, "claimed_at": claimed_at,
+            "status": "done" if completed_at else "in_progress",
+            "lease_expires_at": lease_expires_at}
 
 
 @mcp.tool()
-def release_daily_recommendation(date: Optional[str] = None, kind: str = "daily_workout") -> str:
-    """Undo a claim — only when the claiming run failed before sending anything, so a
-    later run can retry. date is YYYY-MM-DD (defaults to today)."""
+def complete_daily_recommendation(token: str, date: Optional[str] = None,
+                                  kind: str = "daily_workout") -> str:
+    """Mark a claim as done once the recommendation has been sent, so it can't be taken
+    over after its lease expires. token is the one claim_daily_recommendation returned;
+    a stale token (the claim was taken over) changes nothing."""
     d = _date_or_today(date)
     with db() as conn:
         n = conn.execute(
-            "DELETE FROM recommendation_claims WHERE date=? AND kind=?", (d, kind)
+            "UPDATE recommendation_claims SET completed_at=? "
+            "WHERE date=? AND kind=? AND token=? AND completed_at IS NULL",
+            (utc_now(), d, kind, token),
         ).rowcount
-    return f"Released {kind} for {d}" if n else f"No {kind} claim for {d}"
+    return f"Completed {kind} for {d}" if n else f"No open {kind} claim for {d} with that token"
+
+
+@mcp.tool()
+def release_daily_recommendation(token: str, date: Optional[str] = None,
+                                 kind: str = "daily_workout") -> str:
+    """Undo a claim — only when the claiming run failed before sending anything, so a
+    later run can retry at once instead of waiting for the lease to expire. token is the
+    one claim_daily_recommendation returned; only the current owner can release, so a
+    late release from an earlier run can't delete a later run's claim."""
+    d = _date_or_today(date)
+    with db() as conn:
+        n = conn.execute(
+            "DELETE FROM recommendation_claims "
+            "WHERE date=? AND kind=? AND token=? AND completed_at IS NULL",
+            (d, kind, token),
+        ).rowcount
+    return f"Released {kind} for {d}" if n else f"No open {kind} claim for {d} with that token"
 
 
 @mcp.tool()
@@ -1453,8 +1509,11 @@ planning, and recommendations. The server never fetches weather or sends message
 
 0. If this runs from an automation that can fire more than once a day (webhook,
    retries, repeated syncs), call `claim_daily_recommendation()` first and stop
-   silently unless it returns `claimed: true`. If the run then fails before sending,
-   call `release_daily_recommendation()` so a later run can retry.
+   silently unless it returns `claimed: true`; keep the returned `token`. The claim is a
+   30-minute lease: after sending, call `complete_daily_recommendation(token)`; if the
+   run fails before sending, call `release_daily_recommendation(token)` so a later run
+   can retry. An unfinished claim expires and can be taken over. This is at-least-once,
+   not exactly-once: a send that succeeded but whose completion was lost can repeat.
 
 1. Call `get_workout_context()` — one call returns everything needed:
    - today's HRV, sleep, stress, body battery, and `training_readiness` (Garmin's own
@@ -1479,7 +1538,8 @@ planning, and recommendations. The server never fetches weather or sends message
    - `hr_zones` + `hr_zones_source`: 5-zone HR bands. `"garmin"` = the watch's own
      account zones (what its alerts and time-in-zone use), so quote these in workout
      targets; `"lthr"` (anchored on lactate-threshold HR) and `"hrmax"` (%HRmax of a
-     robust max) are estimates for when Garmin's zones aren't known yet. An easy/Z2 run
+     95th-percentile of recent daily peaks, which reads low without recent hard efforts)
+     are estimates for when Garmin's zones aren't known yet — quote them loosely. An easy/Z2 run
      means zone 2: below zone 3's floor
    - `consistency_checks`: places where Mainspring's derived signals and Garmin's own
      analysis disagree (empty list = they agree). A `"conflict"` means at least one
@@ -1515,8 +1575,8 @@ planning, and recommendations. The server never fetches weather or sends message
      the time percentages for the easy vs moderate balance.
    - `garmin_load_focus`: Garmin's own 4-week load split (low aerobic / high aerobic /
      anaerobic), its target ranges, and its verdict (`feedback`, e.g. ANAEROBIC_SHORTAGE,
-     HIGH_AEROBIC_SHORTAGE, BALANCED). Load-based and interval-aware, so it's the better
-     "is there enough hard work?" signal; but "high aerobic" mixes threshold/marathon-pace
+     HIGH_AEROBIC_SHORTAGE, BALANCED). Load-based and interval-aware, so a useful
+     second opinion on "is there enough hard work?"; but "high aerobic" mixes threshold/marathon-pace
      running with VO2max work, so use intensity_distribution for the grey-zone question.
      When `near_race` is true (race within 14 days), a shortage verdict is the taper
      working — do NOT add hard sessions to fix it
@@ -1532,9 +1592,11 @@ planning, and recommendations. The server never fetches weather or sends message
    which behaviours most affect recovery. Results feed the insights in `get_workout_context`.
 
 3. Recommend a workout. Rules that override the list below:
-   0. Read `consistency_checks` first. Never cut intensity on a signal that a check
-      marks as in conflict with Garmin (e.g. grey_zone_flag vs a Garmin high-aerobic
-      shortage): resolve it toward the interval-aware Garmin load focus.
+   0. Read `consistency_checks` first. When a check shows two sources disagreeing,
+      neither is automatically right: look at the actual recent sessions and
+      `intensity_distribution`, and treat Garmin's load focus (interval-aware) as extra
+      evidence. In particular, don't cut intensity on `grey_zone_flag` alone while Garmin
+      reports a high-aerobic shortage.
    1. Protect quality sessions. In a build (more than ~3 weeks from the goal race),
       plan 1-2 quality sessions per week (threshold, tempo/marathon pace, intervals, or
       a long run with a marathon-pace block). Being under the weekly km target is NEVER

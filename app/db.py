@@ -198,6 +198,11 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         if col not in existing:
             conn.execute(f"ALTER TABLE activity_hr_zones ADD COLUMN {col} {col_type}")
 
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(recommendation_claims)")}
+    for col, col_type in (("token", "TEXT"), ("lease_expires_at", "TEXT"), ("completed_at", "TEXT")):
+        if existing and col not in existing:
+            conn.execute(f"ALTER TABLE recommendation_claims ADD COLUMN {col} {col_type}")
+
     existing = {row[1] for row in conn.execute("PRAGMA table_info(manual_logs)")}
     for col, col_type in _ADDED_MANUAL_LOGS_COLUMNS:
         if col not in existing:

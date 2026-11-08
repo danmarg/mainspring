@@ -325,10 +325,16 @@ CREATE INDEX IF NOT EXISTS idx_tool_call_log_tool_ts ON tool_call_log(tool, ts D
 -- atomic, so when the routine's webhook fires more than once (retries, repeated syncs)
 -- only the first run proceeds — a "has an email gone out today?" check can't do that,
 -- since concurrent runs all pass it before any of them sends.
+-- The claim is a lease owned by `token`: if the owner dies before setting completed_at,
+-- the claim becomes takeable once lease_expires_at passes, and only the current token can
+-- release or complete it. (Added columns are also applied by db._add_missing_columns.)
 CREATE TABLE IF NOT EXISTS recommendation_claims (
-  date       TEXT NOT NULL,
-  kind       TEXT NOT NULL,
-  claimed_at TEXT NOT NULL,
-  note       TEXT,
+  date             TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  claimed_at       TEXT NOT NULL,
+  note             TEXT,
+  token            TEXT,
+  lease_expires_at TEXT,
+  completed_at     TEXT,
   PRIMARY KEY (date, kind)
 );

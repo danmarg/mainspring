@@ -587,9 +587,10 @@ def test_claim_daily_recommendation_only_once():
     from app.mcp_server import claim_daily_recommendation
     first = claim_daily_recommendation(date="2026-11-02")
     second = claim_daily_recommendation(date="2026-11-02")
-    assert first["claimed"] is True
+    assert first["claimed"] is True and first["token"]
     assert second["claimed"] is False
-    assert second["claimed_at"] == first["claimed_at"]
+    assert "token" not in second  # a non-owner never learns the owner's token
+    assert second["claimed_at"] == first["claimed_at"] and second["status"] == "in_progress"
     # A different kind or day is independent.
     assert claim_daily_recommendation(date="2026-11-03")["claimed"] is True
     assert claim_daily_recommendation(date="2026-11-02", kind="weekly_review")["claimed"] is True
@@ -605,9 +606,55 @@ def test_claim_daily_recommendation_concurrent_callers():
 
 def test_release_daily_recommendation_allows_retry():
     from app.mcp_server import claim_daily_recommendation, release_daily_recommendation
+    c = claim_daily_recommendation(date="2026-11-05")
+    assert c["claimed"] is True
+    release_daily_recommendation(c["token"], date="2026-11-05")
     assert claim_daily_recommendation(date="2026-11-05")["claimed"] is True
-    release_daily_recommendation(date="2026-11-05")
-    assert claim_daily_recommendation(date="2026-11-05")["claimed"] is True
+
+
+def test_release_with_wrong_token_changes_nothing():
+    from app.mcp_server import claim_daily_recommendation, release_daily_recommendation
+    c = claim_daily_recommendation(date="2026-11-06")
+    assert "No open" in release_daily_recommendation("not-the-token", date="2026-11-06")
+    assert claim_daily_recommendation(date="2026-11-06")["claimed"] is False
+    assert "Released" in release_daily_recommendation(c["token"], date="2026-11-06")
+
+
+def test_expired_claim_can_be_taken_over_and_old_owner_is_locked_out():
+    from app.mcp_server import (claim_daily_recommendation, complete_daily_recommendation,
+                                release_daily_recommendation)
+    dead = claim_daily_recommendation(date="2026-11-07", lease_minutes=0)  # lease already over
+    taker = claim_daily_recommendation(date="2026-11-07")
+    assert taker["claimed"] is True and taker["reclaimed"] is True
+    assert taker["token"] != dead["token"]
+    # The first run wakes up late: its release/complete must not touch the new owner's claim.
+    assert "No open" in release_daily_recommendation(dead["token"], date="2026-11-07")
+    assert "No open" in complete_daily_recommendation(dead["token"], date="2026-11-07")
+    assert claim_daily_recommendation(date="2026-11-07")["claimed"] is False
+
+
+def test_live_lease_is_not_taken_over():
+    from app.mcp_server import claim_daily_recommendation
+    assert claim_daily_recommendation(date="2026-11-08", lease_minutes=30)["claimed"] is True
+    assert claim_daily_recommendation(date="2026-11-08")["claimed"] is False
+
+
+def test_completed_claim_never_expires():
+    from app.mcp_server import claim_daily_recommendation, complete_daily_recommendation, release_daily_recommendation
+    c = claim_daily_recommendation(date="2026-11-09", lease_minutes=0)
+    assert "Completed" in complete_daily_recommendation(c["token"], date="2026-11-09")
+    again = claim_daily_recommendation(date="2026-11-09")
+    assert again["claimed"] is False and again["status"] == "done"
+    assert "No open" in release_daily_recommendation(c["token"], date="2026-11-09")
+
+
+def test_concurrent_takeover_of_expired_claim_has_one_winner():
+    from concurrent.futures import ThreadPoolExecutor
+    from app.mcp_server import claim_daily_recommendation
+    claim_daily_recommendation(date="2026-11-10", lease_minutes=0)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: claim_daily_recommendation(date="2026-11-10"), range(8)))
+    assert sum(r["claimed"] for r in results) == 1
 
 
 def test_workout_context_reports_zone_source_and_checks():

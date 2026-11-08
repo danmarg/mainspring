@@ -208,7 +208,7 @@ def test_hrv_rolling_z_from_db():
         conn.execute("INSERT INTO daily_metrics(date, hrv, source_flags_json) VALUES (?,?,?)",
                      (d, hrv, "{}"))
     conn.commit()
-    z = _hrv_rolling_z(conn, end.isoformat(), False)
+    z = _hrv_rolling_z(conn, end.isoformat(), "garmin")
     conn.close()
     assert z is not None and z < -5
 
@@ -1100,3 +1100,33 @@ def test_consistency_flags_readiness_gap_estimated_zones_and_hrv_switch():
         hrv_method_today="google_health_intraday", hrv_method_usual="garmin",
     )
     assert {c["check"] for c in out} == {"readiness_vs_garmin", "hr_zones_source", "hrv_source_switch"}
+
+
+def test_hard_work_shortage_ignores_low_aerobic_shortage():
+    from app.readiness import consistency_checks
+    intensity = {"sessions": {"hard": 0, "moderate": 0, "easy": 6}}
+    low = consistency_checks(None, None, intensity, {"feedback": "LOW_AEROBIC_SHORTAGE"}, "garmin")
+    assert "no_quality_sessions" not in {c["check"] for c in low}
+    high = consistency_checks(None, None, intensity, {"feedback": "HIGH_AEROBIC_SHORTAGE"}, "garmin")
+    assert "no_quality_sessions" in {c["check"] for c in high}
+    anaerobic = consistency_checks(None, None, intensity, {"feedback": "ANAEROBIC_SHORTAGE"}, "garmin")
+    assert "no_quality_sessions" in {c["check"] for c in anaerobic}
+
+
+def test_hrmax_zone_warning_says_it_is_an_estimate():
+    from app.readiness import consistency_checks
+    out = consistency_checks(None, None, None, None, "hrmax")
+    assert "reads low" in out[0]["detail"]
+
+
+def test_robust_max_hr_is_the_single_ceiling_implementation(tmp_db):
+    from app.readiness import hr_ceiling, robust_max_hr
+    conn = sqlite3.connect(str(tmp_db))
+    for i in range(40):
+        conn.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (?, ?)",
+                     (f"2026-08-{i + 1:02d}" if i < 31 else f"2026-09-{i - 30:02d}", 150 + i % 10))
+    conn.commit()
+    assert robust_max_hr(conn, "2026-09-15") == hr_ceiling(conn, "2026-09-15")
+    assert robust_max_hr(conn, "2026-07-01") is None   # no history
+    assert hr_ceiling(conn, "2026-07-01") == 190.0      # load calc keeps its fallback
+    conn.close()

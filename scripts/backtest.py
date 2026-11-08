@@ -46,10 +46,13 @@ FIELDS = [
 def day_row(conn: sqlite3.Connection, d: str) -> dict:
     readiness = readiness_from_db(conn, d)
     metrics = conn.execute(
-        "SELECT training_readiness, hrv, source_flags_json FROM daily_metrics WHERE date=?", (d,)
+        "SELECT training_readiness, hrv, source_flags_json, max_hr, lactate_threshold_hr "
+        "FROM daily_metrics WHERE date=?", (d,)
     ).fetchone()
-    garmin_tr, hrv, flags = metrics if metrics else (None, None, None)
-    resolved = resolve_hr_zones(conn, d)
+    garmin_tr, hrv, flags, max_hr, lthr = metrics if metrics else (None, None, None, None, None)
+    # Same inputs the normalization job passes when it builds that day's zones, so the
+    # replay reproduces what was actually served rather than a day-earlier view.
+    resolved = resolve_hr_zones(conn, d, todays_max_hr=max_hr, todays_lthr=lthr)
     zones_source, zones = resolved if resolved else (None, [])
     z2 = next((z for z in zones if z["zone"] == 2), {})
     intensity = intensity_distribution_from_db(conn, d)
@@ -85,6 +88,17 @@ def backtest(conn: sqlite3.Connection, start: date, end: date) -> list[dict]:
     return rows
 
 
+def unflagged_hrv_days(conn: sqlite3.Connection) -> list[str]:
+    """Days with an HRV value but no recorded HRV source. readiness._hrv_method treats
+    them as Garmin; if any of these actually came from another source, that baseline is
+    contaminated. Cross-check against raw_daily_metrics' source for those dates."""
+    return [r[0] for r in conn.execute(
+        """SELECT date FROM daily_metrics
+           WHERE hrv IS NOT NULL
+             AND COALESCE(json_extract(source_flags_json, '$.hrv'), '') = ''
+           ORDER BY date""")]
+
+
 def summarize(rows: list[dict]) -> str:
     counts = Counter()
     for r in rows:
@@ -106,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
 
     conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     rows = backtest(conn, args.start, args.end)
+    unflagged = unflagged_hrv_days(conn)
     conn.close()
 
     if args.csv:
@@ -118,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{r['date']}  readiness {r['readiness_score']} ({r['readiness_label']})  "
                   f"Z2 {r['z2_min']}-{r['z2_max']} [{r['zones_source']}]  {r['checks']}")
     print(summarize(rows))
+    if unflagged:
+        print(f"note: {len(unflagged)} HRV days have no source flag (assumed Garmin): "
+              f"{unflagged[0]} .. {unflagged[-1]}")
     return 0
 
 

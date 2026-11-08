@@ -190,23 +190,41 @@ def _sleep_debt_score(nights: list[tuple[str, float]], half_life_days: float = 2
     return weighted_sum / total_weight if total_weight > 0 else None
 
 
-def hr_ceiling(conn: sqlite3.Connection, date_str: str) -> float:
-    """HR ceiling for HRR-based load: the 95th percentile of daily max_hr over the
-    trailing 180 days. The latest day's max_hr is often an easy/rest day at ~105-115
-    bpm, which collapses heart-rate reserve and pins every session to the top weight;
-    a raw 180-day max would let one optical-sensor spike set the ceiling for half a
-    year. Falls back to 190 when there's no credible peak on record."""
-    values = sorted(
-        r[0] for r in conn.execute(
-            "SELECT max_hr FROM daily_metrics WHERE date<=? AND date>=date(?, '-180 days') "
-            "AND max_hr IS NOT NULL",
-            (date_str, date_str),
+def robust_max_hr(conn: sqlite3.Connection, date_str: str, todays_max_hr: float | None = None,
+                  window_days: int = 180, min_credible: float = 150.0) -> float | None:
+    """Spike-resistant estimate of max HR: the 95th percentile of daily max_hr over the
+    trailing window, or None without a credible peak (>= min_credible).
+
+    This is an *estimate*, not a measured physiological max. A percentile resists single
+    optical/strap spikes, but it also reads low for an athlete who rarely trains hard
+    (true max 190, 95th-percentile daily peak 172), so anything derived from it should be
+    presented as approximate. todays_max_hr stands in for date_str's own row when the
+    caller is mid-rebuild and that row isn't committed yet."""
+    if todays_max_hr is None:
+        rows = conn.execute(
+            "SELECT max_hr FROM daily_metrics WHERE date<=? AND date>=date(?, ?) AND max_hr IS NOT NULL",
+            (date_str, date_str, f"-{window_days} days"),
         ).fetchall()
-    )
+        values = sorted(r[0] for r in rows)
+    else:
+        rows = conn.execute(
+            "SELECT max_hr FROM daily_metrics WHERE date<? AND date>=date(?, ?) AND max_hr IS NOT NULL",
+            (date_str, date_str, f"-{window_days} days"),
+        ).fetchall()
+        values = sorted([r[0] for r in rows] + [todays_max_hr])
     if not values:
-        return 190.0
+        return None
     peak = values[min(len(values) - 1, math.ceil(0.95 * (len(values) - 1)))]
-    return float(peak) if peak >= 150 else 190.0
+    return float(peak) if peak >= min_credible else None
+
+
+def hr_ceiling(conn: sqlite3.Connection, date_str: str) -> float:
+    """HR ceiling for HRR-based load: robust_max_hr, falling back to 190 when there's no
+    credible peak on record. The latest day's max_hr is often an easy/rest day at
+    ~105-115 bpm, which collapses heart-rate reserve and pins every session to the top
+    weight; a raw 180-day max would let one optical-sensor spike set the ceiling for half
+    a year."""
+    return robust_max_hr(conn, date_str) or 190.0
 
 
 _hr_ceiling = hr_ceiling  # back-compat alias
@@ -403,7 +421,11 @@ def decoupling_trend_from_db(conn: sqlite3.Connection, date_str: str, window_run
 LT1_FRACTION_OF_LTHR = 0.89
 
 
-def _latest_lthr(conn: sqlite3.Connection, date_str: str) -> float | None:
+def _latest_lthr(conn: sqlite3.Connection, date_str: str, todays_lthr: float | None = None) -> float | None:
+    """Latest lactate-threshold HR on/before date_str. todays_lthr overrides the lookup
+    when the caller is mid-rebuild and today's row isn't committed yet."""
+    if todays_lthr and todays_lthr > 0:
+        return float(todays_lthr)
     row = conn.execute(
         "SELECT lactate_threshold_hr FROM daily_metrics WHERE date <= ? AND lactate_threshold_hr > 0 "
         "ORDER BY date DESC LIMIT 1", (date_str,)).fetchone()
@@ -415,15 +437,48 @@ def _lt1_setting(conn: sqlite3.Connection) -> float | None:
     return float(row[0]) if row else None
 
 
+def latest_zone_floors(conn: sqlite3.Connection, date_str: str | None = None,
+                       lookback_days: int | None = None) -> dict[int, float]:
+    """Garmin's zone lower bounds (bpm per zone), newest activity first. The bounds are
+    an account setting, so they can change (new LTHR / max HR) and a mix of old and new
+    would be a zone set that never existed on the watch. So:
+
+    1. Prefer a complete snapshot — the most recent single activity that recorded all
+       five bounds. Current imports store every zone, including zero-second ones.
+    2. Only if no activity has all five (older rows stored before zero-second zones were
+       kept) fall back to the latest bound per zone across activities. That can mix
+       configurations, so callers that need a trustworthy set should require all five
+       zones and monotonic bounds (normalize.resolve_hr_zones does).
+
+    date_str / lookback_days bound the activities considered; without them every
+    activity counts (the intensity split only needs *a* best guess for old activities)."""
+    sql = ("SELECT z.activity_id, z.zone, z.low_bpm FROM activity_hr_zones z "
+           "LEFT JOIN activities a ON a.garmin_activity_id = z.activity_id "
+           "WHERE z.low_bpm IS NOT NULL")
+    params: list = []
+    if date_str:
+        sql += " AND a.date <= ?"
+        params.append(date_str)
+        if lookback_days:
+            sql += " AND a.date > date(?, ?)"
+            params += [date_str, f"-{lookback_days} days"]
+    sql += " ORDER BY a.date DESC, a.start_time DESC, z.rowid DESC LIMIT 600"
+
+    snapshots: dict[str, dict[int, float]] = {}
+    merged: dict[int, float] = {}
+    for activity_id, zone, low in conn.execute(sql, params):
+        zone, low = int(zone), float(low)
+        snapshots.setdefault(activity_id, {}).setdefault(zone, low)
+        merged.setdefault(zone, low)
+    for snap in snapshots.values():
+        if sorted(snap) == [1, 2, 3, 4, 5]:
+            return snap
+    return merged
+
+
 def _latest_zone_bounds(conn: sqlite3.Connection) -> dict[int, float]:
-    """Most recently recorded Garmin lower bound for each zone — used for activities
-    stored before boundaries were kept (they're an account setting, so the latest is
-    the best guess). Per zone rather than from a single activity: an easy run may not
-    have recorded the upper zones at all."""
-    return {int(z): lo for z, lo in conn.execute(
-        """SELECT zone, low_bpm FROM activity_hr_zones h
-           WHERE low_bpm IS NOT NULL AND rowid = (
-               SELECT MAX(rowid) FROM activity_hr_zones WHERE zone = h.zone AND low_bpm IS NOT NULL)""")}
+    """Best-guess Garmin bounds for activities stored before boundaries were kept."""
+    return latest_zone_floors(conn)
 
 
 def three_zone_seconds(zone_rows: list[tuple[int, float, float | None]], lthr: float | None,
@@ -810,19 +865,15 @@ def _is_computed_rhr_flag(source_flags_json: str | None) -> bool:
     return flag is not None and flag.endswith("_intraday")
 
 
-def _is_all_day_hrv_flag(source_flags_json: str | None) -> bool:
-    """True only for Google Health's raw daily rollup (a 24h aggregate)."""
-    return _source_flag(source_flags_json, "hrv") == "google_health"
-
-
 def _hrv_method(source_flags_json: str | None) -> str:
     """Which HRV methodology produced a day's value. Baselines only compare like with
     like: Garmin's overnight HRV, Google Health's all-day rollup, and the overnight
     recompute from Google Health intraday samples ("google_health_intraday") are three
     different scales. The intraday recompute is overnight-only like Garmin's but can read
     roughly a third lower on the same nights, so mixing it into a Garmin baseline turns
-    a source switch into a fake HRV crash. Days without a flag
-    are Garmin (first in DEFAULT_SOURCE_PRIORITY)."""
+    a source switch into a fake HRV crash. Rows with no flag are assumed Garmin (first in
+    DEFAULT_SOURCE_PRIORITY). That only holds if no pre-flag row came from another source:
+    scripts/backtest.py reports unflagged HRV days so it can be checked on real data."""
     return _source_flag(source_flags_json, "hrv") or "garmin"
 
 
@@ -907,7 +958,7 @@ RHR_SD_DAYS = 28
 RHR_SD_MIN_DAYS = 10
 
 
-def _hrv_rolling_z(conn: sqlite3.Connection, date_str: str, method: str | bool) -> float | None:
+def _hrv_rolling_z(conn: sqlite3.Connection, date_str: str, method: str) -> float | None:
     """7-day rolling mean of ln(RMSSD) ending date_str, in SDs from the mean of the
     HRV_BASELINE_DAYS nights before it (Plews 2013). Methodology-matched like the 7-day
     baseline. None until there are >= 4 recent and HRV_BASELINE_MIN_NIGHTS baseline nights."""
@@ -916,8 +967,6 @@ def _hrv_rolling_z(conn: sqlite3.Connection, date_str: str, method: str | bool) 
            WHERE date <= ? AND date > date(?, ?) AND hrv > 0""",
         (date_str, date_str, f"-{HRV_BASELINE_DAYS + 7} days"),
     ).fetchall()
-    if isinstance(method, bool):  # legacy call style: True = Google all-day rollup
-        method = "google_health" if method else "garmin"
     week_start = (date.fromisoformat(date_str) - timedelta(days=6)).isoformat()
     recent, baseline = [], []
     for d, v, flags in rows:
@@ -1568,8 +1617,11 @@ def _is_high_aerobic_shortage(feedback: str | None) -> bool:
     return "SHORTAGE" in fb and "HIGH" in fb and "AEROBIC" in fb
 
 
-def _is_any_shortage(feedback: str | None) -> bool:
-    return "SHORTAGE" in (feedback or "").upper()
+def _is_hard_work_shortage(feedback: str | None) -> bool:
+    """A shortage of threshold-or-harder load (high-aerobic or anaerobic) — not a
+    low-aerobic one, which means too little *easy* volume and argues the opposite way."""
+    fb = (feedback or "").upper()
+    return "SHORTAGE" in fb and "LOW" not in fb and ("AEROBIC" in fb or "ANAEROBIC" in fb)
 
 
 def consistency_checks(
@@ -1596,20 +1648,24 @@ def consistency_checks(
             "detail": (f"Mainspring flags grey-zone drift (moderate "
                        f"{intensity_distribution.get('moderate_pct')}%) but Garmin reports "
                        f"{feedback}: too little threshold-type work."),
-            "guidance": "Don't cut intensity on grey_zone_flag alone. Garmin's load focus is "
-                        "interval-aware; trust it for 'is there enough hard work?' and "
-                        "check the LT1 setting behind the grey-zone split.",
+            "guidance": "Don't cut intensity on grey_zone_flag alone, and don't treat Garmin's "
+                        "verdict as settled either. Look at the actual recent sessions and "
+                        "intensity_distribution, use Garmin's load focus as extra evidence "
+                        "(it is interval-aware), and check the LT1 setting behind the "
+                        "grey-zone split.",
         })
 
     sessions = (intensity_distribution or {}).get("sessions") or {}
-    if _is_any_shortage(feedback) and not near_race and \
+    if _is_hard_work_shortage(feedback) and not near_race and \
             (sessions.get("hard", 0) + sessions.get("moderate", 0)) == 0 and sessions:
         out.append({
             "check": "no_quality_sessions",
             "status": "warning",
-            "detail": f"No tempo/threshold/interval sessions in the last 14 days and Garmin reports {feedback}.",
-            "guidance": "Outside a taper, a build needs 1-2 quality sessions per week; "
-                        "schedule one unless there's a red flag.",
+            "detail": (f"No sessions classified moderate or hard in the last 14 days, and Garmin "
+                       f"reports {feedback}."),
+            "guidance": "A hint, not a verdict: session classification is approximate. If a "
+                        "build is under way and there's no red flag, a quality session is "
+                        "probably due.",
         })
 
     if readiness and readiness.get("score") is not None and garmin_training_readiness is not None:
@@ -1627,7 +1683,9 @@ def consistency_checks(
         out.append({
             "check": "hr_zones_source",
             "status": "warning",
-            "detail": f"HR zones are estimated ({hr_zones_source}), not the watch's own zones.",
+            "detail": (f"HR zones are estimated ({hr_zones_source}), not the watch's own zones."
+                       + (" The %HRmax ceiling is a percentile of recent daily peaks and reads "
+                          "low if there have been no recent hard efforts." if hr_zones_source == "hrmax" else "")),
             "guidance": "Quote zone targets loosely; they may not match the watch's alerts.",
         })
 

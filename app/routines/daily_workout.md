@@ -4,6 +4,11 @@ Served by `get_routine_instructions("daily_workout")` and followed by the webhoo
 routine. This file is a generic default: it holds no personal details and assumes no
 particular watch vendor, race or pace. The repo is public.
 
+Scope: this is a **running-oriented** routine with sensible defaults (the numbers in
+step 2 are starting points, not universal rules), not a general training framework. The
+interpretation rules live in the `mainspring://guide` resource; this file covers the
+operational flow — gather, decide, schedule, send, and handle failure.
+
 Personal configuration comes from two places, never from this file:
 - **Mainspring data** — goals (`get_training_goals`), races/events (`list_training_events`)
   and logs. Phase, targets and race proximity are derived from these each run.
@@ -26,7 +31,8 @@ Call `Mainspring:get_daily_metrics` with start_date and end_date both set to tod
 This routine is fired by a webhook that can fire more than once a day, sometimes at the same moment. Call `Mainspring:claim_daily_recommendation(date=<the same local date used in Step 0>)` (kind defaults to "daily_workout"). Always pass the date: the server's own default is its UTC date, which can differ from the athlete's local date around midnight.
 
 - If it returns `claimed: false`, another run already owns today. **Exit immediately and silently.**
-- If it returns `claimed: true`, continue. If anything later fails **before the email is sent**, call `Mainspring:release_daily_recommendation(date=<same date>)` before exiting so a later run can retry. Never release after sending.
+- If it returns `claimed: true`, keep the returned `token` and continue. If anything later fails **before the email is sent**, call `Mainspring:release_daily_recommendation(token=<token>, date=<same date>)` before exiting so a later run can retry. Never release after sending.
+- After the email is sent, call `Mainspring:complete_daily_recommendation(token=<token>, date=<same date>)`. The claim is a 30-minute lease: if a run dies without completing or releasing, a later run can take over once it expires. This is at-least-once, not exactly-once — a send that succeeded but whose completion was lost can be repeated.
 
 Do not use a Gmail "already sent?" search as the guard: concurrent runs all pass it before either sends.
 
@@ -35,7 +41,7 @@ Do not use a Gmail "already sent?" search as the guard: concurrent runs all pass
 You are generating today's workout recommendation for the athlete. Do not assume any race, goal time, or training phase — derive them fresh from Mainspring each run.
 
 ### 1. Gather data
-- Read the `mainspring://guide` resource. Its rules (including "read consistency_checks first" and "protect quality sessions") are binding.
+- Read the `mainspring://guide` resource and follow its rules (the guide owns the interpretation rules: consistency checks, protecting quality sessions, no back-to-back quality days).
 - `Mainspring:get_workout_context` — today's metrics, readiness, form_pct, HR zones (`hr_zones` + `hr_zones_source`), intensity distribution, the device's own load-focus signal (when present), illness risk, recent activities, next event, and `consistency_checks`.
 - `Mainspring:get_training_goals` — weekly targets.
 - `Mainspring:list_training_events` — goal race(s), target times, days to race.
@@ -51,13 +57,11 @@ You are generating today's workout recommendation for the athlete. Do not assume
 - 16 to ~3 weeks out → **build**: 1–2 quality sessions per week (threshold or tempo; intervals early in the block; race-pace blocks inside long runs in the last 8–10 weeks), one long run per week progressing toward the longest run the event calls for (for a marathon, roughly 28–32 km), strength 1–2×/week.
 - Under ~3 weeks → **taper**: volume down 40–60%, keep short race-pace or tempo segments, no new hard sessions to "fix" a vendor-reported load shortage.
 
-**Rules (override everything below):**
-1. Read `consistency_checks` first. If a check is a `"conflict"`, do not act on the disputed signal alone; follow the guide's resolution (e.g. never cut intensity on `grey_zone_flag` while the device reports a high-aerobic shortage). Mention the conflict in the email's second line.
-2. **Protect quality sessions.** Being under the weekly km target is never a reason to replace a quality session with an easy run. Only a real red flag moves one: illness_risk **red**, HRV below −1 SD for several days, RPE 8+ yesterday, active soreness in the working muscles, or sleep well short of need. Then move it to the next suitable day; don't drop it.
-3. Never two quality days in a row. A long run near marathon pace counts as quality. Strength goes on easy days, never the day before a quality session.
-4. If the athlete follows a vendor coaching plan and its suggested session fits these rules, prefer it (say so) rather than inventing a different one.
+**Rules.** The guide's rules apply and override the defaults here: read `consistency_checks` first, protect quality sessions, never two quality days in a row. Two additions specific to this routine:
+- If the athlete follows a vendor coaching plan and its suggested session fits the guide's rules, prefer it (say so) rather than inventing a different one.
+- Strength goes on easy days, never the day before a quality session.
 
-**Then weigh:** red flags (as defined above; a yellow illness level alone is not one) → readiness and form_pct per the guide → weekly volume (add gradually, ~10% per week, but see rule 2) → weather (shift timing for storms, ice, extreme heat or active alerts; don't skip unless recovery also argues for rest) → race proximity.
+**Then weigh:** red flags (illness_risk red, HRV below −1 SD for several days, RPE 8+ yesterday, active soreness, sleep well short of need; a yellow illness level alone is not one) → readiness and form_pct per the guide → weekly volume (add gradually, roughly 10% per week) → weather (shift timing for storms, ice, extreme heat or active alerts; don't skip unless recovery also argues for rest) → race proximity. A red flag moves a quality session to the next suitable day; it doesn't drop it.
 
 **Pick exactly one session:**
 - Easy run (distance or time, HR ceiling = top of today's zone 2 from `hr_zones`)
@@ -89,4 +93,4 @@ Optional short parenthetical on the same line if something drove the call. Optio
 ### 5. Constraints
 - If Mainspring or device data is unavailable or incomplete (but sleep data is present), default to a conservative easy run (30–40 min, zone 2) or rest, never a quality session, and say what was missing.
 - Send directly; never leave a draft.
-- If sending fails, call `Mainspring:release_daily_recommendation(date=<same date>)` before exiting.
+- If sending fails, call `Mainspring:release_daily_recommendation(token=<token>, date=<same date>)` before exiting.
