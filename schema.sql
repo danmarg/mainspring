@@ -192,11 +192,11 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
   sleep_need_baseline_min REAL -- Garmin's learned baseline sleep need, before adjustments
 );
 
--- personalized HR zone boundaries, derived from max_hr (%HRmax bands) — source-agnostic,
--- not scraped from any single vendor's proprietary zone endpoint
+-- personalized HR zone boundaries per day (see resolve_hr_zones in app/normalize.py):
+-- Garmin's own account zones when known, else LTHR-anchored, else %HRmax of a robust max
 CREATE TABLE IF NOT EXISTS hr_zones (
   date    TEXT NOT NULL,
-  source  TEXT NOT NULL,   -- 'derived' (computed from max_hr) | vendor name if ever sourced directly
+  source  TEXT NOT NULL,   -- 'garmin' | 'lthr' | 'hrmax' ('derived' = legacy %HRmax rows)
   zone    INTEGER NOT NULL,-- 1-5
   min_bpm REAL,
   max_bpm REAL,
@@ -320,3 +320,21 @@ CREATE TABLE IF NOT EXISTS tool_call_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_call_log_tool_ts ON tool_call_log(tool, ts DESC);
+
+-- One row per (date, kind) once a daily recommendation has been claimed. The INSERT is
+-- atomic, so when the routine's webhook fires more than once (retries, repeated syncs)
+-- only the first run proceeds — a "has an email gone out today?" check can't do that,
+-- since concurrent runs all pass it before any of them sends.
+-- The claim is a lease owned by `token`: if the owner dies before setting completed_at,
+-- the claim becomes takeable once lease_expires_at passes, and only the current token can
+-- release or complete it. (Added columns are also applied by db._add_missing_columns.)
+CREATE TABLE IF NOT EXISTS recommendation_claims (
+  date             TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  claimed_at       TEXT NOT NULL,
+  note             TEXT,
+  token            TEXT,
+  lease_expires_at TEXT,
+  completed_at     TEXT,
+  PRIMARY KEY (date, kind)
+);

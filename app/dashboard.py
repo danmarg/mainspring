@@ -1936,8 +1936,8 @@ def activities(request: Request, days: str = "30",
             ORDER BY date
         """, (clause,))
 
-        # Personalized HR zones are rebuilt daily from that day's max_hr, so
-        # they drift over a training block — worth trending, not just a snapshot.
+        # Personalized HR zones are rebuilt daily (Garmin's account zones, else
+        # LTHR- or %HRmax-based estimates), so they can shift over a training block.
         hr_zone_rows = _rows(conn, """
             SELECT date, zone, min_bpm, max_bpm FROM hr_zones
             WHERE date >= date('now', ?)

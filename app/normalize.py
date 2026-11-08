@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.db import (
     HOME_TZ, DEFAULT_SOURCE_PRIORITY, local_health_date, parse_instant, resolve_metric, utc_now,
 )
+from app.readiness import _latest_lthr, latest_zone_floors, robust_max_hr
 
 log = logging.getLogger(__name__)
 
@@ -335,11 +336,20 @@ def _hrv_overnight_from_intraday(conn, date_str: str, source: str, duration_min:
     return round(sum(values) / len(values), 1)
 
 
-# ── HR zones (derived from max_hr, source-agnostic) ─────────────────────────
+# ── HR zones ──────────────────────────────────────────────────────────────────
 #
-# Standard 5-zone %HRmax model (Zone 1 recovery through Zone 5 max/VO2max),
-# rather than any single vendor's proprietary zone-boundary endpoint — this
-# works from a max_hr value regardless of which source produced it.
+# Preference order, most to least trustworthy:
+#   1. "garmin": the account's own zone boundaries, as Garmin recorded them on recent
+#      activities (activity_hr_zones.low_bpm). These are what the watch alerts on and
+#      what Garmin's time-in-zone uses, so a Z2 target in a workout email matches the
+#      watch. For an LTHR-based Garmin setup they're anchored on lactate threshold.
+#   2. "lthr": bands anchored on the latest lactate-threshold HR, for accounts with an
+#      LTHR but no zone-tagged activities yet.
+#   3. "hrmax": standard %HRmax bands from readiness.robust_max_hr (95th percentile of
+#      daily max HR over 180 days) rather than the raw rolling max, so one optical or
+#      strap spike can't push every band up by several bpm. It is an ESTIMATE: it reads
+#      low for an athlete who rarely trains hard, which pulls the bands down. It's only
+#      the last resort, and consistency_checks labels it as approximate.
 _HR_ZONE_BANDS = [
     (1, 0.50, 0.60),
     (2, 0.60, 0.70),
@@ -347,6 +357,13 @@ _HR_ZONE_BANDS = [
     (4, 0.80, 0.90),
     (5, 0.90, 1.00),
 ]
+
+# Lower bounds as a fraction of LTHR, approximating Garmin's LTHR-based zones: zone 5
+# starts at threshold, zone 2 tops out around 78% of LTHR.
+_LTHR_ZONE_FLOORS = [(1, 0.59), (2, 0.685), (3, 0.785), (4, 0.885), (5, 0.995)]
+
+HR_ZONE_LOOKBACK_DAYS = 180
+MAX_HR_ROLLING_WINDOW_DAYS = 180
 
 
 def compute_hr_zones(max_hr: float) -> list[dict]:
@@ -356,41 +373,74 @@ def compute_hr_zones(max_hr: float) -> list[dict]:
     ]
 
 
-MAX_HR_ROLLING_WINDOW_DAYS = 90
+def zones_from_floors(floors: dict[int, float], ceiling: float | None = None) -> list[dict]:
+    """Contiguous 5-zone bands from per-zone lower bounds. Each zone tops out one bpm
+    below the next zone's floor; zone 5's top is the HR ceiling when known, else the
+    same width as zone 4."""
+    zones = sorted(floors)
+    out = []
+    for i, z in enumerate(zones):
+        lo = floors[z]
+        if i + 1 < len(zones):
+            hi = floors[zones[i + 1]] - 1
+        elif ceiling and ceiling > lo:
+            hi = ceiling
+        else:
+            prev = floors[zones[i - 1]] if i else lo - 15
+            hi = lo + (lo - prev)
+        out.append({"zone": z, "min_bpm": round(lo), "max_bpm": round(hi)})
+    return out
 
 
-def _rolling_max_hr(conn, date_str: str) -> float | None:
-    """max_hr is the day's *observed* peak (see _parse_stats in garmin.py) — on a
-    rest day that's ~100-115bpm, not a meaningful ceiling for zone bands. Roll
-    forward the highest observed value over a trailing window instead, same
-    principle as field-test-derived max HR: it should only ever ratchet up
-    within the window, not reflect a single easy day."""
-    row = conn.execute(
-        """SELECT MAX(max_hr) FROM daily_metrics
-           WHERE date <= ? AND date > date(?, ?) AND max_hr IS NOT NULL""",
-        (date_str, date_str, f"-{MAX_HR_ROLLING_WINDOW_DAYS} days"),
-    ).fetchone()
-    return row[0] if row else None
+def compute_lthr_zones(lthr: float, ceiling: float | None = None) -> list[dict]:
+    return zones_from_floors({z: lthr * f for z, f in _LTHR_ZONE_FLOORS}, ceiling)
 
 
-def _rebuild_hr_zones(conn, date_str: str, todays_max_hr: float | None) -> None:
-    # _rebuild_hr_zones runs before today's own row is committed to daily_metrics,
-    # so the rolling query can't see it yet — fold it in explicitly so a new high
-    # observed today still ratchets the zones up immediately, not next run.
-    rolling = _rolling_max_hr(conn, date_str)
-    candidates = [v for v in (rolling, todays_max_hr) if v]
-    max_hr = max(candidates) if candidates else None
-    if not max_hr or max_hr <= 0:
+def _garmin_zone_floors(conn, date_str: str) -> dict[int, float]:
+    """Garmin's zone lower bounds as of date_str (shared selection logic in
+    readiness.latest_zone_floors: a single complete snapshot when one exists). Empty
+    unless all five zones are known and strictly increasing — a partial or inconsistent
+    set can't form bands."""
+    floors = latest_zone_floors(conn, date_str, HR_ZONE_LOOKBACK_DAYS)
+    if sorted(floors) != [1, 2, 3, 4, 5]:
+        return {}
+    values = [floors[z] for z in range(1, 6)]
+    return floors if values == sorted(values) and len(set(values)) == 5 else {}
+
+
+def resolve_hr_zones(conn, date_str: str, todays_max_hr: float | None = None,
+                     todays_lthr: float | None = None) -> tuple[str, list[dict]] | None:
+    """(source, zones) for date_str — see the preference order above. todays_max_hr and
+    todays_lthr stand in for date_str's own daily_metrics row when it isn't committed
+    yet (the rebuild path); pass them from the stored row to reproduce production."""
+    ceiling = robust_max_hr(conn, date_str, todays_max_hr, MAX_HR_ROLLING_WINDOW_DAYS)
+    floors = _garmin_zone_floors(conn, date_str)
+    if floors:
+        return "garmin", zones_from_floors(floors, ceiling)
+    lthr = _latest_lthr(conn, date_str, todays_lthr)
+    if lthr:
+        return "lthr", compute_lthr_zones(lthr, ceiling)
+    if ceiling:
+        return "hrmax", compute_hr_zones(ceiling)
+    return None
+
+
+def _rebuild_hr_zones(conn, date_str: str, todays_max_hr: float | None,
+                      todays_lthr: float | None = None) -> None:
+    # Runs before today's own daily_metrics row is committed, so today's max HR and
+    # LTHR are passed in explicitly rather than read back.
+    resolved = resolve_hr_zones(conn, date_str, todays_max_hr, todays_lthr)
+    # One zone set per day: replace whatever was there before — including when nothing
+    # resolves now — so readers that select by date never see a stale or competing set
+    # (e.g. an old 'derived' %HRmax set).
+    conn.execute("DELETE FROM hr_zones WHERE date=?", (date_str,))
+    if resolved is None:
         return
-    for band in compute_hr_zones(max_hr):
+    source, zones = resolved
+    for band in zones:
         conn.execute(
-            """
-            INSERT INTO hr_zones(date, source, zone, min_bpm, max_bpm)
-            VALUES (?, 'derived', ?, ?, ?)
-            ON CONFLICT(date, source, zone) DO UPDATE SET
-                min_bpm=excluded.min_bpm, max_bpm=excluded.max_bpm
-            """,
-            (date_str, band["zone"], band["min_bpm"], band["max_bpm"]),
+            "INSERT INTO hr_zones(date, source, zone, min_bpm, max_bpm) VALUES (?, ?, ?, ?, ?)",
+            (date_str, source, band["zone"], band["min_bpm"], band["max_bpm"]),
         )
 
 
@@ -500,7 +550,7 @@ def _rebuild_one_day(conn, date_str: str) -> None:
     else:
         values["training_load_ratio"] = None
 
-    _rebuild_hr_zones(conn, date_str, values.get("max_hr"))
+    _rebuild_hr_zones(conn, date_str, values.get("max_hr"), values.get("lactate_threshold_hr"))
 
     if values.get("sleep_score") is None:
         awake_min, _ = resolve_metric(conn, date_str, "sleep_awake_min")

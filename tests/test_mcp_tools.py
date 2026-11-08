@@ -579,3 +579,170 @@ def test_amend_log_rejects_wrong_unit_and_unitless_macros():
     log_meal(description="oats")
     meal_id = get_logs(start_date=str(date.today()), end_date=str(date.today()))[0]["id"]
     assert amend_log(log_id=meal_id, estimated_macros={"carbs": 50}).startswith("Error")
+
+
+# ── claim_daily_recommendation ────────────────────────────────────────────────
+
+def test_claim_daily_recommendation_only_once():
+    from app.mcp_server import claim_daily_recommendation
+    first = claim_daily_recommendation(date="2026-11-02")
+    second = claim_daily_recommendation(date="2026-11-02")
+    assert first["claimed"] is True and first["token"]
+    assert second["claimed"] is False
+    assert "token" not in second  # a non-owner never learns the owner's token
+    assert second["claimed_at"] == first["claimed_at"] and second["status"] == "in_progress"
+    # A different kind or day is independent.
+    assert claim_daily_recommendation(date="2026-11-03")["claimed"] is True
+    assert claim_daily_recommendation(date="2026-11-02", kind="weekly_review")["claimed"] is True
+
+
+def test_claim_daily_recommendation_concurrent_callers():
+    from concurrent.futures import ThreadPoolExecutor
+    from app.mcp_server import claim_daily_recommendation
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: claim_daily_recommendation(date="2026-11-04"), range(8)))
+    assert sum(r["claimed"] for r in results) == 1
+
+
+def test_release_daily_recommendation_allows_retry():
+    from app.mcp_server import claim_daily_recommendation, release_daily_recommendation
+    c = claim_daily_recommendation(date="2026-11-05")
+    assert c["claimed"] is True
+    release_daily_recommendation(c["token"], date="2026-11-05")
+    assert claim_daily_recommendation(date="2026-11-05")["claimed"] is True
+
+
+def test_release_with_wrong_token_changes_nothing():
+    from app.mcp_server import claim_daily_recommendation, release_daily_recommendation
+    c = claim_daily_recommendation(date="2026-11-06")
+    assert "No open" in release_daily_recommendation("not-the-token", date="2026-11-06")
+    assert claim_daily_recommendation(date="2026-11-06")["claimed"] is False
+    assert "Released" in release_daily_recommendation(c["token"], date="2026-11-06")
+
+
+def test_expired_claim_can_be_taken_over_and_old_owner_is_locked_out():
+    from app.mcp_server import (claim_daily_recommendation, complete_daily_recommendation,
+                                release_daily_recommendation)
+    dead = claim_daily_recommendation(date="2026-11-07", lease_minutes=0)  # lease already over
+    taker = claim_daily_recommendation(date="2026-11-07")
+    assert taker["claimed"] is True and taker["reclaimed"] is True
+    assert taker["token"] != dead["token"]
+    # The first run wakes up late: its release/complete must not touch the new owner's claim.
+    assert "No open" in release_daily_recommendation(dead["token"], date="2026-11-07")
+    assert "No open" in complete_daily_recommendation(dead["token"], date="2026-11-07")
+    assert claim_daily_recommendation(date="2026-11-07")["claimed"] is False
+
+
+def test_live_lease_is_not_taken_over():
+    from app.mcp_server import claim_daily_recommendation
+    assert claim_daily_recommendation(date="2026-11-08", lease_minutes=30)["claimed"] is True
+    assert claim_daily_recommendation(date="2026-11-08")["claimed"] is False
+
+
+def test_completed_claim_never_expires():
+    from app.mcp_server import claim_daily_recommendation, complete_daily_recommendation, release_daily_recommendation
+    c = claim_daily_recommendation(date="2026-11-09", lease_minutes=0)
+    assert "Completed" in complete_daily_recommendation(c["token"], date="2026-11-09")
+    again = claim_daily_recommendation(date="2026-11-09")
+    assert again["claimed"] is False and again["status"] == "done"
+    assert "No open" in release_daily_recommendation(c["token"], date="2026-11-09")
+
+
+def test_concurrent_takeover_of_expired_claim_has_one_winner():
+    from concurrent.futures import ThreadPoolExecutor
+    from app.mcp_server import claim_daily_recommendation
+    claim_daily_recommendation(date="2026-11-10", lease_minutes=0)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: claim_daily_recommendation(date="2026-11-10"), range(8)))
+    assert sum(r["claimed"] for r in results) == 1
+
+
+def test_workout_context_reports_zone_source_and_checks():
+    from app.mcp_server import get_workout_context
+    conn = sqlite3.connect(str(db_module.DB_PATH))
+    conn.execute("INSERT INTO daily_metrics(date, hrv, source_flags_json) VALUES ('2026-10-12', 33, '{}')")
+    conn.execute("INSERT INTO activities(date, start_time, type, garmin_activity_id) "
+                 "VALUES ('2026-10-11','2026-10-11T08:00:00Z','running','a1')")
+    for z, lo in {1: 95, 2: 111, 3: 127, 4: 143, 5: 161}.items():
+        conn.execute("INSERT INTO activity_hr_zones(activity_id, zone, seconds, low_bpm) VALUES ('a1',?,60,?)", (z, lo))
+    conn.commit()
+    from app.normalize import _rebuild_hr_zones
+    _rebuild_hr_zones(conn, "2026-10-12", 171)
+    conn.commit()
+    conn.close()
+    result = get_workout_context(date="2026-10-12")
+    assert result["today"]["hr_zones_source"] == "garmin"
+    z2 = next(z for z in result["today"]["hr_zones"] if z["zone"] == 2)
+    assert (z2["min_bpm"], z2["max_bpm"]) == (111, 126)
+
+
+# ── routine instructions ─────────────────────────────────────────────────────
+
+def test_get_routine_instructions_returns_text_and_version():
+    from app.mcp_server import get_routine_instructions
+    r = get_routine_instructions("daily_workout")
+    assert "claim_daily_recommendation" in r["instructions"]
+    assert len(r["version"]) == 12
+
+
+def test_get_routine_instructions_rejects_unknown_and_traversal():
+    from app.mcp_server import get_routine_instructions
+    for name in ("nope", "../schema", "daily_workout.md"):
+        r = get_routine_instructions(name)
+        assert "error" in r and "daily_workout" in r["available"]
+
+
+def test_routines_reference_only_real_mainspring_tools():
+    """Every `Mainspring:<tool>` a routine names must exist, so renaming a tool can't
+    silently break a routine."""
+    import re
+    from app.mcp_server import ROUTINES_DIR, mcp
+    tools = set(mcp._tool_manager._tools)
+    for path in ROUTINES_DIR.glob("*.md"):
+        referenced = set(re.findall(r"Mainspring:([a-z_]+)", path.read_text()))
+        assert referenced, path
+        assert referenced <= tools, (path.name, referenced - tools)
+
+
+def test_routines_reference_real_workout_context_fields():
+    from app.mcp_server import ROUTINES_DIR
+    import inspect
+    import app.mcp_server as m
+    src = inspect.getsource(m)
+    text = (ROUTINES_DIR / "daily_workout.md").read_text()
+    for field in ("hr_zones_source", "consistency_checks", "hr_zones", "illness_risk"):
+        assert field in text and f'"{field}"' in src
+
+
+def test_routines_contain_no_personal_details():
+    """The repo is public: routines get recipient/home details from the routine's own
+    prompt, never from this file."""
+    import re
+    from app.mcp_server import ROUTINES_DIR
+    for path in ROUTINES_DIR.glob("*.md"):
+        text = path.read_text()
+        assert not re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", text), path.name
+        # Concrete personal numbers: HR bpm ranges, per-km paces, ISO dates, coordinates.
+        assert not re.search(r"\b\d{2,3}\s*[–-]\s*\d{3}\s*bpm", text), path.name
+        assert not re.search(r"\b\d:\d{2}\s*/\s*km", text), path.name
+        assert not re.search(r"\b20\d{2}-\d{2}-\d{2}\b", text), path.name
+        assert not re.search(r"-?\d{1,3}\.\d{3,},\s*-?\d{1,3}\.\d{3,}", text), path.name
+        assert not re.search(r"https?://", text), path.name
+
+
+def test_legacy_claims_without_lease_columns_become_reclaimable(tmp_path):
+    """A recommendation_claims table from before leases (no token/expiry columns) must
+    migrate to rows that a new run can take over, not ones that stay locked forever."""
+    import app.db as dbm
+    path = tmp_path / "legacy.db"
+    dbm.init_db(path)
+    conn = sqlite3.connect(str(path))
+    conn.execute("DROP TABLE recommendation_claims")
+    conn.execute("CREATE TABLE recommendation_claims (date TEXT NOT NULL, kind TEXT NOT NULL, "
+                 "claimed_at TEXT NOT NULL, note TEXT, PRIMARY KEY (date, kind))")
+    conn.execute("INSERT INTO recommendation_claims VALUES ('2026-11-01','daily_workout','2026-11-01T07:00:00+00:00',NULL)")
+    conn.commit()
+    dbm._add_missing_columns(conn)
+    row = conn.execute("SELECT token, lease_expires_at, completed_at FROM recommendation_claims").fetchone()
+    assert row == (None, "2026-11-01T07:00:00+00:00", None)
+    conn.close()

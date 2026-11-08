@@ -629,6 +629,9 @@ def test_hr_zones_use_rolling_max_not_todays_low_reading(tmp_db):
     """A rest-day max_hr of 108 shouldn't collapse zones down from a true peak
     of 190 seen earlier in the rolling window."""
     now = utc_now()
+    for i in range(25):  # enough history for a trustworthy ceiling
+        d = (date(2025, 5, 31) - timedelta(days=i)).isoformat()
+        tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (?, 190)", (d,))
     upsert_raw_metric(tmp_db, "2025-06-01", "garmin", "max_hr", 190.0, now)
     tmp_db.commit()
     rebuild_daily_metrics(tmp_db, {"2025-06-01"})
@@ -647,6 +650,9 @@ def test_hr_zones_use_rolling_max_not_todays_low_reading(tmp_db):
 
 def test_hr_zones_derived_from_max_hr(tmp_db):
     now = utc_now()
+    for i in range(25):  # enough history for a trustworthy ceiling
+        d = (date(2025, 6, 30) - timedelta(days=i)).isoformat()
+        tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (?, 180)", (d,))
     upsert_raw_metric(tmp_db, "2025-07-01", "garmin", "max_hr", 180.0, now)
     tmp_db.commit()
     rebuild_daily_metrics(tmp_db)
@@ -746,3 +752,118 @@ def test_bp_partial_garmin_data_is_not_used(tmp_db):
     assert row[0] is None
     assert row[1] is None
     assert row[2] is None
+
+
+# ── HR zones: Garmin account zones > LTHR > robust %HRmax ─────────────────────
+
+from datetime import date, timedelta  # noqa: E402
+
+from app.normalize import _rebuild_hr_zones, resolve_hr_zones, zones_from_floors  # noqa: E402
+
+
+def _add_zoned_activity(conn, activity_id, date_str, floors):
+    conn.execute(
+        "INSERT INTO activities(date, start_time, type, garmin_activity_id) VALUES (?, ?, 'running', ?)",
+        (date_str, f"{date_str}T08:00:00Z", activity_id),
+    )
+    for zone, low in floors.items():
+        conn.execute(
+            "INSERT INTO activity_hr_zones(activity_id, zone, seconds, low_bpm) VALUES (?, ?, 60, ?)",
+            (activity_id, zone, low),
+        )
+
+
+GARMIN_FLOORS = {1: 95, 2: 111, 3: 127, 4: 143, 5: 161}
+
+
+def test_zones_prefer_garmin_account_bounds(tmp_db):
+    _add_zoned_activity(tmp_db, "a1", "2026-10-10", GARMIN_FLOORS)
+    source, zones = resolve_hr_zones(tmp_db, "2026-10-12", todays_max_hr=171)
+    assert source == "garmin"
+    z2 = next(z for z in zones if z["zone"] == 2)
+    assert (z2["min_bpm"], z2["max_bpm"]) == (111, 126)
+
+
+def test_zones_use_latest_garmin_bounds(tmp_db):
+    _add_zoned_activity(tmp_db, "old", "2026-09-01", {1: 90, 2: 105, 3: 120, 4: 135, 5: 150})
+    _add_zoned_activity(tmp_db, "new", "2026-10-10", GARMIN_FLOORS)
+    _, zones = resolve_hr_zones(tmp_db, "2026-10-12")
+    assert zones[1]["min_bpm"] == 111
+
+
+def test_zones_ignore_partial_garmin_bounds_and_fall_back_to_lthr(tmp_db):
+    _add_zoned_activity(tmp_db, "a1", "2026-10-10", {1: 95, 2: 111})
+    source, zones = resolve_hr_zones(tmp_db, "2026-10-12", todays_lthr=162)
+    assert source == "lthr"
+    floors = [z["min_bpm"] for z in zones]
+    assert floors == [96, 111, 127, 143, 161]
+
+
+def test_hrmax_zones_not_driven_by_a_single_spike(tmp_db):
+    # 60 days peaking at 165-172, one 190 sensor spike: zones must not follow the spike.
+    for i in range(60):
+        d = (date(2026, 8, 1) + timedelta(days=i)).isoformat()
+        tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (?, ?)", (d, 165 + i % 8))
+    tmp_db.execute("UPDATE daily_metrics SET max_hr=190 WHERE date='2026-09-10'")
+    source, zones = resolve_hr_zones(tmp_db, "2026-10-01")
+    assert source == "hrmax"
+    assert zones[4]["max_bpm"] <= 175
+
+
+def test_rebuild_hr_zones_replaces_legacy_rows(tmp_db):
+    for zone, lo, hi in [(1, 95, 114), (2, 114, 133), (3, 133, 152), (4, 152, 171), (5, 171, 190)]:
+        tmp_db.execute(
+            "INSERT INTO hr_zones(date, source, zone, min_bpm, max_bpm) VALUES ('2026-10-12','derived',?,?,?)",
+            (zone, lo, hi),
+        )
+    _add_zoned_activity(tmp_db, "a1", "2026-10-10", GARMIN_FLOORS)
+    _rebuild_hr_zones(tmp_db, "2026-10-12", 171)
+    rows = tmp_db.execute("SELECT source, zone, min_bpm, max_bpm FROM hr_zones WHERE date='2026-10-12'").fetchall()
+    assert {r[0] for r in rows} == {"garmin"}
+    assert (111, 126) in {(r[2], r[3]) for r in rows}
+
+
+def test_zones_from_floors_top_zone_uses_ceiling():
+    zones = zones_from_floors(GARMIN_FLOORS, ceiling=175)
+    assert zones[-1] == {"zone": 5, "min_bpm": 161, "max_bpm": 175}
+
+
+def test_zones_prefer_one_complete_snapshot_over_a_per_zone_mix(tmp_db):
+    # Garmin's bounds changed. The newest run only has zones 1-3 (new config); an older
+    # run has all five (old config). The old complete set is the one that really existed
+    # on the watch; mixing new 1-3 with old 4-5 would invent a set that never did.
+    _add_zoned_activity(tmp_db, "old", "2026-09-01", {1: 90, 2: 105, 3: 120, 4: 135, 5: 150})
+    _add_zoned_activity(tmp_db, "new", "2026-10-10", {1: 95, 2: 111, 3: 127})
+    source, zones = resolve_hr_zones(tmp_db, "2026-10-12")
+    assert source == "garmin"
+    assert [z["min_bpm"] for z in zones] == [90, 105, 120, 135, 150]
+
+
+def test_zones_fall_back_to_per_zone_merge_when_no_complete_snapshot(tmp_db):
+    _add_zoned_activity(tmp_db, "hard", "2026-09-01", {4: 143, 5: 161})
+    _add_zoned_activity(tmp_db, "easy", "2026-10-10", {1: 95, 2: 111, 3: 127})
+    source, zones = resolve_hr_zones(tmp_db, "2026-10-12")
+    assert source == "garmin"
+    assert [z["min_bpm"] for z in zones] == [95, 111, 127, 143, 161]
+
+
+def test_rebuild_hr_zones_clears_stale_rows_when_nothing_resolves(tmp_db):
+    tmp_db.execute("INSERT INTO hr_zones(date, source, zone, min_bpm, max_bpm) "
+                   "VALUES ('2026-10-12','derived',2,114,133)")
+    _rebuild_hr_zones(tmp_db, "2026-10-12", None)  # no history, no LTHR, no max HR
+    assert tmp_db.execute("SELECT COUNT(*) FROM hr_zones WHERE date='2026-10-12'").fetchone()[0] == 0
+
+
+def test_resolve_hr_zones_matches_stored_row_when_given_todays_inputs(tmp_db):
+    # The backtest replays a day with that day's own max HR / LTHR; with them passed,
+    # resolving from a committed row must equal resolving mid-rebuild.
+    for i in range(30):
+        d = (date(2026, 9, 1) + timedelta(days=i)).isoformat()
+        tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (?, ?)", (d, 160 + i % 5))
+    tmp_db.execute("INSERT INTO daily_metrics(date, max_hr, lactate_threshold_hr) VALUES ('2026-10-01', 185, 170)")
+    mid_rebuild = resolve_hr_zones(tmp_db, "2026-10-01", todays_max_hr=185, todays_lthr=170)
+    replay = resolve_hr_zones(tmp_db, "2026-10-01", todays_max_hr=185.0, todays_lthr=170.0)
+    assert mid_rebuild == replay and mid_rebuild[0] == "lthr"
+    # ...and the row not being committed yet (the real rebuild path) gives the same zones.
+    tmp_db.execute("DELETE FROM daily_metrics WHERE date='2026-10-01'")
+    assert resolve_hr_zones(tmp_db, "2026-10-01", todays_max_hr=185, todays_lthr=170) == mid_rebuild

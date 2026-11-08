@@ -173,10 +173,21 @@ def test_parse_hrv_ignores_weekly_avg_when_last_night_missing(tmp_db):
 
 def test_hr_ceiling_is_rolling_peak_not_latest_day(tmp_db):
     from app.readiness import _hr_ceiling
-    tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES ('2025-05-01', 188)")
+    for i in range(25):  # a month of hard-ish days around 188, then an easy day
+        tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (date('2025-05-30', ?), 188)", (f"-{i} days",))
     tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES ('2025-06-01', 108)")  # easy day
     tmp_db.commit()
     assert _hr_ceiling(tmp_db, "2025-06-01") == 188.0
+
+
+def test_hr_ceiling_needs_enough_observations(tmp_db):
+    # With few days the 95th percentile is just the maximum, so one spike would set it.
+    from app.readiness import _hr_ceiling, robust_max_hr
+    for i, v in enumerate([165, 166, 164, 225, 167]):  # 225 is an optical glitch
+        tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (date('2025-06-01', ?), ?)", (f"-{i} days", v))
+    tmp_db.commit()
+    assert robust_max_hr(tmp_db, "2025-06-01") is None
+    assert _hr_ceiling(tmp_db, "2025-06-01") == 190.0
 
 
 def test_hr_ceiling_falls_back_when_no_credible_peak(tmp_db):
@@ -251,7 +262,8 @@ def test_strain_uses_personal_hr_ceiling_not_flat_190(tmp_db):
     from unittest.mock import patch
     from app import calibration
 
-    tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES ('2025-05-20', 178)")
+    for i in range(25):
+        tmp_db.execute("INSERT INTO daily_metrics(date, max_hr) VALUES (date('2025-05-30', ?), 178)", (f"-{i} days",))
     tmp_db.execute(
         "INSERT INTO activities(date, start_time, duration_s, avg_hr, type, canonical_source) "
         "VALUES ('2025-06-01','2025-06-01T08:00:00+00:00',3600,150,'running','garmin')"
