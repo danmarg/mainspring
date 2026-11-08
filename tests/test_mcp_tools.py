@@ -728,3 +728,21 @@ def test_routines_contain_no_personal_details():
         assert not re.search(r"\b20\d{2}-\d{2}-\d{2}\b", text), path.name
         assert not re.search(r"-?\d{1,3}\.\d{3,},\s*-?\d{1,3}\.\d{3,}", text), path.name
         assert not re.search(r"https?://", text), path.name
+
+
+def test_legacy_claims_without_lease_columns_become_reclaimable(tmp_path):
+    """A recommendation_claims table from before leases (no token/expiry columns) must
+    migrate to rows that a new run can take over, not ones that stay locked forever."""
+    import app.db as dbm
+    path = tmp_path / "legacy.db"
+    dbm.init_db(path)
+    conn = sqlite3.connect(str(path))
+    conn.execute("DROP TABLE recommendation_claims")
+    conn.execute("CREATE TABLE recommendation_claims (date TEXT NOT NULL, kind TEXT NOT NULL, "
+                 "claimed_at TEXT NOT NULL, note TEXT, PRIMARY KEY (date, kind))")
+    conn.execute("INSERT INTO recommendation_claims VALUES ('2026-11-01','daily_workout','2026-11-01T07:00:00+00:00',NULL)")
+    conn.commit()
+    dbm._add_missing_columns(conn)
+    row = conn.execute("SELECT token, lease_expires_at, completed_at FROM recommendation_claims").fetchone()
+    assert row == (None, "2026-11-01T07:00:00+00:00", None)
+    conn.close()

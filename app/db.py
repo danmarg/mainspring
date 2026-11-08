@@ -202,6 +202,13 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     for col, col_type in (("token", "TEXT"), ("lease_expires_at", "TEXT"), ("completed_at", "TEXT")):
         if existing and col not in existing:
             conn.execute(f"ALTER TABLE recommendation_claims ADD COLUMN {col} {col_type}")
+            if col == "lease_expires_at":
+                # Claims written before leases existed have no expiry and no owner token,
+                # so nothing could ever release, complete or take them over. Make them
+                # unambiguously expired (as of when they were claimed) so a later run can
+                # reclaim them. Runs only when the column is first added.
+                conn.execute("UPDATE recommendation_claims SET lease_expires_at = claimed_at "
+                             "WHERE lease_expires_at IS NULL")
 
     existing = {row[1] for row in conn.execute("PRAGMA table_info(manual_logs)")}
     for col, col_type in _ADDED_MANUAL_LOGS_COLUMNS:
