@@ -81,24 +81,44 @@ Only if a device/calendar connector is available; otherwise go to step 4. Tool n
 - Rest day: schedule nothing.
 
 ### 4. Send the email
-Send directly with `Gmail:send_message` (not a draft) to **the recipient**, subject `Daily Workout`. Send an `htmlBody` using only `<b>`, `<p>`, `<br>`, `<ul>` and `<li>` (no headings, colors or styling), plus a plain-text `body` with the same content as a fallback. No greetings or sign-offs.
+Send directly with `Gmail:send_message` (not a draft) to **the recipient**, subject `Daily Workout`. No greetings or sign-offs. Send two bodies with the same content:
+- `htmlBody` — glanceable, styled with **inline `style=""` attributes only** (Gmail strips `<style>` blocks). Use `<table role="presentation">` for any side-by-side layout (the status strip); no flexbox, grid, SVG, images or scripts. Keep the width ≤ 600px. Leave the page background unset so it works in dark mode: colored elements use a solid fill with white or near-black text chosen for contrast, never colored text on an unset background.
+- `body` — plain-text fallback with the same information: emojis kept, text bars instead of colors, no markup.
 
-Layout (omit any optional section that has nothing to say):
+**Color is never the only signal.** Every colored element also carries a word or number.
 
-**1. Headline (required)** — bold label, then exactly one of:
-- `<b>Target workout:</b> [session, with zone or pace targets, e.g. "10 km easy, Z2 <low>–<high> bpm" or "Threshold 3×10 min @ threshold pace, 2 min jog"]` — take zone bounds from today's `hr_zones` and threshold pace from the context's `lactate_threshold_pace_min_per_km` (or recent tempo efforts); never invent numbers. Put any one-line execution cue (e.g. a HR ceiling, "walk if HR drifts above it") on the next line, not in the headline.
+**Palette.** Use the `color` field returned by the data for readiness (`readiness.color`) and illness risk (`illness_risk.color`) so the email matches the dashboard. For everything else use this fixed map; do not invent hex values:
+- good / easy / go: `#2ecc71` · ready: `#3498db` · caution / moderate: `#f39c12` · low: `#e67e22` · stop / rest: `#e74c3c` · no data: `#888888`
+- Heads-up background: `#fff4d6` with near-black text.
+
+**Session emoji:** 🏃 easy or easy + strides · 🛣️ long run · ⚡ threshold, tempo or intervals · 🏋️ strength · 😴 rest. The workout card's left border (4px solid) uses the session's accent: easy/long/strength → `#2ecc71`, quality → `#e67e22`, rest → `#e74c3c`.
+
+Layout, top to bottom (omit any optional section that has nothing to say):
+
+**1. Status strip (required)** — one table row of 3–4 pills (rounded, solid fill, white bold text), each `emoji + number + word`. In order, skipping any with no data:
+- 🟢/🔵/🟡/🟠/🔴-style readiness pill: `Readiness <score> · <label>` filled with `readiness.color`
+- `😴 Sleep <h>h<mm>` — filled green when sleep meets need, amber when somewhat short, red when well short
+- `❤️ HRV <▲|▬|▼> <normal|low|high>` — green / amber / red by the guide's HRV bands
+- `🩺 Illness risk <green|yellow|red>` filled with `illness_risk.color`
+
+**2. Workout card (required)** — a block with the left border above. First line: the session emoji, then bold label, then exactly one of:
+- `<b>Target workout:</b> [session, with zone or pace targets, e.g. "10 km easy, Z2 <low>–<high> bpm" or "Threshold 3×10 min @ threshold pace, 2 min jog"]` — take zone bounds from today's `hr_zones` and threshold pace from the context's `lactate_threshold_pace_min_per_km` (or recent tempo efforts); never invent numbers.
 - `<b>Target workout:</b> Strength session (~30 min) — [loaded / plyometric emphasis]`
 - `<b>Take a rest day</b>`
 
-**2. Why (required)** — `<b>Why</b>` then 2–4 bullets, in this order, each starting with a bold label: **Phase** (where the athlete is relative to events), **Recovery** (readiness, resting HR vs baseline, sleep), **Quality** or **Week** (quality sessions done/remaining, volume vs target, and why a quality session was or wasn't chosen), and **Weather** only if it drove the call.
+Under it: the distance/duration in a larger font (e.g. `font-size:22px;font-weight:bold`), and, for runs, a compact line of zone and pace targets. Put any one-line execution cue (e.g. a HR ceiling, "walk if HR drifts above it") last, not in the headline.
 
-**3. Heads-up (optional)** — `<b>Heads-up</b>` then bullets, only for things the athlete should discount or double-check: a `consistency_checks` conflict, estimated zones (say so when `hr_zones_source` is not the device's own), an HRV source switch, or missing data.
+**3. Week at a glance (optional)** — one line: volume against target as a text bar plus numbers, e.g. `📈 ▰▰▰▰▱▱ <done> / <target> km`, then `· quality <done> of <planned>`. Optionally append a 7-day readiness trend as colored emoji squares (🟩🟦🟨🟧🟥, one per day, oldest first, matching the readiness bands) — no SVG or images.
 
-**4. Calendar & watch (optional)** — one line: an existing calendar entry that was left untouched or replaced, or that nothing was pushed to a device.
+**4. Why (required)** — `<b>Why</b>` then 2–4 bullets, in this order, each starting with an emoji and a bold label: 🗓️ **Phase** (where the athlete is relative to events), 💤 **Recovery** (readiness, resting HR vs baseline, sleep), 📈 **Quality** or **Week** (quality sessions done/remaining, volume vs target, and why a quality session was or wasn't chosen), and 🌦️ **Weather** only if it drove the call.
 
-**5. Weather (one line)** — the conditions that matter, or "not checked".
+**5. Heads-up (optional)** — a block with the `#fff4d6` background: `⚠️ <b>Heads-up</b>` then bullets, only for things the athlete should discount or double-check: a `consistency_checks` conflict, estimated zones (say so when `hr_zones_source` is not the device's own), an HRV source switch, or missing data.
+
+**6. Calendar & watch (optional)** — one line prefixed `⌚`: an existing calendar entry that was left untouched or replaced, or that nothing was pushed to a device.
+
+**7. Weather (one line)** — a condition emoji (☀️ 🌤️ ☁️ 🌧️ ⛈️ ❄️ 💨 🥵) followed by the conditions that matter, e.g. `🌤️ 12°C · 💨 15 km/h · 🌧️ 10% · best window 7–9am`; prefix active alerts with ⚠️. If weather was not checked, say `🌡️ Weather: not checked`.
 
 ### 5. Constraints
 - If Mainspring or device data is unavailable or incomplete (but sleep data is present), default to a conservative easy run (30–40 min, zone 2) or rest, never a quality session, and say what was missing.
-- Send directly; never leave a draft. Use the step 4 layout; never invent sections.
+- Send directly; never leave a draft. Use the step 4 layout and palette; never invent sections or colors.
 - If sending fails, call `Mainspring:release_daily_recommendation(token=<token>, date=<same date>)` before exiting.
