@@ -1486,6 +1486,79 @@ def get_workout_context(date: Optional[str] = None, hrv_window: int = 7) -> dict
     }
 
 
+@mcp.tool()
+def render_daily_email(
+    date: str,
+    session_type: str,
+    headline: str = "",
+    distance_line: Optional[str] = None,
+    targets: Optional[str] = None,
+    cue: Optional[str] = None,
+    why: Optional[list[str]] = None,
+    heads_up: Optional[list[str]] = None,
+    calendar_line: Optional[str] = None,
+    weather_line: Optional[str] = None,
+) -> dict:
+    """Render the daily workout email. Returns {subject, html, text} to pass to the mail
+    tool unchanged (subject, htmlBody=html, body=text); never edit the markup.
+
+    The server fills in everything data-derived itself (readiness, sleep, HRV, illness
+    risk, week volume, 7-day readiness trend) and owns all HTML, colors and text contrast
+    — pass only your own decisions and prose. `date` is required: use the athlete's local
+    date, the same one passed to claim_daily_recommendation.
+
+    session_type: easy | easy_strides | long | quality | strength | rest.
+    headline: the session, e.g. "10 km easy" (ignored for rest). distance_line: the big
+    line, e.g. "10 km · ~60 min". targets: zone/pace line, e.g. "Z2 <low>–<high> bpm" —
+    from hr_zones / lactate_threshold_pace, never invented. cue: one-line execution cue.
+    why: 2-4 strings, each "Label: text" with label Phase | Recovery | Quality | Week |
+    Weather. heads_up: things to discount or double-check. calendar_line: calendar/watch
+    note. weather_line: one line starting with a condition emoji.
+
+    Returns {"error": ...} (nothing rendered) for an invalid date or session_type."""
+    from app.email_render import SESSION_TYPES, readiness_squares, render_daily_email as _render
+    from app.readiness import readiness_from_db
+
+    try:
+        day = datetime.strptime(date, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return {"error": f"invalid date {date!r}; expected YYYY-MM-DD"}
+    if session_type not in SESSION_TYPES:
+        return {"error": f"unknown session_type {session_type!r}", "available": sorted(SESSION_TYPES)}
+
+    try:
+        ctx = get_workout_context(date)
+    except Exception:
+        log.exception("render_daily_email: workout context failed")
+        ctx = {}
+
+    squares = None
+    try:
+        with db() as conn:
+            scores = [
+                readiness_from_db(conn, (day - timedelta(days=i)).isoformat()).get("score")
+                for i in range(6, -1, -1)
+            ]
+        if any(s is not None for s in scores):
+            squares = readiness_squares(scores)
+    except Exception:
+        log.exception("render_daily_email: readiness trend failed")
+
+    return _render(
+        ctx,
+        session_type=session_type,
+        headline=headline,
+        distance_line=distance_line,
+        targets=targets,
+        cue=cue,
+        why=why,
+        heads_up=heads_up,
+        calendar_line=calendar_line,
+        weather_line=weather_line,
+        trend_squares=squares,
+    )
+
+
 def _unit_for(metric: str) -> str:
     units = {
         "alcohol_units": "units of alcohol",

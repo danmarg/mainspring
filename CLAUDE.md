@@ -94,6 +94,7 @@ delete_log(log_id)
 get_logs(start_date, end_date, type?)
 get_daily_metrics(start_date, end_date)
 get_suggested_workout(date?)
+render_daily_email(date, session_type, headline?, ...)  # renders {subject, html, text} for the routine; date required
 get_workout_context(date?)                         # includes hr_zones_source + consistency_checks
 claim_daily_recommendation(date?, kind?)           # atomic 2-hour lease per (date, kind); returns an owner token
 complete_daily_recommendation(token, date?, kind?)  # mark sent; the claim then never expires
@@ -102,7 +103,7 @@ get_source_config()
 set_source_preference(metric, source)
 ```
 
-The MCP server is a data layer only — it does not fetch weather or send emails. Claude's existing weather+workout email routine calls `get_daily_metrics` / `get_suggested_workout` here instead of querying Garmin directly. Claude handles visual estimation for food photos and calls `log_meal` with the structured result; the server never handles image bytes.
+The MCP server is a data layer — it does not fetch weather or send emails. It does *render* the daily email (`render_daily_email` → `app/email_render.py`): the routine passes only its own decisions and prose, the server fills in the data-derived parts and owns all markup, colors and text contrast, and the routine hands the result to Gmail unchanged. Claude's existing weather+workout email routine calls `get_daily_metrics` / `get_suggested_workout` here instead of querying Garmin directly. Claude handles visual estimation for food photos and calls `log_meal` with the structured result; the server never handles image bytes.
 
 ## Garmin library
 
