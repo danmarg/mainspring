@@ -130,7 +130,8 @@ def _pill_cell(text: str, fill: str) -> str:
     return (
         f'<td bgcolor="{fill}" style="background-color:{fill};color:{text_on(fill)};'
         f'padding:6px 12px;border-radius:14px;font-weight:bold;font-size:13px;'
-        f'white-space:nowrap">{_esc(text)}</td>'
+        f'white-space:nowrap"><font color="{text_on(fill)}" style="color:{text_on(fill)}">'
+        f'{_esc(text)}</font></td>'
     )
 
 
@@ -223,8 +224,13 @@ def render_daily_email(
         title_txt = f"Target workout: {headline}"
 
     # ── html ──
-    h = ['<div style="max-width:600px;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;'
-         'font-size:15px;line-height:1.45">']
+    # Pin a light scheme: clients that auto-darken (Gmail/iOS Mail dark mode) otherwise flip our
+    # explicit dark text to white while leaving the light fills, giving white-on-light pills.
+    h = [f'<div style="background-color:{WHITE};color:{BLACK};color-scheme:light only;'
+         'max-width:600px;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;'
+         'font-size:15px;line-height:1.45">'
+         '<meta name="color-scheme" content="light only">'
+         '<meta name="supported-color-schemes" content="light only">']
     if pills:
         h.append(_pill_table(pills))
     card = [f'<div style="font-size:16px">{emoji} {title_html}</div>']
