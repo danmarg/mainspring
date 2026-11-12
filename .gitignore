@@ -14,3 +14,4 @@ analysis/*.db
 *.swo
 .claude/
 google_health_tokens.json
+uv.lock
