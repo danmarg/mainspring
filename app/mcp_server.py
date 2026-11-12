@@ -822,7 +822,13 @@ def release_daily_recommendation(token: str, date: Optional[str] = None,
     """Undo a claim — only when the claiming run failed before sending anything, so a
     later run can retry at once instead of waiting for the lease to expire. token is the
     one claim_daily_recommendation returned; only the current owner can release, so a
-    late release from an earlier run can't delete a later run's claim."""
+    late release from an earlier run can't delete a later run's claim.
+
+    Releasing a daily_workout claim also re-arms the morning webhook for that date, so the
+    next import can fire the routine again (otherwise the once-per-day webhook row would
+    leave a run that aborted, e.g. on unfinished sleep data, with no retry). Re-arming stops
+    at MORNING_WEBHOOK_REARM_UNTIL_HOUR (default 12, home time) so a routine that keeps
+    aborting can't re-fire all day."""
     d = _date_or_today(date)
     with db() as conn:
         n = conn.execute(
@@ -830,6 +836,14 @@ def release_daily_recommendation(token: str, date: Optional[str] = None,
             "WHERE date=? AND kind=? AND token=? AND completed_at IS NULL",
             (d, kind, token),
         ).rowcount
+        if n and kind == "daily_workout":
+            try:
+                tz = ZoneInfo(os.getenv("HOME_TZ", "UTC"))
+            except ZoneInfoNotFoundError:
+                tz = ZoneInfo("UTC")
+            local = datetime.now(timezone.utc).astimezone(tz)
+            if local.hour < int(os.getenv("MORNING_WEBHOOK_REARM_UNTIL_HOUR", "12")):
+                conn.execute("DELETE FROM morning_webhooks WHERE date=?", (d,))
     return f"Released {kind} for {d}" if n else f"No open {kind} claim for {d} with that token"
 
 
@@ -1587,8 +1601,9 @@ planning, and recommendations. The server never fetches weather or sends message
    retries, repeated syncs), call `claim_daily_recommendation()` first and stop
    silently unless it returns `claimed: true`; keep the returned `token`. The claim is a
    2-hour lease: after sending, call `complete_daily_recommendation(token)`; if the
-   run fails before sending, call `release_daily_recommendation(token)` so a later run
-   can retry. An unfinished claim expires and can be taken over. This is at-least-once,
+   run fails before sending (or stops because the data isn't ready, e.g. unfinished
+   sleep), call `release_daily_recommendation(token)` so a later run can retry — it also
+   re-arms the morning webhook, so the next import fires the routine again (until noon). An unfinished claim expires and can be taken over. This is at-least-once,
    not exactly-once: a send that succeeded but whose completion was lost can repeat.
 
 1. Call `get_workout_context()` — one call returns everything needed:
