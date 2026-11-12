@@ -746,3 +746,30 @@ def test_legacy_claims_without_lease_columns_become_reclaimable(tmp_path):
     row = conn.execute("SELECT token, lease_expires_at, completed_at FROM recommendation_claims").fetchone()
     assert row == (None, "2026-11-01T07:00:00+00:00", None)
     conn.close()
+
+
+def test_release_rearms_morning_webhook(monkeypatch):
+    from app.mcp_server import claim_daily_recommendation, release_daily_recommendation
+    from app.db import db
+    monkeypatch.setenv("MORNING_WEBHOOK_REARM_UNTIL_HOUR", "24")
+    with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO morning_webhooks(date, sent_at) VALUES ('2026-11-11','x')")
+    c = claim_daily_recommendation(date="2026-11-11")
+    release_daily_recommendation("wrong-token", date="2026-11-11")
+    with db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM morning_webhooks WHERE date='2026-11-11'").fetchone()[0] == 1
+    release_daily_recommendation(c["token"], date="2026-11-11")
+    with db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM morning_webhooks WHERE date='2026-11-11'").fetchone()[0] == 0
+
+
+def test_release_after_cutoff_does_not_rearm(monkeypatch):
+    from app.mcp_server import claim_daily_recommendation, release_daily_recommendation
+    from app.db import db
+    monkeypatch.setenv("MORNING_WEBHOOK_REARM_UNTIL_HOUR", "0")
+    with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO morning_webhooks(date, sent_at) VALUES ('2026-11-12','x')")
+    c = claim_daily_recommendation(date="2026-11-12")
+    release_daily_recommendation(c["token"], date="2026-11-12")
+    with db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM morning_webhooks WHERE date='2026-11-12'").fetchone()[0] == 1
